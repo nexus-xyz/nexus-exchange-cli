@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use nexus_exchange::Client;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, OutputFormat};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
     }
 
     let client = Client::new(cli.config());
+    let format = cli.output;
 
     match cli.command {
         Command::Markets => {
@@ -28,21 +29,30 @@ async fn main() -> Result<()> {
                 .fetch_markets()
                 .await
                 .context("failed to fetch markets")?;
-            println!("{}", output::markets(&markets));
+            match format {
+                OutputFormat::Human => println!("{}", output::markets(&markets)),
+                OutputFormat::Json => println!("{}", output::markets_json(&markets)),
+            }
         }
         Command::Ticker { market_id } => {
             let ticker = client
                 .fetch_ticker(&market_id)
                 .await
                 .with_context(|| format!("failed to fetch ticker for {market_id}"))?;
-            println!("{}", output::ticker(&ticker));
+            match format {
+                OutputFormat::Human => println!("{}", output::ticker(&ticker)),
+                OutputFormat::Json => println!("{}", output::ticker_json(&ticker)),
+            }
         }
         Command::Health => {
             let health = client
                 .health_check()
                 .await
                 .context("failed to fetch health status")?;
-            println!("{}", output::health(&health));
+            match format {
+                OutputFormat::Human => println!("{}", output::health(&health)),
+                OutputFormat::Json => println!("{}", output::health_json(&health)),
+            }
         }
     }
 

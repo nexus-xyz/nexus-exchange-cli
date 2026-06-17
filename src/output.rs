@@ -4,6 +4,7 @@
 //! than re-serializing.
 
 use nexus_exchange::types::{HealthStatus, Market, Ticker};
+use serde_json::{json, Value};
 
 /// Render the markets list as an aligned table.
 pub fn markets(markets: &[Market]) -> String {
@@ -77,4 +78,70 @@ pub fn health(h: &HealthStatus) -> String {
 /// Format an optional value, showing `-` when absent.
 fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|d| d.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+/// Render the markets list as pretty JSON.
+pub fn markets_json(markets: &[Market]) -> String {
+    let value: Value = markets
+        .iter()
+        .map(|m| {
+            json!({
+                "market_id": m.market_id,
+                "tick_size": m.tick_size.to_string(),
+                "lot_size": m.lot_size.to_string(),
+                "min_order_size": m.min_order_size.to_string(),
+                "max_order_size": m.max_order_size.to_string(),
+                "max_leverage": m.max_leverage,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render a single ticker as pretty JSON.
+pub fn ticker_json(t: &Ticker) -> String {
+    let value = json!({
+        "symbol": t.symbol,
+        "datetime": t.datetime,
+        "last": opt_json(t.last),
+        "mark_price": opt_json(t.mark_price),
+        "index_price": opt_json(t.index_price),
+        "bid": opt_json(t.bid),
+        "ask": opt_json(t.ask),
+        "high": opt_json(t.high),
+        "low": opt_json(t.low),
+        "open": opt_json(t.open),
+        "close": opt_json(t.close),
+        "change": opt_json(t.change),
+        "percentage": opt_json(t.percentage),
+        "base_volume": opt_json(t.base_volume),
+        "quote_volume": opt_json(t.quote_volume),
+    });
+    pretty(&value)
+}
+
+/// Render the health snapshot as pretty JSON.
+pub fn health_json(h: &HealthStatus) -> String {
+    let value = json!({
+        "health": h.health.clone().unwrap_or_else(|| "unknown".into()),
+        "connected": h.connected,
+        "events_received": h.events_received,
+        "fills_total": h.fills_total,
+        "uptime_seconds": h.uptime_seconds,
+    });
+    pretty(&value)
+}
+
+/// Render an optional value as a JSON string, or `null` when absent.
+fn opt_json<T: std::fmt::Display>(v: Option<T>) -> Value {
+    match v {
+        Some(d) => Value::String(d.to_string()),
+        None => Value::Null,
+    }
+}
+
+/// Pretty-print a JSON value. `serde_json` only fails to serialize on types it
+/// cannot represent; the values built here are always representable.
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).expect("JSON value is always serializable")
 }
