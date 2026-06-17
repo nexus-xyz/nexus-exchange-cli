@@ -1,0 +1,25 @@
+[package]
+name = "nexus-exchange-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Command-line interface for the Nexus Exchange API"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nexus-xyz/nexus-exchange-cli"
+keywords = ["nexus", "exchange", "trading", "crypto", "cli"]
+categories = ["command-line-utilities"]
+publish = false
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[dependencies]
+# The Nexus Exchange SDK. The crate is not yet on crates.io (it ships with
+# `publish = false`), so we depend on it from git, pinned to `main`. Swap this
+# for a `version = "x.y"` line once the SDK is published.
+nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", branch = "main" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
