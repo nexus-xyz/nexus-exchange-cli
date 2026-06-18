@@ -39,6 +39,23 @@ nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 | `--network <stable\|beta\|local>` | `NEXUS_NETWORK` | `stable` |
 | `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
 
+### Output format
+
+By default commands print human-readable tables. Pass `--output json` (or set
+`NEXUS_OUTPUT=json`) to emit pretty-printed JSON instead — handy for scripting
+and piping into tools like `jq`. This works for `markets`, `ticker`, and
+`health`.
+
+```sh
+nexus --output json markets
+NEXUS_OUTPUT=json nexus ticker BTC-USDX-PERP
+nexus --output json health | jq .
+```
+
+| Flag | Env | Default |
+|---|---|---|
+| `--output <human\|json>` | `NEXUS_OUTPUT` | `human` |
+
 ### Credentials
 
 API credentials are read from flags or the environment. The market-data

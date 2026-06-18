@@ -656,6 +656,7 @@ dependencies = [
  "anyhow",
  "clap",
  "nexus-exchange",
+ "serde_json",
  "tokio",
 ]
 

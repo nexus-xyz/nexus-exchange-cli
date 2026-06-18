@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEXUS_BASE_URL")]
     pub base_url: Option<String>,
 
+    /// Output format: human-readable tables or pretty JSON.
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Human, env = "NEXUS_OUTPUT")]
+    pub output: OutputFormat,
+
     #[command(flatten)]
     pub credentials: Credentials,
 
@@ -53,6 +57,15 @@ pub enum NetworkArg {
     Beta,
     /// Local development server.
     Local,
+}
+
+/// How command results are rendered to stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable, aligned tables (the default).
+    Human,
+    /// Pretty-printed JSON.
+    Json,
 }
 
 impl From<NetworkArg> for Network {
@@ -125,6 +138,23 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(base_url(&cli), "http://x:1");
+    }
+
+    #[test]
+    fn defaults_to_human_output() {
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::Human);
+    }
+
+    #[test]
+    fn parses_output_json() {
+        let cli = Cli::try_parse_from(["nexus", "--output", "json", "markets"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn rejects_unknown_output() {
+        assert!(Cli::try_parse_from(["nexus", "--output", "yaml", "markets"]).is_err());
     }
 
     #[test]
