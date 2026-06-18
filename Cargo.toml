@@ -22,5 +22,6 @@ nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", branc
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

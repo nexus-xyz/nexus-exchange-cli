@@ -73,6 +73,27 @@ export NEXUS_API_SECRET=...
 nexus markets
 ```
 
+### Shell completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+# Bash
+nexus completions bash > ~/.local/share/bash-completion/completions/nexus
+
+# Zsh
+nexus completions zsh > ~/.zfunc/_nexus   # ensure ~/.zfunc is in $fpath
+
+# Fish
+nexus completions fish > ~/.config/fish/completions/nexus.fish
+
+# PowerShell
+nexus completions powershell >> $PROFILE
+
+# Elvish
+nexus completions elvish >> ~/.elvish/rc.elv
+```
+
 ## Development
 
 ```sh
