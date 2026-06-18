@@ -3,6 +3,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use nexus_exchange::{Config, Network};
 
+// Re-export for use in main.rs.
+pub use clap_complete::Shell;
+
 /// Command-line interface for the Nexus Exchange API.
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version, about, long_about = None)]
@@ -101,6 +104,12 @@ pub enum Command {
 
     /// Show the indexer health/status snapshot.
     Health,
+
+    /// Print shell-completion script to stdout.
+    Completions {
+        /// Target shell.
+        shell: Shell,
+    },
 }
 
 #[cfg(test)]
@@ -165,5 +174,29 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
         assert!(cli.credentials.is_complete());
+    }
+
+    #[test]
+    fn completions_parses_bash() {
+        let cli = Cli::try_parse_from(["nexus", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell: Shell::Bash }
+        ));
+    }
+
+    #[test]
+    fn completions_generates_without_panic() {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut buf);
+            assert!(!buf.is_empty(), "completion script for {shell:?} was empty");
+        }
     }
 }

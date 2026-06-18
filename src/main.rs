@@ -4,7 +4,7 @@ mod cli;
 mod output;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use nexus_exchange::Client;
 
 use cli::{Cli, Command, OutputFormat};
@@ -12,6 +12,13 @@ use cli::{Cli, Command, OutputFormat};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Shell completions need neither network nor credentials — generate and exit
+    // before constructing the client or emitting credential warnings.
+    if let Command::Completions { shell } = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut std::io::stdout());
+        return Ok(());
+    }
 
     // Credentials are accepted but not yet consumed: every command below hits a
     // public, unauthenticated endpoint. Flag it so a user who supplied half a
@@ -54,6 +61,7 @@ async fn main() -> Result<()> {
                 OutputFormat::Json => println!("{}", output::health_json(&health)),
             }
         }
+        Command::Completions { .. } => unreachable!("handled above"),
     }
 
     Ok(())
