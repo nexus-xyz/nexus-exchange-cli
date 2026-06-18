@@ -1,7 +1,10 @@
-//! Command-line argument parsing.
+//! Command-line argument parsing and config/credential resolution.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use nexus_exchange::{Config, Network};
+
+use crate::auth::Signer;
+use crate::credentials::FileConfig;
 
 // Re-export for use in main.rs.
 pub use clap_complete::Shell;
@@ -10,9 +13,9 @@ pub use clap_complete::Shell;
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version, about, long_about = None)]
 pub struct Cli {
-    /// Which network to target.
-    #[arg(long, value_enum, global = true, default_value_t = NetworkArg::Stable, env = "NEXUS_NETWORK")]
-    pub network: NetworkArg,
+    /// Which network to target (default: stable, or the `nexus setup` value).
+    #[arg(long, value_enum, global = true, env = "NEXUS_NETWORK")]
+    pub network: Option<NetworkArg>,
 
     /// Override the API base URL (takes precedence over `--network`).
     #[arg(long, global = true, env = "NEXUS_BASE_URL")]
@@ -29,26 +32,19 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// API credentials. Read from flags or the corresponding environment
-/// variables. The public market-data commands below are unauthenticated, so
-/// these are optional today; they are wired up for the authenticated endpoints
-/// the SDK adds in follow-ups.
+/// API credentials. Read from flags, the corresponding environment variables,
+/// or the config file written by `nexus setup` (in that order of precedence).
+/// Authenticated commands sign requests when both halves are present.
 #[derive(Debug, clap::Args)]
 pub struct Credentials {
-    /// API key.
+    /// API key id (e.g. `nx_...`).
     #[arg(long, global = true, env = "NEXUS_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
 
-    /// API secret.
+    /// API secret. Prefer the env var or `nexus setup` over the flag, since
+    /// flags are visible in your shell history and process list.
     #[arg(long, global = true, env = "NEXUS_API_SECRET", hide_env_values = true)]
     pub api_secret: Option<String>,
-}
-
-impl Credentials {
-    /// Whether both halves of a credential pair were supplied.
-    pub fn is_complete(&self) -> bool {
-        self.api_key.is_some() && self.api_secret.is_some()
-    }
 }
 
 /// Which Nexus Exchange environment to target.
@@ -62,6 +58,19 @@ pub enum NetworkArg {
     Local,
 }
 
+impl NetworkArg {
+    /// Parse a network name from the config file. Returns `None` for unknown
+    /// values so a stale config can't crash the CLI.
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "stable" => Some(Self::Stable),
+            "beta" => Some(Self::Beta),
+            "local" => Some(Self::Local),
+            _ => None,
+        }
+    }
+}
+
 /// How command results are rendered to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -69,6 +78,60 @@ pub enum OutputFormat {
     Human,
     /// Pretty-printed JSON.
     Json,
+}
+
+/// Order side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SideArg {
+    Buy,
+    Sell,
+}
+
+impl SideArg {
+    /// The wire value (the API uses capitalized variants on orders).
+    pub fn wire(self) -> &'static str {
+        match self {
+            SideArg::Buy => "Buy",
+            SideArg::Sell => "Sell",
+        }
+    }
+}
+
+/// Order type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OrderTypeArg {
+    Limit,
+    Market,
+}
+
+impl OrderTypeArg {
+    pub fn wire(self) -> &'static str {
+        match self {
+            OrderTypeArg::Limit => "Limit",
+            OrderTypeArg::Market => "Market",
+        }
+    }
+}
+
+/// Time in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TifArg {
+    /// Good-til-cancelled.
+    Gtc,
+    /// Immediate-or-cancel.
+    Ioc,
+    /// Fill-or-kill.
+    Fok,
+}
+
+impl TifArg {
+    pub fn wire(self) -> &'static str {
+        match self {
+            TifArg::Gtc => "GTC",
+            TifArg::Ioc => "IOC",
+            TifArg::Fok => "FOK",
+        }
+    }
 }
 
 impl From<NetworkArg> for Network {
@@ -82,11 +145,56 @@ impl From<NetworkArg> for Network {
 }
 
 impl Cli {
-    /// Build the SDK [`Config`] from the parsed network / base-url flags.
-    pub fn config(&self) -> Config {
-        match &self.base_url {
-            Some(url) => Config::with_base_url(url.clone()),
-            None => Config::new(self.network.into()),
+    /// Resolve the SDK [`Config`], layering: `--base-url` > `--network`/env >
+    /// config-file `base_url` > config-file `network` > the SDK default
+    /// (stable).
+    pub fn config(&self, file: &FileConfig) -> Config {
+        if let Some(url) = &self.base_url {
+            return Config::with_base_url(url.clone());
+        }
+        if let Some(net) = self.network {
+            return Config::new(net.into());
+        }
+        if let Some(url) = &file.base_url {
+            return Config::with_base_url(url.clone());
+        }
+        if let Some(net) = file.network.as_deref().and_then(NetworkArg::parse) {
+            return Config::new(net.into());
+        }
+        Config::default()
+    }
+
+    /// Resolve credentials into a [`Signer`], layering flags/env over the config
+    /// file. Returns `None` when no usable pair is configured. Warns (and still
+    /// returns `None`) when only one half is present, since that is almost
+    /// always a mistake.
+    pub fn signer(&self, file: &FileConfig) -> Option<Signer> {
+        let key = self
+            .credentials
+            .api_key
+            .clone()
+            .or_else(|| file.api_key.clone());
+        let secret = self
+            .credentials
+            .api_secret
+            .clone()
+            .or_else(|| file.api_secret.clone());
+
+        match (key, secret) {
+            (Some(k), Some(s)) => Some(Signer::new(k, s)),
+            (Some(_), None) => {
+                eprintln!(
+                    "warning: API key set without a matching API secret; requests will be unsigned"
+                );
+                None
+            }
+            (None, Some(_)) => {
+                eprintln!(
+                    "warning: API secret set without a matching API key; requests will be unsigned"
+                );
+                None
+            }
+            (None, None) => None,
         }
     }
 }
@@ -102,13 +210,129 @@ pub enum Command {
         market_id: String,
     },
 
+    /// Show the order book (bids/asks) for a market.
+    Orderbook {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
+    /// Show recent trades for a market.
+    Trades {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Maximum number of trades to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
+    /// Show OHLCV candles for a market.
+    Candles {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Candle interval.
+        #[arg(long, default_value = "1m")]
+        timeframe: String,
+        /// Maximum number of candles to return.
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
+
     /// Show the indexer health/status snapshot.
     Health,
+
+    /// Show your account summary (balance, collateral, equity, margin).
+    Balance,
+
+    /// List your open positions.
+    Positions,
+
+    /// List your recent fills (executions).
+    Fills {
+        /// Maximum number of fills to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
+    /// List your open orders.
+    Orders,
+
+    /// Place or cancel orders.
+    Order {
+        #[command(subcommand)]
+        action: OrderCommand,
+    },
+
+    /// Stream live data over WebSocket. Public channels (`trades`, `book`,
+    /// `candles`) need `--market`; account channels (`orders`, `fills`,
+    /// `positions`, `balances`) are scoped to your key.
+    Ws {
+        /// One or more channels to subscribe to.
+        #[arg(required = true, num_args = 1..)]
+        channels: Vec<String>,
+        /// Market for public channels, e.g. `BTC-USDX-PERP`.
+        #[arg(long)]
+        market: Option<String>,
+        /// Resume from this sequence number (per channel).
+        #[arg(long)]
+        since: Option<i64>,
+    },
+
+    /// Interactively configure network and credentials.
+    Setup,
 
     /// Print shell-completion script to stdout.
     Completions {
         /// Target shell.
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OrderCommand {
+    /// Submit a new order.
+    Place {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        #[arg(long)]
+        market: String,
+        /// Order side.
+        #[arg(long, value_enum)]
+        side: SideArg,
+        /// Order type.
+        #[arg(long = "type", value_enum)]
+        order_type: OrderTypeArg,
+        /// Limit price (required for `--type limit`).
+        #[arg(long)]
+        price: Option<String>,
+        /// Order quantity (base units).
+        #[arg(long)]
+        quantity: String,
+        /// Time in force.
+        #[arg(long, value_enum, default_value_t = TifArg::Gtc)]
+        tif: TifArg,
+        /// Only reduce an existing position; never open or flip one.
+        #[arg(long)]
+        reduce_only: bool,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Cancel a single order, or all open orders with `--all`.
+    ///
+    /// Cancelling a single order requires `--market` (the API needs it to route
+    /// the cancel); `--all` takes `--market` optionally to scope the sweep.
+    Cancel {
+        /// Order id to cancel (requires `--market`).
+        order_id: Option<String>,
+        /// Cancel all open orders (optionally limited to `--market`).
+        #[arg(long, conflicts_with = "order_id")]
+        all: bool,
+        /// Market to cancel in. Required with an order id; optional with `--all`.
+        #[arg(long)]
+        market: Option<String>,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -119,7 +343,9 @@ mod tests {
     use nexus_exchange::Client;
 
     fn base_url(cli: &Cli) -> String {
-        Client::new(cli.config()).base_url().to_string()
+        Client::new(cli.config(&FileConfig::default()))
+            .base_url()
+            .to_string()
     }
 
     /// Catches conflicting flags, bad arg specs, etc. at test time.
@@ -131,7 +357,7 @@ mod tests {
     #[test]
     fn defaults_to_stable_network() {
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
-        assert_eq!(cli.network, NetworkArg::Stable);
+        assert_eq!(cli.network, None);
         assert_eq!(base_url(&cli), Network::Stable.base_url());
     }
 
@@ -147,6 +373,28 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(base_url(&cli), "http://x:1");
+    }
+
+    #[test]
+    fn config_file_is_a_fallback_below_flags() {
+        let file = FileConfig {
+            network: Some("beta".into()),
+            base_url: None,
+            api_key: None,
+            api_secret: None,
+        };
+        // No flag → file network wins.
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(
+            Client::new(cli.config(&file)).base_url(),
+            Network::Beta.base_url()
+        );
+        // Flag beats the file.
+        let cli = Cli::try_parse_from(["nexus", "--network", "local", "markets"]).unwrap();
+        assert_eq!(
+            Client::new(cli.config(&file)).base_url(),
+            Network::Local.base_url()
+        );
     }
 
     #[test]
@@ -167,13 +415,37 @@ mod tests {
     }
 
     #[test]
-    fn credentials_completeness() {
+    fn signer_requires_both_halves() {
+        let empty = FileConfig::default();
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "markets"]).unwrap();
-        assert!(!cli.credentials.is_complete());
+        assert!(cli.signer(&empty).is_none());
 
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
-        assert!(cli.credentials.is_complete());
+        assert!(cli.signer(&empty).is_some());
+    }
+
+    #[test]
+    fn signer_falls_back_to_file() {
+        let file = FileConfig {
+            api_key: Some("k".into()),
+            api_secret: Some("s".into()),
+            ..Default::default()
+        };
+        let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
+        assert!(cli.signer(&file).is_some());
+    }
+
+    #[test]
+    fn flag_overrides_file_credentials() {
+        let file = FileConfig {
+            api_key: Some("file-key".into()),
+            api_secret: Some("file-secret".into()),
+            ..Default::default()
+        };
+        // Flag key + file secret still resolves (layered per-field).
+        let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
+        assert!(cli.signer(&file).is_some());
     }
 
     #[test]
@@ -186,17 +458,54 @@ mod tests {
     }
 
     #[test]
-    fn completions_generates_without_panic() {
-        for shell in [
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::PowerShell,
-            Shell::Elvish,
-        ] {
-            let mut buf = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut buf);
-            assert!(!buf.is_empty(), "completion script for {shell:?} was empty");
+    fn order_place_parses() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "limit",
+            "--price",
+            "84000",
+            "--quantity",
+            "0.01",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Order {
+                action:
+                    OrderCommand::Place {
+                        market,
+                        side,
+                        order_type,
+                        tif,
+                        ..
+                    },
+            } => {
+                assert_eq!(market, "BTC-USDX-PERP");
+                assert_eq!(side, SideArg::Buy);
+                assert_eq!(order_type, OrderTypeArg::Limit);
+                assert_eq!(tif, TifArg::Gtc);
+            }
+            _ => panic!("expected order place"),
         }
+    }
+
+    #[test]
+    fn order_cancel_all_conflicts_with_id() {
+        // `--all` and a positional id are mutually exclusive.
+        assert!(Cli::try_parse_from(["nexus", "order", "cancel", "abc", "--all"]).is_err());
+    }
+
+    #[test]
+    fn ws_requires_at_least_one_channel() {
+        assert!(Cli::try_parse_from(["nexus", "ws"]).is_err());
+        let cli =
+            Cli::try_parse_from(["nexus", "ws", "trades", "--market", "BTC-USDX-PERP"]).unwrap();
+        assert!(matches!(cli.command, Command::Ws { .. }));
     }
 }

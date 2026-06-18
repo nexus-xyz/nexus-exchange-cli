@@ -3,6 +3,7 @@
 //! The SDK's wire types are deserialize-only, so we format them by hand rather
 //! than re-serializing.
 
+use crate::wire::{Balance, Candle, Fill, Order, OrderBook, OrderResult, Position, Trade};
 use nexus_exchange::types::{HealthStatus, Market, Ticker};
 use serde_json::{json, Value};
 
@@ -144,6 +145,341 @@ fn opt_json<T: std::fmt::Display>(v: Option<T>) -> Value {
 /// cannot represent; the values built here are always representable.
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("JSON value is always serializable")
+}
+
+/// How many book levels / rows to show in human tables before truncating.
+const MAX_ROWS: usize = 20;
+
+// ───────────────────────── order book ─────────────────────────
+
+/// Render the order book as two aligned columns (bids | asks).
+pub fn orderbook(b: &OrderBook) -> String {
+    let mut out = format!("{} order book\n\n", b.symbol);
+    out.push_str(&format!(
+        "{:>14} {:>14}   |  {:>14} {:>14}\n",
+        "BID PRICE", "SIZE", "ASK PRICE", "SIZE"
+    ));
+    let rows = b.bids.len().max(b.asks.len()).min(MAX_ROWS);
+    for i in 0..rows {
+        let bid = b
+            .bids
+            .get(i)
+            .map(|l| format!("{:>14} {:>14}", l[0], l[1]))
+            .unwrap_or_else(|| format!("{:>14} {:>14}", "-", "-"));
+        let ask = b
+            .asks
+            .get(i)
+            .map(|l| format!("{:>14} {:>14}", l[0], l[1]))
+            .unwrap_or_else(|| format!("{:>14} {:>14}", "-", "-"));
+        out.push_str(&format!("{bid}   |  {ask}\n"));
+    }
+    out.push_str(&format!(
+        "\n{} bid level(s), {} ask level(s).",
+        b.bids.len(),
+        b.asks.len()
+    ));
+    out
+}
+
+pub fn orderbook_json(b: &OrderBook) -> String {
+    let levels = |ls: &[Candle2]| -> Value {
+        Value::Array(ls.iter().map(|l| json!([l[0], l[1]])).collect::<Vec<_>>())
+    };
+    // `Candle2` alias keeps the closure type tidy; bids/asks are `[f64; 2]`.
+    let value = json!({
+        "symbol": b.symbol,
+        "timestamp": b.timestamp,
+        "datetime": b.datetime,
+        "bids": levels(&b.bids),
+        "asks": levels(&b.asks),
+    });
+    pretty(&value)
+}
+
+type Candle2 = [f64; 2];
+
+// ───────────────────────── trades ─────────────────────────
+
+pub fn trades(ts: &[Trade]) -> String {
+    if ts.is_empty() {
+        return "No trades returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<6}  {:>14}  {:>14}  {:<24}\n",
+        "SIDE", "PRICE", "AMOUNT", "TIME"
+    );
+    for t in ts {
+        out.push_str(&format!(
+            "{:<6}  {:>14}  {:>14}  {:<24}\n",
+            t.side,
+            t.price,
+            t.amount,
+            t.datetime
+                .clone()
+                .unwrap_or_else(|| t.timestamp.to_string()),
+        ));
+    }
+    out.push_str(&format!("\n{} trade(s).", ts.len()));
+    out
+}
+
+pub fn trades_json(ts: &[Trade]) -> String {
+    let value: Value = ts
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "symbol": t.symbol,
+                "side": t.side,
+                "price": t.price,
+                "amount": t.amount,
+                "cost": t.cost,
+                "timestamp": t.timestamp,
+                "datetime": t.datetime,
+                "is_liquidation": t.is_liquidation,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── candles ─────────────────────────
+
+pub fn candles(cs: &[Candle]) -> String {
+    if cs.is_empty() {
+        return "No candles returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}\n",
+        "TIME(ms)", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"
+    );
+    for c in cs {
+        out.push_str(&format!(
+            "{:<16}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}\n",
+            c[0] as i64, c[1], c[2], c[3], c[4], c[5]
+        ));
+    }
+    out.push_str(&format!("\n{} candle(s).", cs.len()));
+    out
+}
+
+pub fn candles_json(cs: &[Candle]) -> String {
+    // Emit the natural CCXT shape: an array of [ts, o, h, l, c, v].
+    let value: Value = cs
+        .iter()
+        .map(|c| json!([c[0] as i64, c[1], c[2], c[3], c[4], c[5]]))
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── balance / positions ─────────────────────────
+
+pub fn balance(b: &Balance) -> String {
+    let rows = [
+        ("balance", &b.balance),
+        ("collateral", &b.collateral),
+        ("equity", &b.equity),
+        ("available margin", &b.available_margin),
+    ];
+    let mut out = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<18}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !b.positions.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&positions(&b.positions));
+    }
+    out
+}
+
+pub fn balance_json(b: &Balance) -> String {
+    let value = json!({
+        "balance": b.balance,
+        "collateral": b.collateral,
+        "equity": b.equity,
+        "available_margin": b.available_margin,
+        "positions": positions_value(&b.positions),
+    });
+    pretty(&value)
+}
+
+pub fn positions(ps: &[Position]) -> String {
+    if ps.is_empty() {
+        return "No open positions.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<5}  {:>12}  {:>14}  {:>16}  {:>16}\n",
+        "MARKET", "SIDE", "SIZE", "ENTRY", "UNREAL PNL", "LIQ PRICE"
+    );
+    for p in ps {
+        out.push_str(&format!(
+            "{:<16}  {:<5}  {:>12}  {:>14}  {:>16}  {:>16}\n",
+            p.market_id, p.side, p.size, p.entry_price, p.unrealized_pnl, p.liquidation_price
+        ));
+    }
+    out.push_str(&format!("\n{} position(s).", ps.len()));
+    out
+}
+
+fn positions_value(ps: &[Position]) -> Value {
+    ps.iter()
+        .map(|p| {
+            json!({
+                "market_id": p.market_id,
+                "side": p.side,
+                "size": p.size,
+                "entry_price": p.entry_price,
+                "unrealized_pnl": p.unrealized_pnl,
+                "realized_pnl": p.realized_pnl,
+                "liquidation_price": p.liquidation_price,
+            })
+        })
+        .collect()
+}
+
+pub fn positions_json(ps: &[Position]) -> String {
+    pretty(&positions_value(ps))
+}
+
+// ───────────────────────── fills ─────────────────────────
+
+pub fn fills(fs: &[Fill]) -> String {
+    if fs.is_empty() {
+        return "No fills returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<5}  {:>14}  {:>12}  {:>10}  {:<7}\n",
+        "MARKET", "SIDE", "PRICE", "SIZE", "FEE", "ROLE"
+    );
+    for f in fs {
+        out.push_str(&format!(
+            "{:<16}  {:<5}  {:>14}  {:>12}  {:>10}  {:<7}\n",
+            f.market_id,
+            f.side,
+            f.price,
+            f.size,
+            f.fee,
+            f.taker_or_maker.as_deref().unwrap_or("-"),
+        ));
+    }
+    out.push_str(&format!("\n{} fill(s).", fs.len()));
+    out
+}
+
+pub fn fills_json(fs: &[Fill]) -> String {
+    let value: Value = fs
+        .iter()
+        .map(|f| {
+            json!({
+                "id": f.id,
+                "order_id": f.order_id,
+                "market_id": f.market_id,
+                "side": f.side,
+                "price": f.price,
+                "size": f.size,
+                "fee": f.fee,
+                "taker_or_maker": f.taker_or_maker,
+                "timestamp": f.timestamp,
+                "is_liquidation": f.is_liquidation,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── orders ─────────────────────────
+
+pub fn orders(os: &[Order]) -> String {
+    if os.is_empty() {
+        return "No open orders.".to_string();
+    }
+    let mut out = format!(
+        "{:<38}  {:<16}  {:<5}  {:<7}  {:>12}  {:>10}  {:>10}  {:<14}\n",
+        "ID", "MARKET", "SIDE", "TYPE", "PRICE", "QTY", "FILLED", "STATUS"
+    );
+    for o in os {
+        out.push_str(&order_row(o));
+        out.push('\n');
+    }
+    out.push_str(&format!("\n{} order(s).", os.len()));
+    out
+}
+
+fn order_row(o: &Order) -> String {
+    format!(
+        "{:<38}  {:<16}  {:<5}  {:<7}  {:>12}  {:>10}  {:>10}  {:<14}",
+        o.id,
+        o.market_id,
+        o.side,
+        o.order_type,
+        o.price.as_deref().unwrap_or("-"),
+        o.quantity,
+        o.filled_qty.as_deref().unwrap_or("-"),
+        o.status,
+    )
+}
+
+/// Detailed single-order view (key/value lines).
+pub fn order(o: &Order) -> String {
+    let rows = [
+        ("id", o.id.clone()),
+        ("market", o.market_id.clone()),
+        ("side", o.side.clone()),
+        ("type", o.order_type.clone()),
+        ("price", o.price.clone().unwrap_or_else(|| "-".into())),
+        ("quantity", o.quantity.clone()),
+        ("filled", o.filled_qty.clone().unwrap_or_else(|| "-".into())),
+        ("status", o.status.clone()),
+        ("time in force", o.time_in_force.clone()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<16}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn order_value(o: &Order) -> Value {
+    json!({
+        "id": o.id,
+        "market_id": o.market_id,
+        "account_id": o.account_hex(),
+        "side": o.side,
+        "order_type": o.order_type,
+        "price": o.price,
+        "quantity": o.quantity,
+        "filled_qty": o.filled_qty,
+        "status": o.status,
+        "time_in_force": o.time_in_force,
+        "created_at": o.created_at,
+        "updated_at": o.updated_at,
+    })
+}
+
+pub fn orders_json(os: &[Order]) -> String {
+    let value: Value = os.iter().map(order_value).collect();
+    pretty(&value)
+}
+
+/// Render a `POST /orders` result: the order plus a count of immediate fills.
+pub fn order_result(r: &OrderResult) -> String {
+    let mut out = order(&r.order);
+    out.push_str(&format!("\n{:<16}{}", "immediate fills", r.fills.len()));
+    out
+}
+
+pub fn order_result_json(r: &OrderResult) -> String {
+    let value = json!({
+        "order": order_value(&r.order),
+        "fills": r.fills,
+    });
+    pretty(&value)
+}
+
+/// Render a cancel response. The exact body shape isn't fixed by the spec, so
+/// we pretty-print whatever the server returned (and a short human note).
+pub fn cancel(value: &Value, human_note: &str) -> String {
+    format!("{human_note}\n{}", pretty(value))
 }
 
 #[cfg(test)]
