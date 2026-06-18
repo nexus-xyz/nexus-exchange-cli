@@ -145,3 +145,117 @@ fn opt_json<T: std::fmt::Display>(v: Option<T>) -> Value {
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("JSON value is always serializable")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Sorted so the assertion is independent of serde_json's key ordering
+    // (which depends on the `preserve_order` feature).
+    fn keys(v: &Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    #[test]
+    fn markets_json_shape() {
+        // The SDK types are deserialize-only, so build fixtures from JSON.
+        let markets: Vec<Market> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP",
+            "base_asset": "BTC",
+            "quote_asset": "USDX",
+            "tick_size": "0.5",
+            "lot_size": "0.001",
+            "min_order_size": "0.001",
+            "max_order_size": "100",
+            "initial_margin_rate": "0.05",
+            "maintenance_margin_rate": "0.03",
+            "max_leverage": 20
+        }]))
+        .unwrap();
+
+        let v: Value = serde_json::from_str(&markets_json(&markets)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(
+            keys(row),
+            [
+                "lot_size",
+                "market_id",
+                "max_leverage",
+                "max_order_size",
+                "min_order_size",
+                "tick_size",
+            ]
+        );
+        // Money is a decimal string; leverage stays a JSON number.
+        assert_eq!(row["tick_size"], json!("0.5"));
+        assert_eq!(row["max_leverage"], json!(20));
+    }
+
+    #[test]
+    fn ticker_json_shape_and_null_contract() {
+        let ticker: Ticker = serde_json::from_value(json!({
+            "symbol": "BTC-USDX-PERP",
+            "timestamp": 1_700_000_000_000i64,
+            "datetime": "2023-11-14T22:13:20Z",
+            "high": 100.5, "low": 90.0, "bid": null, "bidVolume": null,
+            "ask": null, "askVolume": null, "open": 95.0, "close": 99.0,
+            "last": 99.0, "change": 4.0, "percentage": 4.2,
+            "baseVolume": 12.0, "quoteVolume": 1200.0,
+            "markPrice": 99.1, "indexPrice": 99.2
+        }))
+        .unwrap();
+
+        let v: Value = serde_json::from_str(&ticker_json(&ticker)).unwrap();
+        assert_eq!(
+            keys(&v),
+            [
+                "ask",
+                "base_volume",
+                "bid",
+                "change",
+                "close",
+                "datetime",
+                "high",
+                "index_price",
+                "last",
+                "low",
+                "mark_price",
+                "open",
+                "percentage",
+                "quote_volume",
+                "symbol",
+            ]
+        );
+        // Present money -> decimal string; absent -> JSON null.
+        assert_eq!(v["last"], json!("99"));
+        assert_eq!(v["bid"], Value::Null);
+    }
+
+    #[test]
+    fn health_json_shape_and_unknown_default() {
+        let health: HealthStatus = serde_json::from_value(json!({
+            "events_received": 7,
+            "fills_total": 3,
+            "uptime_seconds": 42,
+            "connected": true
+        }))
+        .unwrap();
+
+        let v: Value = serde_json::from_str(&health_json(&health)).unwrap();
+        assert_eq!(
+            keys(&v),
+            [
+                "connected",
+                "events_received",
+                "fills_total",
+                "health",
+                "uptime_seconds",
+            ]
+        );
+        assert_eq!(v["health"], json!("unknown"));
+        assert_eq!(v["connected"], json!(true));
+        assert_eq!(v["events_received"], json!(7));
+    }
+}
