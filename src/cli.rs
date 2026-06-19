@@ -35,7 +35,9 @@ pub struct Cli {
 /// API credentials. Read from flags, the corresponding environment variables,
 /// or the config file written by `nexus setup` (in that order of precedence).
 /// Authenticated commands sign requests when both halves are present.
-#[derive(Debug, clap::Args)]
+///
+/// `Debug` is implemented by hand so the secret never lands in logs.
+#[derive(clap::Args)]
 pub struct Credentials {
     /// API key id (e.g. `nx_...`).
     #[arg(long, global = true, env = "NEXUS_API_KEY", hide_env_values = true)]
@@ -45,6 +47,15 @@ pub struct Credentials {
     /// flags are visible in your shell history and process list.
     #[arg(long, global = true, env = "NEXUS_API_SECRET", hide_env_values = true)]
     pub api_secret: Option<String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("api_key", &self.api_key)
+            .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Which Nexus Exchange environment to target.
@@ -423,6 +434,23 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
         assert!(cli.signer(&empty).is_some());
+    }
+
+    #[test]
+    fn debug_redacts_api_secret() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--api-key",
+            "nx_visible",
+            "--api-secret",
+            "topsecret",
+            "markets",
+        ])
+        .unwrap();
+        let dbg = format!("{cli:?}");
+        assert!(!dbg.contains("topsecret"), "secret leaked via Debug: {dbg}");
+        assert!(dbg.contains("nx_visible"));
+        assert!(dbg.contains("<redacted>"));
     }
 
     #[test]

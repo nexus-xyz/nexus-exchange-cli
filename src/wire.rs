@@ -122,7 +122,7 @@ impl Order {
             Some(serde_json::Value::Array(bytes)) => {
                 let mut s = String::from("0x");
                 for b in bytes {
-                    let byte = b.as_u64()? as u8;
+                    let byte = u8::try_from(b.as_u64()?).ok()?;
                     s.push_str(&format!("{byte:02x}"));
                 }
                 Some(s)

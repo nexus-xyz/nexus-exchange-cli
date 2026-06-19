@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 /// Persisted configuration. Every field is optional: the file is purely a
 /// fallback layer beneath flags and environment variables.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented by hand so the secret never lands in logs.
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
@@ -27,6 +29,17 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_secret: Option<String>,
+}
+
+impl std::fmt::Debug for FileConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileConfig")
+            .field("network", &self.network)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key)
+            .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Location of the config file: `$XDG_CONFIG_HOME/nexus/config.json`, falling
