@@ -6,9 +6,39 @@ rust-version = "1.82"
 description = "Command-line interface for the Nexus Exchange API"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nexus-xyz/nexus-exchange-cli"
+homepage = "https://github.com/nexus-xyz/nexus-exchange-cli"
 keywords = ["nexus", "exchange", "trading", "crypto", "cli"]
 categories = ["command-line-utilities"]
 publish = false
+
+# The crate is `publish = false` (it is distributed as a prebuilt binary, not on
+# crates.io), which by default hides it from dist. Opt the binary back in so dist
+# packages and releases it.
+[package.metadata.dist]
+dist = true
+
+# cargo-binstall support. These templates describe exactly where dist uploads
+# release artifacts and how they are laid out, so `cargo binstall
+# nexus-exchange-cli` fetches a prebuilt binary instead of compiling from source.
+# They mirror the artifacts verified with `dist build`:
+#   URL : <repo>/releases/download/v<version>/nexus-exchange-cli-<target>.tar.gz
+#   into: a nexus-exchange-cli-<target>/ directory containing the `nexus` binary
+# Keep these in sync with dist-workspace.toml (archive format + naming) if either
+# changes.
+#
+# The `v` in `download/v{ version }` is load-bearing: binstall reconstructs the
+# upload URL from this template, so releases MUST be tagged `vX.Y.Z` (the
+# documented `git tag vX.Y.Z` flow). The release workflow's tag glob also accepts
+# a bare `X.Y.Z` tag, but binstall would look for the artifact under `v<version>`
+# and miss it — always keep the `v` prefix on tags.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+
+# Windows ships a .zip rather than a .tar.gz; only the format differs.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [[bin]]
 name = "nexus"
@@ -25,3 +55,10 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Release-build profile used by `dist`. Inherits the standard release profile and
+# enables thin LTO for smaller, faster shipped binaries without the long compile
+# times of full LTO.
+[profile.dist]
+inherits = "release"
+lto = "thin"
