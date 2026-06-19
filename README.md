@@ -32,10 +32,11 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/nexus-xyz/nexus-ex
 brew install nexus-xyz/tap/nexus
 ```
 
-**cargo-binstall** (prebuilt binary, no compile):
+**cargo-binstall** (prebuilt binary, no compile) — the crate isn't on
+crates.io yet, so point binstall at the repo directly:
 
 ```sh
-cargo binstall nexus-exchange-cli
+cargo binstall --git https://github.com/nexus-xyz/nexus-exchange-cli nexus-exchange-cli
 ```
 
 **From source**:

@@ -25,6 +25,12 @@ dist = true
 #   into: a nexus-exchange-cli-<target>/ directory containing the `nexus` binary
 # Keep these in sync with dist-workspace.toml (archive format + naming) if either
 # changes.
+#
+# The `v` in `download/v{ version }` is load-bearing: binstall reconstructs the
+# upload URL from this template, so releases MUST be tagged `vX.Y.Z` (the
+# documented `git tag vX.Y.Z` flow). The release workflow's tag glob also accepts
+# a bare `X.Y.Z` tag, but binstall would look for the artifact under `v<version>`
+# and miss it — always keep the `v` prefix on tags.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
 pkg-fmt = "tgz"
