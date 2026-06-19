@@ -87,6 +87,23 @@ nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 | `--network <stable\|beta\|local>` | `NEXUS_NETWORK` | `stable` |
 | `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
 
+### Output format
+
+By default commands print human-readable tables. Pass `--output json` (or set
+`NEXUS_OUTPUT=json`) to emit pretty-printed JSON instead — handy for scripting
+and piping into tools like `jq`. This works for `markets`, `ticker`, and
+`health`.
+
+```sh
+nexus --output json markets
+NEXUS_OUTPUT=json nexus ticker BTC-USDX-PERP
+nexus --output json health | jq .
+```
+
+| Flag | Env | Default |
+|---|---|---|
+| `--output <human\|json>` | `NEXUS_OUTPUT` | `human` |
+
 ### Credentials
 
 API credentials are read from flags or the environment. The market-data
@@ -102,6 +119,27 @@ up for the authenticated endpoints the SDK adds in follow-ups.
 export NEXUS_API_KEY=...
 export NEXUS_API_SECRET=...
 nexus markets
+```
+
+### Shell completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+# Bash
+nexus completions bash > ~/.local/share/bash-completion/completions/nexus
+
+# Zsh
+nexus completions zsh > ~/.zfunc/_nexus   # ensure ~/.zfunc is in $fpath
+
+# Fish
+nexus completions fish > ~/.config/fish/completions/nexus.fish
+
+# PowerShell
+nexus completions powershell >> $PROFILE
+
+# Elvish
+nexus completions elvish >> ~/.elvish/rc.elv
 ```
 
 ## Development

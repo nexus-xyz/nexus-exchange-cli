@@ -3,6 +3,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use nexus_exchange::{Config, Network};
 
+// Re-export for use in main.rs.
+pub use clap_complete::Shell;
+
 /// Command-line interface for the Nexus Exchange API.
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version, about, long_about = None)]
@@ -14,6 +17,10 @@ pub struct Cli {
     /// Override the API base URL (takes precedence over `--network`).
     #[arg(long, global = true, env = "NEXUS_BASE_URL")]
     pub base_url: Option<String>,
+
+    /// Output format: human-readable tables or pretty JSON.
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Human, env = "NEXUS_OUTPUT")]
+    pub output: OutputFormat,
 
     #[command(flatten)]
     pub credentials: Credentials,
@@ -55,6 +62,15 @@ pub enum NetworkArg {
     Local,
 }
 
+/// How command results are rendered to stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable, aligned tables (the default).
+    Human,
+    /// Pretty-printed JSON.
+    Json,
+}
+
 impl From<NetworkArg> for Network {
     fn from(n: NetworkArg) -> Self {
         match n {
@@ -88,6 +104,12 @@ pub enum Command {
 
     /// Show the indexer health/status snapshot.
     Health,
+
+    /// Print shell-completion script to stdout.
+    Completions {
+        /// Target shell.
+        shell: Shell,
+    },
 }
 
 #[cfg(test)]
@@ -128,6 +150,23 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_human_output() {
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::Human);
+    }
+
+    #[test]
+    fn parses_output_json() {
+        let cli = Cli::try_parse_from(["nexus", "--output", "json", "markets"]).unwrap();
+        assert_eq!(cli.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn rejects_unknown_output() {
+        assert!(Cli::try_parse_from(["nexus", "--output", "yaml", "markets"]).is_err());
+    }
+
+    #[test]
     fn credentials_completeness() {
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "markets"]).unwrap();
         assert!(!cli.credentials.is_complete());
@@ -135,5 +174,29 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
         assert!(cli.credentials.is_complete());
+    }
+
+    #[test]
+    fn completions_parses_bash() {
+        let cli = Cli::try_parse_from(["nexus", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell: Shell::Bash }
+        ));
+    }
+
+    #[test]
+    fn completions_generates_without_panic() {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut buf);
+            assert!(!buf.is_empty(), "completion script for {shell:?} was empty");
+        }
     }
 }
