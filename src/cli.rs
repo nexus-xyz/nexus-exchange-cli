@@ -53,7 +53,10 @@ impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Credentials")
             .field("api_key", &self.api_key)
-            .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "api_secret",
+                &self.api_secret.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -535,5 +538,63 @@ mod tests {
         let cli =
             Cli::try_parse_from(["nexus", "ws", "trades", "--market", "BTC-USDX-PERP"]).unwrap();
         assert!(matches!(cli.command, Command::Ws { .. }));
+    }
+
+    /// `--help` renders, names the binary, and lists the full command surface.
+    /// Guards against a command silently dropping out of the top-level help.
+    #[test]
+    fn top_level_help_lists_every_command() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("nexus"), "help should name the binary");
+        for cmd in [
+            "markets",
+            "ticker",
+            "orderbook",
+            "trades",
+            "candles",
+            "health",
+            "balance",
+            "positions",
+            "fills",
+            "orders",
+            "order",
+            "ws",
+            "setup",
+            "completions",
+        ] {
+            assert!(help.contains(cmd), "top-level help should list `{cmd}`");
+        }
+    }
+
+    /// Every subcommand (and nested subcommand) renders `--help` without
+    /// panicking and produces a usage line — exercises the whole help path.
+    #[test]
+    fn every_subcommand_renders_help() {
+        fn check(cmd: &mut clap::Command) {
+            let help = cmd.render_long_help().to_string();
+            assert!(
+                help.contains("Usage:"),
+                "`{}` help should have a usage line",
+                cmd.get_name()
+            );
+            for sub in cmd.get_subcommands_mut() {
+                check(sub);
+            }
+        }
+        check(&mut Cli::command());
+    }
+
+    /// `order place`/`cancel` help spells out their flags, so the trading surface
+    /// stays documented.
+    #[test]
+    fn order_subcommand_help_documents_flags() {
+        let mut cli = Cli::command();
+        let order = cli
+            .get_subcommands_mut()
+            .find(|c| c.get_name() == "order")
+            .expect("order subcommand");
+        let help = order.render_long_help().to_string();
+        assert!(help.contains("place"));
+        assert!(help.contains("cancel"));
     }
 }

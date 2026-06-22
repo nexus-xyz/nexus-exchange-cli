@@ -37,7 +37,10 @@ impl std::fmt::Debug for FileConfig {
             .field("network", &self.network)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key)
-            .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "api_secret",
+                &self.api_secret.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -159,7 +162,7 @@ pub fn setup() -> Result<()> {
     let path = save(&cfg)?;
     println!("\nSaved to {} (permissions 0600).", path.display());
     if cfg.api_secret.is_none() {
-        println!("note: no API secret stored — authenticated commands will be unsigned.");
+        println!("note: no API secret stored — authenticated commands will be refused.");
     }
     Ok(())
 }

@@ -144,6 +144,14 @@ fn humanize(text: &str) -> String {
 }
 
 /// Build the `wss://…/ws?token=…` URL from the REST base URL.
+///
+/// The token rides in the query string because the server's `/ws` upgrade only
+/// accepts it there — there is no header-based alternative on this endpoint, and
+/// browsers can't set headers on a `WebSocket` handshake anyway. Residual
+/// exposure: query strings can surface in proxy/access logs, shell history, and
+/// crash dumps more readily than headers. We mitigate by minting a short-lived,
+/// single-use token per connection and redacting it from anything we log (see
+/// `redacted`); it is never persisted.
 fn ws_url(base_url: &str, token: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let ws_base = if let Some(rest) = base.strip_prefix("https://") {

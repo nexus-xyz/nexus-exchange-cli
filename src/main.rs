@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
 
         // ── authenticated account ──
         Command::Balance => {
-            warn_if_unauthenticated(&api, "balance");
+            require_authenticated(&api, "balance")?;
             let balance = api
                 .fetch_balance()
                 .await
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
             });
         }
         Command::Positions => {
-            warn_if_unauthenticated(&api, "positions");
+            require_authenticated(&api, "positions")?;
             let positions = api
                 .fetch_positions()
                 .await
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
             });
         }
         Command::Fills { limit } => {
-            warn_if_unauthenticated(&api, "fills");
+            require_authenticated(&api, "fills")?;
             let fills = api
                 .fetch_fills(limit)
                 .await
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
             emit(format, output::fills(&fills), || output::fills_json(&fills));
         }
         Command::Orders => {
-            warn_if_unauthenticated(&api, "orders");
+            require_authenticated(&api, "orders")?;
             let orders = api
                 .fetch_open_orders()
                 .await
@@ -192,7 +192,7 @@ async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputForma
             reduce_only,
             yes,
         } => {
-            warn_if_unauthenticated(api, "order place");
+            require_authenticated(api, "order place")?;
             validate_amount("quantity", &quantity)?;
 
             use cli::OrderTypeArg;
@@ -250,7 +250,7 @@ async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputForma
             market,
             yes,
         } => {
-            warn_if_unauthenticated(api, "order cancel");
+            require_authenticated(api, "order cancel")?;
             if all {
                 let scope = market
                     .as_deref()
@@ -332,16 +332,18 @@ fn emit(format: OutputFormat, human: String, json: impl FnOnce() -> String) {
     }
 }
 
-/// Warn (once, to stderr) when an authenticated command is about to run without
-/// credentials. The request still proceeds — the public demo endpoints answer
-/// unsigned — but the user should know their key isn't in play.
-fn warn_if_unauthenticated(api: &ApiClient, what: &str) {
+/// Fail fast when an account-scoped command is invoked without credentials.
+/// These requests can only ever succeed signed, so we error (non-zero exit)
+/// instead of sending an unsigned request that surfaces as an opaque 401 —
+/// this stops scripts from silently mis-authenticating.
+fn require_authenticated(api: &ApiClient, what: &str) -> Result<()> {
     if !api.is_authenticated() {
-        eprintln!(
-            "warning: '{what}' is an authenticated command but no credentials are configured; \
-             sending unsigned (run `nexus setup` or set NEXUS_API_KEY/NEXUS_API_SECRET)"
+        anyhow::bail!(
+            "'{what}' is an authenticated command but no credentials are configured \
+             (run `nexus setup` or set NEXUS_API_KEY/NEXUS_API_SECRET)"
         );
     }
+    Ok(())
 }
 
 /// Validate that a price/quantity string is a positive decimal, so we don't ship
