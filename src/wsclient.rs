@@ -1,22 +1,17 @@
-//! WebSocket streaming (`GET /ws`).
+//! WebSocket streaming (`GET /ws`), over the SDK's streaming client.
 //!
-//! Flow: mint a short-lived single-use token over REST, upgrade to `wss://`,
-//! send one `subscribe` envelope per channel, then stream `event` messages to
-//! stdout until the server closes or the user hits Ctrl-C.
-//!
-//! Concurrency: the socket is `split()` into a read half and a write half so the
-//! select loop can race "next inbound message" against "Ctrl-C" while still
-//! writing pongs/close frames — all from a single task, so there are no shared
-//! locks and therefore no possibility of deadlock. Inbound pings are answered
-//! with pongs to keep the connection alive.
+//! Flow: mint a short-lived single-use token over REST (when authenticated),
+//! hand the SDK a [`Config`] whose `ws_url` carries that token, and let
+//! [`Client::connect`](nexus_exchange::Client::connect) own the socket — the
+//! upgrade, subscription replay, automatic reconnect-with-backoff, ping/pong
+//! keep-alive, and bounded buffering. This module only builds the subscription
+//! frames, renders the [`Event`]s the SDK yields, and stops on Ctrl-C.
 
-use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use anyhow::{Context, Result};
+use nexus_exchange::ws::Event;
+use nexus_exchange::{Client, Config};
+use serde_json::{json, Value};
 
-use crate::api::ApiClient;
 use crate::cli::OutputFormat;
 
 /// Channels that carry public per-market data and therefore require a `market`.
@@ -32,90 +27,94 @@ pub struct Subscription {
     pub since: Option<i64>,
 }
 
-/// Connect, subscribe, and stream until the server closes or Ctrl-C is pressed.
-pub async fn stream(api: &ApiClient, subs: &[Subscription], format: OutputFormat) -> Result<()> {
-    let token = api
-        .mint_ws_token()
-        .await
-        .context("failed to mint a websocket token")?;
-    let url = ws_url(api.base_url(), &token.token);
-
-    // Never log the token (it is a bearer credential); show only the host path.
-    eprintln!("connecting to {} ...", redacted(&url));
-    let (socket, _resp) = connect_async(url)
-        .await
-        .context("websocket connection failed")?;
-    let (mut write, mut read) = socket.split();
-
-    for sub in subs {
-        let mut msg = json!({ "op": "subscribe", "channel": sub.channel });
-        if let Some(market) = &sub.market {
+impl Subscription {
+    /// The `subscribe` envelope sent for this channel.
+    fn frame(&self) -> Value {
+        let mut msg = json!({ "op": "subscribe", "channel": self.channel });
+        if let Some(market) = &self.market {
             msg["market"] = json!(market);
         }
-        if let Some(since) = sub.since {
+        if let Some(since) = self.since {
             msg["since"] = json!(since);
         }
-        write
-            .send(Message::Text(msg.to_string().into()))
-            .await
-            .with_context(|| format!("failed to subscribe to '{}'", sub.channel))?;
+        msg
     }
-    eprintln!("subscribed; streaming events (Ctrl-C to stop)");
+}
+
+/// Connect, subscribe, and stream until Ctrl-C is pressed.
+///
+/// `config` is the resolved SDK config (network / base URL / credentials); a
+/// clone with the token-bearing `ws_url` drives the streaming client. The
+/// `client` (which holds the same credentials) mints the token.
+pub async fn stream(
+    client: &Client,
+    config: &Config,
+    authenticated: bool,
+    subs: &[Subscription],
+    format: OutputFormat,
+) -> Result<()> {
+    // Account channels need a signed token; public channels can stream without
+    // one. Only mint when we actually have credentials.
+    let ws_url = if authenticated {
+        let token = client
+            .mint_web_socket_token()
+            .await
+            .context("failed to mint a websocket token")?;
+        format!("{}?token={}", config.ws_url(), encode_token(&token.token))
+    } else {
+        config.ws_url().to_string()
+    };
+
+    // Never log the token (it is a bearer credential); show only the host path.
+    eprintln!("connecting to {} ...", redacted(&ws_url));
+
+    let frames: Vec<Value> = subs.iter().map(Subscription::frame).collect();
+    let ws_client = Client::new(config.clone().with_ws_url(ws_url));
+    let mut sub = ws_client.connect(frames);
+    eprintln!("streaming events (Ctrl-C to stop)");
 
     loop {
         tokio::select! {
-            // Graceful shutdown: tell the server we're going away, then stop.
             _ = tokio::signal::ctrl_c() => {
-                let _ = write.send(Message::Close(None)).await;
                 eprintln!("\nclosing.");
+                sub.close().await;
                 break;
             }
-            item = read.next() => {
-                match item {
-                    None => {
-                        eprintln!("connection closed by server.");
-                        break;
-                    }
-                    Some(Err(e)) => return Err(anyhow!("websocket error: {e}")),
-                    Some(Ok(msg)) => match msg {
-                        Message::Text(text) => render(text.as_str(), format),
-                        // Keep-alive: answer pings so the server doesn't drop us.
-                        Message::Ping(payload) => {
-                            let _ = write.send(Message::Pong(payload)).await;
-                        }
-                        Message::Close(frame) => {
-                            match frame {
-                                Some(f) => eprintln!("server closed connection: {} {}", f.code, f.reason),
-                                None => eprintln!("server closed connection."),
-                            }
-                            break;
-                        }
-                        Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
-                    },
+            event = sub.next() => match event {
+                None => {
+                    eprintln!("stream ended.");
+                    break;
                 }
-            }
+                Some(Event::Message(value)) => render(&value, format),
+                Some(Event::Connected) => eprintln!("connected; subscriptions sent."),
+                Some(Event::Disconnected(reason)) => {
+                    eprintln!("disconnected: {reason} (reconnecting…)");
+                }
+                Some(Event::Lagged { dropped }) => {
+                    eprintln!("warning: fell behind, dropped {dropped} message(s)");
+                }
+                // `Event` is #[non_exhaustive]; ignore variants added upstream.
+                Some(_) => {}
+            },
         }
     }
 
     Ok(())
 }
 
-/// Render one server message. In JSON mode the line is already JSON, so it is
-/// emitted verbatim (one event per line — friendly to `jq`/streaming consumers).
-/// In human mode the envelope is summarized to a single tidy line.
-fn render(text: &str, format: OutputFormat) {
+/// Render one server message. In JSON mode the event is emitted as a single
+/// compact JSON line (friendly to `jq`/streaming consumers); in human mode the
+/// envelope is summarized to a single tidy line.
+fn render(value: &Value, format: OutputFormat) {
     match format {
-        OutputFormat::Json => println!("{text}"),
-        OutputFormat::Human => println!("{}", humanize(text)),
+        OutputFormat::Json => println!("{value}"),
+        OutputFormat::Human => println!("{}", humanize(value)),
     }
 }
 
-/// Summarize a server envelope for human output, falling back to the raw text
-/// if it isn't the shape we expect.
-fn humanize(text: &str) -> String {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
-        return text.to_string();
-    };
+/// Summarize a server envelope for human output, falling back to the compact
+/// JSON if it isn't the shape we expect.
+fn humanize(v: &Value) -> String {
     let op = v.get("op").and_then(|o| o.as_str()).unwrap_or("?");
     let channel = v.get("channel").and_then(|c| c.as_str()).unwrap_or("");
     let market = v
@@ -139,29 +138,8 @@ fn humanize(text: &str) -> String {
             let m = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
             format!("error: {m}")
         }
-        _ => text.to_string(),
+        _ => v.to_string(),
     }
-}
-
-/// Build the `wss://…/ws?token=…` URL from the REST base URL.
-///
-/// The token rides in the query string because the server's `/ws` upgrade only
-/// accepts it there — there is no header-based alternative on this endpoint, and
-/// browsers can't set headers on a `WebSocket` handshake anyway. Residual
-/// exposure: query strings can surface in proxy/access logs, shell history, and
-/// crash dumps more readily than headers. We mitigate by minting a short-lived,
-/// single-use token per connection and redacting it from anything we log (see
-/// `redacted`); it is never persisted.
-fn ws_url(base_url: &str, token: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = base.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        base.to_string()
-    };
-    format!("{ws_base}/ws?token={}", encode_token(token))
 }
 
 /// Percent-encode a token for use in a query value (defensive — tokens are
@@ -179,6 +157,14 @@ fn encode_token(token: &str) -> String {
 }
 
 /// Strip the token from a URL so it can be logged safely.
+///
+/// The token rides in the query string because the server's `/ws` upgrade only
+/// accepts it there — there is no header-based alternative on this endpoint, and
+/// browsers can't set headers on a `WebSocket` handshake anyway. Residual
+/// exposure: query strings can surface in proxy/access logs, shell history, and
+/// crash dumps more readily than headers. We mitigate by minting a short-lived,
+/// single-use token per connection, redacting it here from anything we log, and
+/// never persisting it.
 fn redacted(url: &str) -> String {
     match url.split_once("?token=") {
         Some((head, _)) => format!("{head}?token=<redacted>"),
@@ -191,18 +177,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_wss_url_and_keeps_base_path() {
-        assert_eq!(
-            ws_url("https://exchange.nexus.xyz/api/exchange", "abc123"),
-            "wss://exchange.nexus.xyz/api/exchange/ws?token=abc123"
-        );
-        assert_eq!(
-            ws_url("http://localhost:9090/", "t"),
-            "ws://localhost:9090/ws?token=t"
-        );
-    }
-
-    #[test]
     fn token_is_never_logged() {
         let r = redacted("wss://h/api/exchange/ws?token=supersecret");
         assert!(!r.contains("supersecret"));
@@ -210,13 +184,45 @@ mod tests {
     }
 
     #[test]
+    fn encode_token_escapes_non_unreserved() {
+        assert_eq!(encode_token("abc123"), "abc123");
+        assert_eq!(encode_token("a/b c"), "a%2Fb%20c");
+    }
+
+    #[test]
+    fn frame_includes_market_and_since_when_set() {
+        let sub = Subscription {
+            channel: "trades".into(),
+            market: Some("BTC-USDX-PERP".into()),
+            since: Some(42),
+        };
+        let f = sub.frame();
+        assert_eq!(f["op"], json!("subscribe"));
+        assert_eq!(f["channel"], json!("trades"));
+        assert_eq!(f["market"], json!("BTC-USDX-PERP"));
+        assert_eq!(f["since"], json!(42));
+
+        // Account channel: no market, no since.
+        let acct = Subscription {
+            channel: "orders".into(),
+            market: None,
+            since: None,
+        };
+        let f = acct.frame();
+        assert!(f.get("market").is_none());
+        assert!(f.get("since").is_none());
+    }
+
+    #[test]
     fn humanizes_event_and_passes_through_unknown() {
-        let line = humanize(
-            r#"{"op":"event","channel":"trades","market":"BTC-USDX-PERP","seq":7,"payload":{"price":100}}"#,
-        );
+        let line = humanize(&json!({
+            "op": "event", "channel": "trades", "market": "BTC-USDX-PERP",
+            "seq": 7, "payload": { "price": 100 }
+        }));
         assert!(line.contains("trades"));
         assert!(line.contains("#7"));
-        // Non-JSON falls back to the raw text.
-        assert_eq!(humanize("not json"), "not json");
+        // An unrecognized op falls back to the compact JSON.
+        let other = humanize(&json!({ "op": "weird" }));
+        assert!(other.contains("weird"));
     }
 }

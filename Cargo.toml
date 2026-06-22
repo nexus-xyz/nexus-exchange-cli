@@ -18,6 +18,11 @@ path = "src/main.rs"
 # The Nexus Exchange SDK. The crate is not yet on crates.io (it ships with
 # `publish = false`), so we depend on it from git, pinned to `main`. Swap this
 # for a `version = "x.y"` line once the SDK is published.
+#
+# The CLI is a thin command/output layer over this SDK: every request — public
+# market data, the authenticated account, trading, and WebSocket streaming —
+# goes through `Client`, which owns request signing, the HTTP/WS transport, and
+# the wire types. The CLI carries no transport of its own.
 nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", branch = "main" }
 
 anyhow = "1"
@@ -26,15 +31,4 @@ clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-
-# The SDK is still a skeleton (no auth/ws, REST `get` is crate-private), so the
-# CLI carries its own signed HTTP client and WebSocket transport. These mirror
-# the SDK's own stack (reqwest + rustls, tokio-tungstenite) so they can fold
-# back into the SDK once it grows the endpoints.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-hmac = "0.12"
-sha2 = "0.10"
-hex = "0.4"
 rpassword = "7"
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

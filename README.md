@@ -6,10 +6,10 @@ Rust SDK.
 
 > **Status:** the full command surface is wired up — public market data, the
 > authenticated account, order placement/cancellation, and live WebSocket
-> streaming. The upstream SDK is still a skeleton (it ships only the public
-> market-data methods), so the CLI carries its own HMAC-signed HTTP client and
-> WebSocket transport — mirroring the SDK's `reqwest`/`tokio-tungstenite` stack —
-> until those endpoints land in the SDK proper.
+> streaming. It is a thin command/output layer over the SDK: every request goes
+> through the SDK's `Client`, which owns request signing, the HTTP/WebSocket
+> transport, retries, rate-limit pacing, and the wire types. The CLI adds no
+> transport of its own.
 
 ## Install
 
@@ -41,8 +41,8 @@ nexus orders                        # open orders
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
-nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
-nexus order cancel --all --market BTC-USDX-PERP
+nexus order cancel <ORDER_ID>
+nexus order cancel --all
 
 # Live streaming over WebSocket (Ctrl-C to stop)
 nexus ws trades --market BTC-USDX-PERP      # public channels need --market
@@ -53,12 +53,6 @@ nexus setup
 ```
 
 Every subcommand supports `--help`.
-
-> **Heads up:** the live API spec (`v0.3.3`) and the deployed server differ in a
-> couple of places, and the CLI follows the *server*: order responses use
-> `limit_price` and a byte-array `account_id` (rendered as `0x…`), single-order
-> cancel requires `--market`, and there is no single-order `GET` (so there is no
-> `order get` command — list with `nexus orders`).
 
 ### Network selection
 

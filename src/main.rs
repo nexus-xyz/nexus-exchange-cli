@@ -1,22 +1,24 @@
 //! `nexus` — command-line interface for the Nexus Exchange API.
+//!
+//! A thin command/output layer over the [`nexus_exchange`] SDK: every request
+//! goes through the SDK's [`Client`], which owns request signing, the HTTP/WS
+//! transport, retries, rate-limit pacing, and the wire types. This binary only
+//! parses arguments, resolves config/credentials, and renders results.
 
-mod api;
-mod auth;
 mod cli;
 mod credentials;
 mod output;
-mod wire;
 mod wsclient;
 
 use std::io::{self, IsTerminal, Write};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
+use nexus_exchange::types::{Decimal, OrderRequest};
 use nexus_exchange::Client;
 
-use api::ApiClient;
 use cli::{Cli, Command, OrderCommand, OutputFormat};
-use wire::NewOrder;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
 #[tokio::main]
@@ -39,15 +41,20 @@ async fn main() -> Result<()> {
     // the user notices rather than silently losing settings).
     let file = credentials::load()?.unwrap_or_default();
 
-    // The SDK serves the public methods it already ships; `ApiClient` carries
-    // everything else, both built from the same resolved base URL.
-    let client = Client::new(cli.config(&file));
-    let base_url = client.base_url().to_string();
-    let api = ApiClient::new(base_url, cli.signer(&file))?;
+    // Build the SDK config (network / base URL), then attach credentials so the
+    // SDK signs authenticated requests. `credentials` is resolved once here so
+    // its single "half a pair" warning isn't emitted twice.
+    let credentials = cli.credentials(&file);
+    let authenticated = credentials.is_some();
+    let mut config = cli.config(&file);
+    if let Some((key, secret)) = credentials {
+        config = config.api_key(key, secret);
+    }
+    let client = Client::new(config.clone());
     let format = cli.output;
 
     match cli.command {
-        // ── public market data (via the SDK) ──
+        // ── public market data ──
         Command::Markets => {
             let markets = client
                 .fetch_markets()
@@ -75,11 +82,9 @@ async fn main() -> Result<()> {
                 output::health_json(&health)
             });
         }
-
-        // ── public market data (via the signed client) ──
         Command::Orderbook { market_id } => {
-            let book = api
-                .fetch_orderbook(&market_id)
+            let book = client
+                .fetch_order_book(&market_id)
                 .await
                 .with_context(|| format!("failed to fetch order book for {market_id}"))?;
             emit(format, output::orderbook(&book), || {
@@ -87,8 +92,8 @@ async fn main() -> Result<()> {
             });
         }
         Command::Trades { market_id, limit } => {
-            let trades = api
-                .fetch_trades(&market_id, limit)
+            let trades = client
+                .fetch_trades(&market_id, Some(limit))
                 .await
                 .with_context(|| format!("failed to fetch trades for {market_id}"))?;
             emit(format, output::trades(&trades), || {
@@ -100,8 +105,8 @@ async fn main() -> Result<()> {
             timeframe,
             limit,
         } => {
-            let candles = api
-                .fetch_candles(&market_id, &timeframe, limit)
+            let candles = client
+                .fetch_ohlcv(&market_id, Some(&timeframe), Some(limit))
                 .await
                 .with_context(|| format!("failed to fetch candles for {market_id}"))?;
             emit(format, output::candles(&candles), || {
@@ -111,8 +116,8 @@ async fn main() -> Result<()> {
 
         // ── authenticated account ──
         Command::Balance => {
-            require_authenticated(&api, "balance")?;
-            let balance = api
+            require_authenticated(authenticated, "balance")?;
+            let balance = client
                 .fetch_balance()
                 .await
                 .context("failed to fetch account balance")?;
@@ -121,8 +126,8 @@ async fn main() -> Result<()> {
             });
         }
         Command::Positions => {
-            require_authenticated(&api, "positions")?;
-            let positions = api
+            require_authenticated(authenticated, "positions")?;
+            let positions = client
                 .fetch_positions()
                 .await
                 .context("failed to fetch positions")?;
@@ -131,16 +136,18 @@ async fn main() -> Result<()> {
             });
         }
         Command::Fills { limit } => {
-            require_authenticated(&api, "fills")?;
-            let fills = api
-                .fetch_fills(limit)
+            require_authenticated(authenticated, "fills")?;
+            let mut fills = client
+                .fetch_my_trades()
                 .await
                 .context("failed to fetch fills")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            fills.truncate(limit as usize);
             emit(format, output::fills(&fills), || output::fills_json(&fills));
         }
         Command::Orders => {
-            require_authenticated(&api, "orders")?;
-            let orders = api
+            require_authenticated(authenticated, "orders")?;
+            let orders = client
                 .fetch_open_orders()
                 .await
                 .context("failed to fetch open orders")?;
@@ -150,7 +157,7 @@ async fn main() -> Result<()> {
         }
 
         // ── trading ──
-        Command::Order { action } => handle_order(&api, action, format).await?,
+        Command::Order { action } => handle_order(&client, authenticated, action, format).await?,
 
         // ── websocket ──
         Command::Ws {
@@ -162,14 +169,14 @@ async fn main() -> Result<()> {
             if subs
                 .iter()
                 .any(|s| ACCOUNT_CHANNELS.contains(&s.channel.as_str()))
-                && !api.is_authenticated()
+                && !authenticated
             {
                 eprintln!(
                     "warning: account channels (orders/fills/positions/balances) require credentials; \
                      they will be empty without `nexus setup` or --api-key/--api-secret"
                 );
             }
-            wsclient::stream(&api, &subs, format).await?;
+            wsclient::stream(&client, &config, authenticated, &subs, format).await?;
         }
 
         Command::Completions { .. } | Command::Setup => unreachable!("handled above"),
@@ -180,7 +187,12 @@ async fn main() -> Result<()> {
 
 /// Handle `order place` / `order cancel`, including the safety confirmation
 /// prompt for these mutating actions.
-async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputFormat) -> Result<()> {
+async fn handle_order(
+    client: &Client,
+    authenticated: bool,
+    action: OrderCommand,
+    format: OutputFormat,
+) -> Result<()> {
     match action {
         OrderCommand::Place {
             market,
@@ -192,42 +204,40 @@ async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputForma
             reduce_only,
             yes,
         } => {
-            require_authenticated(api, "order place")?;
-            validate_amount("quantity", &quantity)?;
+            require_authenticated(authenticated, "order place")?;
+            let quantity = parse_amount("quantity", &quantity)?;
 
             use cli::OrderTypeArg;
-            let price = match order_type {
+            let mut request = match order_type {
                 OrderTypeArg::Limit => {
-                    let p = price.context("--price is required for a limit order")?;
-                    validate_amount("price", &p)?;
-                    Some(p)
+                    let p = price
+                        .as_deref()
+                        .context("--price is required for a limit order")?;
+                    let price = parse_amount("price", p)?;
+                    OrderRequest::limit(market.clone(), side.into(), price, quantity, tif.into())
                 }
                 OrderTypeArg::Market => {
                     if price.is_some() {
                         eprintln!("note: --price is ignored for a market order");
                     }
-                    None
+                    OrderRequest::market(market.clone(), side.into(), quantity)
                 }
             };
-
-            let new_order = NewOrder {
-                market_id: market.clone(),
-                side: side.wire().to_string(),
-                order_type: order_type.wire().to_string(),
-                price: price.clone(),
-                quantity: quantity.clone(),
-                time_in_force: tif.wire().to_string(),
-                reduce_only: if reduce_only { Some(true) } else { None },
-            };
+            if reduce_only {
+                request.reduce_only = Some(true);
+            }
 
             let summary = format!(
-                "Place {} {} order: {} {} @ {} (tif {}{})",
-                side.wire(),
-                order_type.wire(),
-                quantity,
+                "Place {:?} {:?} order: {} {} @ {} (tif {:?}{})",
+                request.side,
+                request.order_type,
+                request.quantity,
                 market,
-                price.as_deref().unwrap_or("market"),
-                tif.wire(),
+                request
+                    .price
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "market".into()),
+                request.time_in_force,
                 if reduce_only { ", reduce-only" } else { "" },
             );
             if !confirm(&summary, yes)? {
@@ -235,8 +245,8 @@ async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputForma
                 return Ok(());
             }
 
-            let result = api
-                .place_order(&new_order)
+            let result = client
+                .create_order(&request)
                 .await
                 .context("failed to place order")?;
             emit(format, output::order_result(&result), || {
@@ -244,42 +254,31 @@ async fn handle_order(api: &ApiClient, action: OrderCommand, format: OutputForma
             });
         }
 
-        OrderCommand::Cancel {
-            order_id,
-            all,
-            market,
-            yes,
-        } => {
-            require_authenticated(api, "order cancel")?;
+        OrderCommand::Cancel { order_id, all, yes } => {
+            require_authenticated(authenticated, "order cancel")?;
             if all {
-                let scope = market
-                    .as_deref()
-                    .map(|m| format!(" in {m}"))
-                    .unwrap_or_else(|| " across all markets".to_string());
-                if !confirm(&format!("Cancel ALL open orders{scope}"), yes)? {
+                if !confirm("Cancel ALL open orders", yes)? {
                     eprintln!("aborted.");
                     return Ok(());
                 }
-                let value = api
-                    .cancel_all(market.as_deref())
+                let value = client
+                    .cancel_all_orders()
                     .await
                     .context("failed to cancel orders")?;
                 emit(
                     format,
-                    output::cancel(&value, "cancelled all matching orders."),
+                    output::cancel(&value, "cancelled all open orders."),
                     || serde_json::to_string_pretty(&value).unwrap_or_default(),
                 );
             } else {
                 let id = order_id
                     .context("provide an order id, or use --all to cancel every open order")?;
-                let market =
-                    market.context("--market is required when cancelling a single order")?;
-                if !confirm(&format!("Cancel order {id} in {market}"), yes)? {
+                if !confirm(&format!("Cancel order {id}"), yes)? {
                     eprintln!("aborted.");
                     return Ok(());
                 }
-                let value = api
-                    .cancel_order(&id, &market)
+                let value = client
+                    .cancel_order(&id)
                     .await
                     .context("failed to cancel order")?;
                 emit(
@@ -336,8 +335,8 @@ fn emit(format: OutputFormat, human: String, json: impl FnOnce() -> String) {
 /// These requests can only ever succeed signed, so we error (non-zero exit)
 /// instead of sending an unsigned request that surfaces as an opaque 401 —
 /// this stops scripts from silently mis-authenticating.
-fn require_authenticated(api: &ApiClient, what: &str) -> Result<()> {
-    if !api.is_authenticated() {
+fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
+    if !authenticated {
         anyhow::bail!(
             "'{what}' is an authenticated command but no credentials are configured \
              (run `nexus setup` or set NEXUS_API_KEY/NEXUS_API_SECRET)"
@@ -346,11 +345,11 @@ fn require_authenticated(api: &ApiClient, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate that a price/quantity string is a positive decimal, so we don't ship
-/// an obviously-bad order to the exchange.
-fn validate_amount(field: &str, value: &str) -> Result<()> {
-    match value.parse::<f64>() {
-        Ok(n) if n > 0.0 && n.is_finite() => Ok(()),
+/// Parse a price/quantity into the SDK's [`Decimal`], rejecting non-positive or
+/// malformed values so we don't ship an obviously-bad order to the exchange.
+fn parse_amount(field: &str, value: &str) -> Result<Decimal> {
+    match Decimal::from_str(value) {
+        Ok(n) if n > Decimal::ZERO => Ok(n),
         _ => anyhow::bail!("{field} must be a positive number, got {value:?}"),
     }
 }

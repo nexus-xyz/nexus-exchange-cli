@@ -1,9 +1,9 @@
 //! Command-line argument parsing and config/credential resolution.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use nexus_exchange::types::{OrderType, Side, TimeInForce};
 use nexus_exchange::{Config, Network};
 
-use crate::auth::Signer;
 use crate::credentials::FileConfig;
 
 // Re-export for use in main.rs.
@@ -94,40 +94,39 @@ pub enum OutputFormat {
     Json,
 }
 
-/// Order side.
+/// Order side. Maps onto the SDK's [`Side`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SideArg {
     Buy,
     Sell,
 }
 
-impl SideArg {
-    /// The wire value (the API uses capitalized variants on orders).
-    pub fn wire(self) -> &'static str {
-        match self {
-            SideArg::Buy => "Buy",
-            SideArg::Sell => "Sell",
+impl From<SideArg> for Side {
+    fn from(s: SideArg) -> Self {
+        match s {
+            SideArg::Buy => Side::Buy,
+            SideArg::Sell => Side::Sell,
         }
     }
 }
 
-/// Order type.
+/// Order type. Maps onto the SDK's [`OrderType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OrderTypeArg {
     Limit,
     Market,
 }
 
-impl OrderTypeArg {
-    pub fn wire(self) -> &'static str {
-        match self {
-            OrderTypeArg::Limit => "Limit",
-            OrderTypeArg::Market => "Market",
+impl From<OrderTypeArg> for OrderType {
+    fn from(t: OrderTypeArg) -> Self {
+        match t {
+            OrderTypeArg::Limit => OrderType::Limit,
+            OrderTypeArg::Market => OrderType::Market,
         }
     }
 }
 
-/// Time in force.
+/// Time in force. Maps onto the SDK's [`TimeInForce`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum TifArg {
     /// Good-til-cancelled.
@@ -138,12 +137,12 @@ pub enum TifArg {
     Fok,
 }
 
-impl TifArg {
-    pub fn wire(self) -> &'static str {
-        match self {
-            TifArg::Gtc => "GTC",
-            TifArg::Ioc => "IOC",
-            TifArg::Fok => "FOK",
+impl From<TifArg> for TimeInForce {
+    fn from(t: TifArg) -> Self {
+        match t {
+            TifArg::Gtc => TimeInForce::Gtc,
+            TifArg::Ioc => TimeInForce::Ioc,
+            TifArg::Fok => TimeInForce::Fok,
         }
     }
 }
@@ -178,11 +177,14 @@ impl Cli {
         Config::default()
     }
 
-    /// Resolve credentials into a [`Signer`], layering flags/env over the config
-    /// file. Returns `None` when no usable pair is configured. Warns (and still
+    /// Resolve an API key/secret pair, layering flags/env over the config file.
+    /// Returns `None` when no usable pair is configured. Warns (and still
     /// returns `None`) when only one half is present, since that is almost
     /// always a mistake.
-    pub fn signer(&self, file: &FileConfig) -> Option<Signer> {
+    ///
+    /// The pair is handed to [`Config::api_key`] so the SDK signs authenticated
+    /// requests; the CLI never touches the secret beyond passing it through.
+    pub fn credentials(&self, file: &FileConfig) -> Option<(String, String)> {
         let key = self
             .credentials
             .api_key
@@ -195,7 +197,7 @@ impl Cli {
             .or_else(|| file.api_secret.clone());
 
         match (key, secret) {
-            (Some(k), Some(s)) => Some(Signer::new(k, s)),
+            (Some(k), Some(s)) => Some((k, s)),
             (Some(_), None) => {
                 eprintln!(
                     "warning: API key set without a matching API secret; requests will be unsigned"
@@ -331,19 +333,13 @@ pub enum OrderCommand {
         yes: bool,
     },
 
-    /// Cancel a single order, or all open orders with `--all`.
-    ///
-    /// Cancelling a single order requires `--market` (the API needs it to route
-    /// the cancel); `--all` takes `--market` optionally to scope the sweep.
+    /// Cancel a single order by id, or all open orders with `--all`.
     Cancel {
-        /// Order id to cancel (requires `--market`).
+        /// Order id to cancel.
         order_id: Option<String>,
-        /// Cancel all open orders (optionally limited to `--market`).
+        /// Cancel all open orders.
         #[arg(long, conflicts_with = "order_id")]
         all: bool,
-        /// Market to cancel in. Required with an order id; optional with `--all`.
-        #[arg(long)]
-        market: Option<String>,
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
@@ -429,14 +425,14 @@ mod tests {
     }
 
     #[test]
-    fn signer_requires_both_halves() {
+    fn credentials_require_both_halves() {
         let empty = FileConfig::default();
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "markets"]).unwrap();
-        assert!(cli.signer(&empty).is_none());
+        assert!(cli.credentials(&empty).is_none());
 
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
-        assert!(cli.signer(&empty).is_some());
+        assert!(cli.credentials(&empty).is_some());
     }
 
     #[test]
@@ -457,14 +453,14 @@ mod tests {
     }
 
     #[test]
-    fn signer_falls_back_to_file() {
+    fn credentials_fall_back_to_file() {
         let file = FileConfig {
             api_key: Some("k".into()),
             api_secret: Some("s".into()),
             ..Default::default()
         };
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
-        assert!(cli.signer(&file).is_some());
+        assert_eq!(cli.credentials(&file), Some(("k".into(), "s".into())));
     }
 
     #[test]
@@ -474,9 +470,12 @@ mod tests {
             api_secret: Some("file-secret".into()),
             ..Default::default()
         };
-        // Flag key + file secret still resolves (layered per-field).
+        // Flag key layers over the file secret, per-field.
         let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
-        assert!(cli.signer(&file).is_some());
+        assert_eq!(
+            cli.credentials(&file),
+            Some(("flag-key".into(), "file-secret".into()))
+        );
     }
 
     #[test]
