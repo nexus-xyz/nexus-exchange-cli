@@ -1,0 +1,26 @@
+# Cloudflare Worker that serves the nexus installer at https://cli.nexus.xyz.
+# Deploy with `wrangler deploy` (see README.md in this directory).
+
+name = "nexus-cli-installer"
+main = "src/installer.mjs"
+compatibility_date = "2025-05-05"
+
+# Workers Custom Domains. Setting `custom_domain = true` makes Cloudflare create
+# and manage the DNS record (and TLS cert) for cli.nexus.xyz pointing at this
+# Worker — this is the "DNS for cli.nexus.xyz" half of the ticket, as code. The
+# nexus.xyz zone must live on the same Cloudflare account for wrangler to bind it.
+routes = [
+  { pattern = "cli.nexus.xyz", custom_domain = true }
+]
+
+# Pinned upstream coordinates. These are the defaults baked into the Worker; we
+# set them explicitly here so the source of truth for "which repo/app do we
+# install" is reviewable config. The Worker validates them against a strict
+# charset before ever building a URL.
+[vars]
+INSTALLER_OWNER = "nexus-xyz"
+INSTALLER_REPO  = "nexus-exchange-cli"
+INSTALLER_APP   = "nexus-exchange-cli"
+
+[observability]
+enabled = true

@@ -53,3 +53,22 @@ jobs:
       - run: dist generate --check
       # Fails if the release plan itself is invalid (bad targets, installers, etc).
       - run: dist plan
+
+  installer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Security-critical Worker logic: the 19 Node tests must gate every PR.
+      # They import only node:test/node:assert, so run them before any install —
+      # the security gate stays green even if the npm registry is unavailable.
+      - run: node --test
+      # Reproducible install from the committed lockfile (only wrangler needs it).
+      - run: npm ci
+      # Validate wrangler.toml + bundle the Worker without deploying.
+      - run: npx wrangler deploy --dry-run --outdir /tmp/installer-dist

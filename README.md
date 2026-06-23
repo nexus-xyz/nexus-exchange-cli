@@ -13,6 +13,23 @@ Rust SDK.
 
 ## Install
 
+The quickest way — download and run the installer for the latest release:
+
+```sh
+# macOS + Linux
+curl https://cli.nexus.xyz | sh
+```
+```powershell
+# Windows
+irm https://cli.nexus.xyz | iex
+```
+
+`cli.nexus.xyz` serves the [cargo-dist](https://opensource.axo.dev/cargo-dist/)
+installer for the most recent GitHub release; it picks the shell or PowerShell
+variant automatically. The host itself lives in [`installer/`](./installer).
+
+Or pin the invocation to a specific GitHub release artifact:
+
 Prebuilt, checksummed, signed binaries are published for every tagged release
 (macOS arm64/x64, Linux x64/arm64, Windows x64) by
 [cargo-dist](https://opensource.axo.dev/cargo-dist/). A Windows `.msi` is also
