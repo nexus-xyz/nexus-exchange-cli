@@ -1,0 +1,208 @@
+# Custom dist publish job: attach a detached minisign (.minisig) signature to
+# every release artifact.
+#
+# dist wires this in via `publish-jobs = ["./minisign"]` in dist-workspace.toml
+# (the `./<name>` form maps to .github/workflows/<name>.yml). It runs in the
+# `publish` stage, after the `host` job has built every artifact and created the
+# GitHub Release, so the signatures land on that same release.
+#
+# Why minisign in addition to GitHub attestations? Attestations prove an
+# artifact came from this repo's CI (provenance, verified via GitHub's API).
+# minisign gives an offline, CI-independent signature anyone can verify against
+# a single pinned public key without trusting any service. Defense in depth.
+#
+# One-time setup:
+#   1. Generate a keypair offline:  minisign -G -p minisign.pub -s minisign.key
+#   2. Store the SECRET key file's contents in the `MINISIGN_SECRET_KEY` repo
+#      secret and its password in the `MINISIGN_PASSWORD` repo secret.
+#   3. Publish the public key in the README so users can verify, and set the
+#      `MINISIGN_PUBLIC_KEY` repo *variable* to the same value. This is
+#      REQUIRED: the job self-verifies every signature against it and fails
+#      closed if it is unset, so we never ship `.minisig` files that nobody
+#      can verify against a published key.
+# Keep the secret key offline; only its contents live in the CI secret.
+
+name: Publish (minisign)
+
+on:
+  workflow_call:
+    # dist invokes every custom publish job with the build `plan` as input and
+    # `secrets: inherit`, so the repo secrets/vars below are available here.
+    inputs:
+      plan:
+        required: true
+        type: string
+
+# Serialize signing per release ref. A retried or overlapping run for the same
+# tag must not race another uploading the same assets. We do NOT cancel
+# in-progress runs: a half-finished signing run should complete rather than be
+# killed mid-upload and leave the release partially signed.
+concurrency:
+  group: minisign-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  minisign:
+    runs-on: ubuntu-22.04
+    permissions:
+      # Least privilege: release-asset write to attach the .minisig files, and
+      # attestation read so `gh attestation verify` can fetch each artifact's
+      # build-provenance attestation before we sign it. dist grants exactly this
+      # (see github-custom-job-permissions); we re-declare it here so the job is
+      # self-documenting and fails closed if the generated grant ever narrows.
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve release tag from plan
+        id: plan
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+          tag="$(printf '%s' "$PLAN" | jq -er '.announcement_tag')"
+          # Guard against an empty/garbage tag steering downstream gh commands
+          # at the wrong release. dist tags look like "v1.2.3" or "app-v1.2.3".
+          case "$tag" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "::error::refusing to operate on suspicious release tag: '$tag'"
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Signing artifacts for release: $tag"
+
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          minisign -v
+
+      - name: Load signing key
+        env:
+          # Consumed as data only — never interpolated into the shell.
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY secret is not set; cannot sign release artifacts."
+            exit 1
+          fi
+          umask 077
+          keydir="$(mktemp -d)"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keydir/minisign.key"
+          echo "MINISIGN_KEY_FILE=$keydir/minisign.key" >> "$GITHUB_ENV"
+
+      - name: Download release artifacts
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          echo "WORKDIR=$workdir" >> "$GITHUB_ENV"
+          # Pull every asset dist attached to the release. (GitHub's auto-added
+          # "Source code" archives are not assets, so they are not fetched.)
+          gh release download "$TAG" --dir "$workdir"
+          echo "Downloaded:"; ls -1 "$workdir"
+
+      - name: Verify build provenance before signing
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Only sign bytes proven to come from this repo's release build. dist
+          # emits a GitHub build-provenance attestation (signed by the runner's
+          # OIDC identity) for every binary archive/installer; verify each one
+          # here so minisign anchors to the same artifacts the attestation does,
+          # not just whatever the release page happens to serve. Fail closed:
+          # set -e aborts the job if any artifact has no verifiable attestation.
+          # --signer-workflow pins the trust gate to the attestation produced by
+          # *this* repo's release.yml. Without it, --repo alone accepts any
+          # attestation signed for the repo (e.g. from a different workflow), so
+          # it is the load-bearing identity check right before signing.
+          verified=0
+          for f in "$WORKDIR"/*.tar.gz "$WORKDIR"/*.tar.xz "$WORKDIR"/*.zip "$WORKDIR"/*.msi; do
+            [ -f "$f" ] || continue
+            echo "Verifying provenance: $(basename "$f")"
+            gh attestation verify "$f" \
+              --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml"
+            verified=$((verified + 1))
+          done
+          if [ "$verified" -eq 0 ]; then
+            echo "::error::no build artifacts found to verify for ${{ steps.plan.outputs.tag }}"
+            exit 1
+          fi
+          echo "Verified provenance of $verified artifact(s)."
+
+      - name: Sign each artifact
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Shred the secret keyfile when this step exits (success or failure) —
+          # it is only needed here, so don't leave it on disk for later steps.
+          trap 'rm -f "$MINISIGN_KEY_FILE"' EXIT
+          signed=0
+          # Restrict to the known release artifact extensions we verified above;
+          # don't sign installer scripts, checksum files, or anything unexpected.
+          for f in "$WORKDIR"/*.tar.gz "$WORKDIR"/*.tar.xz "$WORKDIR"/*.zip "$WORKDIR"/*.msi; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+
+            # minisign reads the key password from stdin when no tty is present,
+            # so feed it via a pipe — it never appears in argv or the logs. If
+            # the key is unencrypted, minisign ignores the piped line.
+            printf '%s\n' "${MINISIGN_PASSWORD:-}" | minisign -S \
+              -s "$MINISIGN_KEY_FILE" \
+              -m "$f" \
+              -x "$f.minisig" \
+              -c "nexus-exchange-cli $TAG: $base" \
+              -t "nexus-exchange-cli $TAG $base"
+            signed=$((signed + 1))
+          done
+          if [ "$signed" -eq 0 ]; then
+            echo "::error::no artifacts found to sign for $TAG"
+            exit 1
+          fi
+          echo "Signed $signed artifact(s)."
+
+      - name: Verify signatures against the published public key
+        env:
+          # Public keys are not secret; supplied as a repo variable.
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Required, fail closed: without the published key we cannot prove the
+          # .minisig files verify against the key we tell users to trust, so we
+          # refuse to ship them rather than publish signatures nobody can check.
+          if [ -z "${MINISIGN_PUBLIC_KEY:-}" ]; then
+            echo "::error::MINISIGN_PUBLIC_KEY variable is not set; refusing to publish signatures that cannot be self-verified. Set it to the published public key (also in the README)."
+            exit 1
+          fi
+          # Also catches a mismatched/rotated key before anything is uploaded.
+          for sig in "$WORKDIR"/*.minisig; do
+            minisign -V -P "$MINISIGN_PUBLIC_KEY" -m "${sig%.minisig}" -x "$sig"
+          done
+          echo "All signatures verify against the published public key."
+
+      - name: Upload signatures to the release
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sigs=("$WORKDIR"/*.minisig)
+          if [ "${#sigs[@]}" -eq 0 ]; then
+            echo "::error::no .minisig files were produced"
+            exit 1
+          fi
+          # --clobber makes re-runs idempotent: a retried job overwrites its own
+          # previous signatures instead of failing on "asset already exists".
+          gh release upload "$TAG" "${sigs[@]}" --clobber
+          echo "Uploaded ${#sigs[@]} signature(s) to $TAG."

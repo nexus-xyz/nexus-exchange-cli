@@ -14,24 +14,61 @@ cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
+installers = ["shell", "powershell", "homebrew", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # A GitHub repo to push Homebrew formulas to
 tap = "nexus-xyz/homebrew-tap"
-# Publish jobs to run in CI
-publish-jobs = ["homebrew"]
+# Publish jobs to run in CI:
+#  - "homebrew": push the generated formula to the tap above.
+#  - "./minisign": custom job (.github/workflows/minisign.yml) that verifies each
+#    artifact's build-provenance attestation and attaches a detached minisign
+#    (.minisig) signature to it.
+publish-jobs = ["homebrew", "./minisign"]
 # Customize the Homebrew formula name
 formula = "nexus"
 # Checksums to generate for each App
 checksum = "sha256"
 # Whether to enable GitHub Attestations
 github-attestations = true
-# Which actions to run on pull requests
-pr-run-mode = "plan"
+# Which actions to run on pull requests. Run the full cross-platform build on
+# every PR (not just `plan`), so the release pipeline is exercised as a real,
+# blocking check. Artifacts are uploaded to the workflow run as a dry-run; no
+# GitHub Release is created and no publish jobs run on PRs.
+pr-run-mode = "upload"
 # The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.gz"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+
+# --- macOS code signing ------------------------------------------------------
+# Code-signing the macOS binaries with an Apple Developer ID certificate is
+# supported, but DISABLED until a real certificate secret is configured. Unlike
+# the Windows/SSL.com path, dist's macOS path does NOT skip when the cert is
+# absent — it tries to import an empty certificate and the build fails. Since we
+# now build on every PR (pr-run-mode = upload), leaving this on with no cert
+# would break every build, not just releases.
+#
+# To enable: add the CODESIGN_CERTIFICATE / CODESIGN_CERTIFICATE_PASSWORD /
+# CODESIGN_IDENTITY secrets (see README) and set this to `true`.
+#
+# NOTE: even when enabled, dist 0.31 signs but does not *notarize*. Notarization
+# only adds value for a stapled bundle (.pkg/.dmg) — a loose CLI binary can't be
+# stapled — so it's deferred until/unless we ship a .pkg installer.
+macos-sign = false
+# Authenticode-sign the Windows binaries and .msi via SSL.com's eSigner using
+# the production CA; credentials come from CI secrets (skipped if absent).
+ssldotcom-windows-sign = "prod"
+
+# Grant the custom minisign publish job exactly the scope it needs and nothing
+# more: write access to release assets so it can attach .minisig files, and read
+# access to attestations so it can `gh attestation verify` each artifact's build
+# provenance before signing it. Custom publish jobs otherwise default to
+# id-token/packages, which cannot upload release assets. Least privilege.
+#
+# NOTE: this sub-table must come after all flat [dist] keys above; in TOML a
+# table header ends the preceding table.
+[dist.github-custom-job-permissions]
+minisign = { contents = "write", attestations = "read" }
