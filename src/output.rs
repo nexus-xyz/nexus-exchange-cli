@@ -7,7 +7,7 @@
 
 use nexus_exchange::types::{
     AccountSummary, Fill, HealthStatus, Market, Ohlcv, Order, OrderBook, OrderResponse, Position,
-    PriceLevel, Side, Ticker, Trade,
+    PriceLevel, RateLimitStatus, Side, Ticker, Trade,
 };
 use serde_json::{json, Value};
 
@@ -523,6 +523,35 @@ pub fn cancel(value: &Value, human_note: &str) -> String {
     format!("{human_note}\n{}", pretty(value))
 }
 
+// ───────────────────────── rate limit ─────────────────────────
+
+/// Render the caller's rate-limit status as key/value lines. The limit /
+/// remaining / reset fields are `null` for the unlimited tier, shown as `-`.
+pub fn rate_limit(r: &RateLimitStatus) -> String {
+    let rows = [
+        ("tier", r.tier.clone()),
+        ("limit (req/s)", opt(&r.limit)),
+        ("remaining", opt(&r.remaining)),
+        ("reset at (ms)", opt(&r.reset_at_ms)),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<16}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render the rate-limit status as pretty JSON. The unlimited tier sends `null`
+/// for the numeric fields, preserved here as JSON `null`.
+pub fn rate_limit_json(r: &RateLimitStatus) -> String {
+    let value = json!({
+        "tier": r.tier,
+        "limit": r.limit,
+        "remaining": r.remaining,
+        "reset_at_ms": r.reset_at_ms,
+    });
+    pretty(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +686,35 @@ mod tests {
         assert_eq!(row["price"], json!("84000"));
         assert_eq!(row["quantity"], json!("0.01"));
         assert_eq!(row["side"], json!("Buy"));
+    }
+
+    #[test]
+    fn rate_limit_json_keeps_numbers_and_null_for_unlimited() {
+        // A bounded tier reports numeric limit / remaining / reset.
+        let bounded: RateLimitStatus = serde_json::from_value(json!({
+            "tier": "pro",
+            "limit": 100,
+            "remaining": 87,
+            "reset_at_ms": 1_700_000_000_000i64
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&rate_limit_json(&bounded)).unwrap();
+        assert_eq!(keys(&v), ["limit", "remaining", "reset_at_ms", "tier"]);
+        assert_eq!(v["tier"], json!("pro"));
+        assert_eq!(v["limit"], json!(100));
+        assert_eq!(v["remaining"], json!(87));
+
+        // The unlimited tier sends null for the numeric fields.
+        let unlimited: RateLimitStatus = serde_json::from_value(json!({
+            "tier": "unlimited",
+            "limit": null,
+            "remaining": null,
+            "reset_at_ms": null
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&rate_limit_json(&unlimited)).unwrap();
+        assert_eq!(v["limit"], Value::Null);
+        assert_eq!(v["remaining"], Value::Null);
+        assert_eq!(v["reset_at_ms"], Value::Null);
     }
 }

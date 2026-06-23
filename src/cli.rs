@@ -259,6 +259,12 @@ pub enum Command {
     /// Show your account summary (balance, collateral, equity, margin).
     Balance,
 
+    /// Account utilities: rate-limit status, and more.
+    Account {
+        #[command(subcommand)]
+        action: AccountCommand,
+    },
+
     /// List your open positions.
     Positions,
 
@@ -301,6 +307,12 @@ pub enum Command {
         /// Target shell.
         shell: Shell,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Show your current rate-limit status (tier, ceiling, remaining, reset).
+    RateLimit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -526,6 +538,17 @@ mod tests {
     }
 
     #[test]
+    fn account_rate_limit_parses() {
+        let cli = Cli::try_parse_from(["nexus", "account", "rate-limit"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Account {
+                action: AccountCommand::RateLimit
+            }
+        ));
+    }
+
+    #[test]
     fn order_cancel_all_conflicts_with_id() {
         // `--all` and a positional id are mutually exclusive.
         assert!(Cli::try_parse_from(["nexus", "order", "cancel", "abc", "--all"]).is_err());
@@ -553,6 +576,7 @@ mod tests {
             "candles",
             "health",
             "balance",
+            "account",
             "positions",
             "fills",
             "orders",

@@ -18,7 +18,7 @@ use clap::{CommandFactory, Parser};
 use nexus_exchange::types::{Decimal, OrderRequest};
 use nexus_exchange::Client;
 
-use cli::{Cli, Command, OrderCommand, OutputFormat};
+use cli::{AccountCommand, Cli, Command, OrderCommand, OutputFormat};
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
 #[tokio::main]
@@ -125,6 +125,9 @@ async fn main() -> Result<()> {
                 output::balance_json(&balance)
             });
         }
+        Command::Account { action } => {
+            handle_account(&client, authenticated, action, format).await?
+        }
         Command::Positions => {
             require_authenticated(authenticated, "positions")?;
             let positions = client
@@ -182,6 +185,28 @@ async fn main() -> Result<()> {
         Command::Completions { .. } | Command::Setup => unreachable!("handled above"),
     }
 
+    Ok(())
+}
+
+/// Handle the authenticated `account` subcommands (currently `rate-limit`).
+async fn handle_account(
+    client: &Client,
+    authenticated: bool,
+    action: AccountCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        AccountCommand::RateLimit => {
+            require_authenticated(authenticated, "account rate-limit")?;
+            let status = client
+                .fetch_rate_limit_status()
+                .await
+                .context("failed to fetch rate-limit status")?;
+            emit(format, output::rate_limit(&status), || {
+                output::rate_limit_json(&status)
+            });
+        }
+    }
     Ok(())
 }
 
