@@ -155,6 +155,18 @@ async fn main() -> Result<()> {
                 output::orders_json(&orders)
             });
         }
+        Command::Withdrawals { limit } => {
+            require_authenticated(authenticated, "withdrawals")?;
+            let mut withdrawals = client
+                .fetch_withdrawals()
+                .await
+                .context("failed to fetch withdrawals")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            withdrawals.truncate(limit as usize);
+            emit(format, output::withdrawals(&withdrawals), || {
+                output::withdrawals_json(&withdrawals)
+            });
+        }
 
         // ── trading ──
         Command::Order { action } => handle_order(&client, authenticated, action, format).await?,

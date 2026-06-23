@@ -7,7 +7,7 @@
 
 use nexus_exchange::types::{
     AccountSummary, Fill, HealthStatus, Market, Ohlcv, Order, OrderBook, OrderResponse, Position,
-    PriceLevel, Side, Ticker, Trade,
+    PriceLevel, Side, Ticker, Trade, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -523,6 +523,44 @@ pub fn cancel(value: &Value, human_note: &str) -> String {
     format!("{human_note}\n{}", pretty(value))
 }
 
+// ───────────────────────── withdrawals ─────────────────────────
+
+/// Render withdrawal history as an aligned table.
+pub fn withdrawals(ws: &[Withdrawal]) -> String {
+    if ws.is_empty() {
+        return "No withdrawals returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<38}  {:>16}  {:<12}  {:<16}\n",
+        "ID", "AMOUNT", "STATUS", "TIME(ms)"
+    );
+    for w in ws {
+        out.push_str(&format!(
+            "{:<38}  {:>16}  {:<12}  {:<16}\n",
+            w.id, w.amount, w.status, w.timestamp,
+        ));
+    }
+    out.push_str(&format!("\n{} withdrawal(s).", ws.len()));
+    out
+}
+
+/// Render withdrawal history as pretty JSON. Amount is a decimal string so no
+/// precision is lost.
+pub fn withdrawals_json(ws: &[Withdrawal]) -> String {
+    let value: Value = ws
+        .iter()
+        .map(|w| {
+            json!({
+                "id": w.id,
+                "amount": w.amount.to_string(),
+                "status": w.status,
+                "timestamp": w.timestamp,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +695,28 @@ mod tests {
         assert_eq!(row["price"], json!("84000"));
         assert_eq!(row["quantity"], json!("0.01"));
         assert_eq!(row["side"], json!("Buy"));
+    }
+
+    #[test]
+    fn withdrawals_json_uses_decimal_string_amount() {
+        let withdrawals: Vec<Withdrawal> = serde_json::from_value(json!([{
+            "id": "w1",
+            "amount": "100.5",
+            "timestamp": 1_700_000_000_000i64,
+            "status": "completed"
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&withdrawals_json(&withdrawals)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(keys(row), ["amount", "id", "status", "timestamp"]);
+        // Amount is a decimal string; timestamp stays a JSON number.
+        assert_eq!(row["amount"], json!("100.5"));
+        assert_eq!(row["status"], json!("completed"));
+        assert_eq!(row["timestamp"], json!(1_700_000_000_000i64));
+    }
+
+    #[test]
+    fn withdrawals_human_reports_empty() {
+        assert_eq!(withdrawals(&[]), "No withdrawals returned.");
     }
 }
