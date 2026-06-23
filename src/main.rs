@@ -1,68 +1,379 @@
 //! `nexus` — command-line interface for the Nexus Exchange API.
+//!
+//! A thin command/output layer over the [`nexus_exchange`] SDK: every request
+//! goes through the SDK's [`Client`], which owns request signing, the HTTP/WS
+//! transport, retries, rate-limit pacing, and the wire types. This binary only
+//! parses arguments, resolves config/credentials, and renders results.
 
 mod cli;
+mod credentials;
 mod output;
+mod wsclient;
+
+use std::io::{self, IsTerminal, Write};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
+use nexus_exchange::types::{Decimal, OrderRequest};
 use nexus_exchange::Client;
 
-use cli::{Cli, Command, OutputFormat};
+use cli::{Cli, Command, OrderCommand, OutputFormat};
+use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Shell completions need neither network nor credentials — generate and exit
-    // before constructing the client or emitting credential warnings.
+    // before touching config or the network.
     if let Command::Completions { shell } = cli.command {
-        clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut std::io::stdout());
+        clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut io::stdout());
         return Ok(());
     }
 
-    // Credentials are accepted but not yet consumed: every command below hits a
-    // public, unauthenticated endpoint. Flag it so a user who supplied half a
-    // pair (or expected auth) isn't surprised.
-    if cli.credentials.api_key.is_some() && !cli.credentials.is_complete() {
-        eprintln!("warning: --api-key/$NEXUS_API_KEY set without a matching --api-secret/$NEXUS_API_SECRET");
+    // `setup` is purely local and manages its own file I/O.
+    if let Command::Setup = cli.command {
+        return credentials::setup();
     }
 
-    let client = Client::new(cli.config());
+    // Layer flags/env over the config file (a malformed file is a hard error so
+    // the user notices rather than silently losing settings).
+    let file = credentials::load()?.unwrap_or_default();
+
+    // Build the SDK config (network / base URL), then attach credentials so the
+    // SDK signs authenticated requests. `credentials` is resolved once here so
+    // its single "half a pair" warning isn't emitted twice.
+    let credentials = cli.credentials(&file);
+    let authenticated = credentials.is_some();
+    let mut config = cli.config(&file);
+    if let Some((key, secret)) = credentials {
+        config = config.api_key(key, secret);
+    }
+    let client = Client::new(config.clone());
     let format = cli.output;
 
     match cli.command {
+        // ── public market data ──
         Command::Markets => {
             let markets = client
                 .fetch_markets()
                 .await
                 .context("failed to fetch markets")?;
-            match format {
-                OutputFormat::Human => println!("{}", output::markets(&markets)),
-                OutputFormat::Json => println!("{}", output::markets_json(&markets)),
-            }
+            emit(format, output::markets(&markets), || {
+                output::markets_json(&markets)
+            });
         }
         Command::Ticker { market_id } => {
             let ticker = client
                 .fetch_ticker(&market_id)
                 .await
                 .with_context(|| format!("failed to fetch ticker for {market_id}"))?;
-            match format {
-                OutputFormat::Human => println!("{}", output::ticker(&ticker)),
-                OutputFormat::Json => println!("{}", output::ticker_json(&ticker)),
-            }
+            emit(format, output::ticker(&ticker), || {
+                output::ticker_json(&ticker)
+            });
         }
         Command::Health => {
             let health = client
                 .health_check()
                 .await
                 .context("failed to fetch health status")?;
-            match format {
-                OutputFormat::Human => println!("{}", output::health(&health)),
-                OutputFormat::Json => println!("{}", output::health_json(&health)),
-            }
+            emit(format, output::health(&health), || {
+                output::health_json(&health)
+            });
         }
-        Command::Completions { .. } => unreachable!("handled above"),
+        Command::Orderbook { market_id } => {
+            let book = client
+                .fetch_order_book(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch order book for {market_id}"))?;
+            emit(format, output::orderbook(&book), || {
+                output::orderbook_json(&book)
+            });
+        }
+        Command::Trades { market_id, limit } => {
+            let trades = client
+                .fetch_trades(&market_id, Some(limit))
+                .await
+                .with_context(|| format!("failed to fetch trades for {market_id}"))?;
+            emit(format, output::trades(&trades), || {
+                output::trades_json(&trades)
+            });
+        }
+        Command::Candles {
+            market_id,
+            timeframe,
+            limit,
+        } => {
+            let candles = client
+                .fetch_ohlcv(&market_id, Some(&timeframe), Some(limit))
+                .await
+                .with_context(|| format!("failed to fetch candles for {market_id}"))?;
+            emit(format, output::candles(&candles), || {
+                output::candles_json(&candles)
+            });
+        }
+
+        // ── authenticated account ──
+        Command::Balance => {
+            require_authenticated(authenticated, "balance")?;
+            let balance = client
+                .fetch_balance()
+                .await
+                .context("failed to fetch account balance")?;
+            emit(format, output::balance(&balance), || {
+                output::balance_json(&balance)
+            });
+        }
+        Command::Positions => {
+            require_authenticated(authenticated, "positions")?;
+            let positions = client
+                .fetch_positions()
+                .await
+                .context("failed to fetch positions")?;
+            emit(format, output::positions(&positions), || {
+                output::positions_json(&positions)
+            });
+        }
+        Command::Fills { limit } => {
+            require_authenticated(authenticated, "fills")?;
+            let mut fills = client
+                .fetch_my_trades()
+                .await
+                .context("failed to fetch fills")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            fills.truncate(limit as usize);
+            emit(format, output::fills(&fills), || output::fills_json(&fills));
+        }
+        Command::Orders => {
+            require_authenticated(authenticated, "orders")?;
+            let orders = client
+                .fetch_open_orders()
+                .await
+                .context("failed to fetch open orders")?;
+            emit(format, output::orders(&orders), || {
+                output::orders_json(&orders)
+            });
+        }
+
+        // ── trading ──
+        Command::Order { action } => handle_order(&client, authenticated, action, format).await?,
+
+        // ── websocket ──
+        Command::Ws {
+            channels,
+            market,
+            since,
+        } => {
+            let subs = build_subscriptions(&channels, market, since)?;
+            if subs
+                .iter()
+                .any(|s| ACCOUNT_CHANNELS.contains(&s.channel.as_str()))
+                && !authenticated
+            {
+                eprintln!(
+                    "warning: account channels (orders/fills/positions/balances) require credentials; \
+                     they will be empty without `nexus setup` or --api-key/--api-secret"
+                );
+            }
+            wsclient::stream(&client, &config, authenticated, &subs, format).await?;
+        }
+
+        Command::Completions { .. } | Command::Setup => unreachable!("handled above"),
     }
 
     Ok(())
+}
+
+/// Handle `order place` / `order cancel`, including the safety confirmation
+/// prompt for these mutating actions.
+async fn handle_order(
+    client: &Client,
+    authenticated: bool,
+    action: OrderCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        OrderCommand::Place {
+            market,
+            side,
+            order_type,
+            price,
+            quantity,
+            tif,
+            reduce_only,
+            yes,
+        } => {
+            require_authenticated(authenticated, "order place")?;
+            let quantity = parse_amount("quantity", &quantity)?;
+
+            use cli::OrderTypeArg;
+            let mut request = match order_type {
+                OrderTypeArg::Limit => {
+                    let p = price
+                        .as_deref()
+                        .context("--price is required for a limit order")?;
+                    let price = parse_amount("price", p)?;
+                    OrderRequest::limit(market.clone(), side.into(), price, quantity, tif.into())
+                }
+                OrderTypeArg::Market => {
+                    if price.is_some() {
+                        eprintln!("note: --price is ignored for a market order");
+                    }
+                    OrderRequest::market(market.clone(), side.into(), quantity)
+                }
+            };
+            if reduce_only {
+                request.reduce_only = Some(true);
+            }
+
+            let summary = format!(
+                "Place {:?} {:?} order: {} {} @ {} (tif {:?}{})",
+                request.side,
+                request.order_type,
+                request.quantity,
+                market,
+                request
+                    .price
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "market".into()),
+                request.time_in_force,
+                if reduce_only { ", reduce-only" } else { "" },
+            );
+            if !confirm(&summary, yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+
+            let result = client
+                .create_order(&request)
+                .await
+                .context("failed to place order")?;
+            emit(format, output::order_result(&result), || {
+                output::order_result_json(&result)
+            });
+        }
+
+        OrderCommand::Cancel { order_id, all, yes } => {
+            require_authenticated(authenticated, "order cancel")?;
+            if all {
+                if !confirm("Cancel ALL open orders", yes)? {
+                    eprintln!("aborted.");
+                    return Ok(());
+                }
+                let value = client
+                    .cancel_all_orders()
+                    .await
+                    .context("failed to cancel orders")?;
+                emit(
+                    format,
+                    output::cancel(&value, "cancelled all open orders."),
+                    || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                );
+            } else {
+                let id = order_id
+                    .context("provide an order id, or use --all to cancel every open order")?;
+                if !confirm(&format!("Cancel order {id}"), yes)? {
+                    eprintln!("aborted.");
+                    return Ok(());
+                }
+                let value = client
+                    .cancel_order(&id)
+                    .await
+                    .context("failed to cancel order")?;
+                emit(
+                    format,
+                    output::cancel(&value, &format!("cancelled order {id}.")),
+                    || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Map CLI channel arguments to validated [`Subscription`]s.
+fn build_subscriptions(
+    channels: &[String],
+    market: Option<String>,
+    since: Option<i64>,
+) -> Result<Vec<Subscription>> {
+    let mut subs = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let is_public = PUBLIC_CHANNELS.contains(&channel.as_str());
+        let is_account = ACCOUNT_CHANNELS.contains(&channel.as_str());
+        if !is_public && !is_account {
+            anyhow::bail!(
+                "unknown channel '{channel}'. Public: {}. Account: {}.",
+                PUBLIC_CHANNELS.join(", "),
+                ACCOUNT_CHANNELS.join(", "),
+            );
+        }
+        if is_public && market.is_none() {
+            anyhow::bail!("channel '{channel}' requires --market");
+        }
+        subs.push(Subscription {
+            channel: channel.clone(),
+            // Account channels are scoped by the token, so drop any market.
+            market: if is_public { market.clone() } else { None },
+            since,
+        });
+    }
+    Ok(subs)
+}
+
+/// Print human or JSON output. The JSON renderer is a closure so it is only run
+/// for the format actually selected.
+fn emit(format: OutputFormat, human: String, json: impl FnOnce() -> String) {
+    match format {
+        OutputFormat::Human => println!("{human}"),
+        OutputFormat::Json => println!("{}", json()),
+    }
+}
+
+/// Fail fast when an account-scoped command is invoked without credentials.
+/// These requests can only ever succeed signed, so we error (non-zero exit)
+/// instead of sending an unsigned request that surfaces as an opaque 401 —
+/// this stops scripts from silently mis-authenticating.
+fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
+    if !authenticated {
+        anyhow::bail!(
+            "'{what}' is an authenticated command but no credentials are configured \
+             (run `nexus setup` or set NEXUS_API_KEY/NEXUS_API_SECRET)"
+        );
+    }
+    Ok(())
+}
+
+/// Parse a price/quantity into the SDK's [`Decimal`], rejecting non-positive or
+/// malformed values so we don't ship an obviously-bad order to the exchange.
+fn parse_amount(field: &str, value: &str) -> Result<Decimal> {
+    match Decimal::from_str(value) {
+        Ok(n) if n > Decimal::ZERO => Ok(n),
+        _ => anyhow::bail!("{field} must be a positive number, got {value:?}"),
+    }
+}
+
+/// Confirm a mutating action. Returns `Ok(true)` to proceed. With `--yes`, skips
+/// the prompt; without a terminal and without `--yes`, refuses outright so an
+/// automated context can never place/cancel by accident.
+fn confirm(prompt: &str, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        anyhow::bail!(
+            "{prompt}: refusing to proceed without confirmation — pass --yes to skip the prompt"
+        );
+    }
+    eprint!("{prompt}? [y/N]: ");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("failed to read confirmation")?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
