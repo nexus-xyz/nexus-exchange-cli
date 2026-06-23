@@ -326,7 +326,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -770,8 +770,9 @@ dependencies = [
 
 [[package]]
 name = "nexus-exchange"
-version = "0.1.0"
-source = "git+https://github.com/nexus-xyz/nexus-exchange-rs?branch=main#318896155ca9f5743cabdd060c6aad4c4dad6700"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43ad7ed4e6cd31e0ad33222678994f2d33a347e5e570aec9cd578623643664a7"
 dependencies = [
  "backon",
  "futures-core",

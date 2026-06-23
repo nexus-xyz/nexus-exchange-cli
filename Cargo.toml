@@ -57,15 +57,15 @@ name = "nexus"
 path = "src/main.rs"
 
 [dependencies]
-# The Nexus Exchange SDK. The crate is not yet on crates.io (it ships with
-# `publish = false`), so we depend on it from git, pinned to `main`. Swap this
-# for a `version = "x.y"` line once the SDK is published.
+# The Nexus Exchange SDK, published to crates.io. Pinned to the registry version
+# for reproducible builds (was previously a git/main dependency before the SDK
+# was published).
 #
 # The CLI is a thin command/output layer over this SDK: every request — public
 # market data, the authenticated account, trading, and WebSocket streaming —
 # goes through `Client`, which owns request signing, the HTTP/WS transport, and
 # the wire types. The CLI carries no transport of its own.
-nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", branch = "main" }
+nexus-exchange = "0.2.0"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
