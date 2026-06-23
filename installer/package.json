@@ -1,0 +1,15 @@
+{
+  "name": "nexus-cli-installer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "cli.nexus.xyz — Cloudflare Worker that serves the nexus cargo-dist installer",
+  "scripts": {
+    "test": "node --test",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}
