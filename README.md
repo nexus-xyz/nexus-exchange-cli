@@ -161,6 +161,11 @@ nexus trades BTC-USDX-PERP --limit 50
 nexus candles BTC-USDX-PERP --timeframe 1m --limit 100
 nexus health                        # indexer health snapshot
 
+# Per-market data
+nexus market summary                       # 24h volume + halt state per market
+nexus market status BTC-USDX-PERP          # lifecycle / halt status
+nexus market mark-price BTC-USDX-PERP      # current mark price
+
 # Authenticated account (see Credentials below)
 nexus balance                       # balance, collateral, equity, margin
 nexus positions                     # open positions

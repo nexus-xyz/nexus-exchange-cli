@@ -6,8 +6,8 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountSummary, Fill, HealthStatus, Market, Ohlcv, Order, OrderBook, OrderResponse, Position,
-    PriceLevel, Side, Ticker, Trade,
+    AccountSummary, Fill, HealthStatus, MarkPrice, Market, MarketStatus, MarketSummary, Ohlcv,
+    Order, OrderBook, OrderResponse, Position, PriceLevel, Side, Ticker, Trade,
 };
 use serde_json::{json, Value};
 
@@ -523,6 +523,104 @@ pub fn cancel(value: &Value, human_note: &str) -> String {
     format!("{human_note}\n{}", pretty(value))
 }
 
+// ───────────────────────── market summaries ─────────────────────────
+
+/// Render per-market summaries (24h volume, halt state) as an aligned table.
+pub fn market_summaries(ss: &[MarketSummary]) -> String {
+    if ss.is_empty() {
+        return "No market summaries returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
+        "MARKET", "MARK PRICE", "VOLUME 24H", "TRADES", "STATUS", "ADL EVTS"
+    );
+    for s in ss {
+        out.push_str(&format!(
+            "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
+            s.market_id,
+            opt(&s.mark_price),
+            s.volume_24h,
+            s.trade_count,
+            s.status,
+            s.adl_event_count,
+        ));
+    }
+    out.push_str(&format!("\n{} market(s).", ss.len()));
+    out
+}
+
+/// Render per-market summaries as pretty JSON.
+pub fn market_summaries_json(ss: &[MarketSummary]) -> String {
+    let value: Value = ss
+        .iter()
+        .map(|s| {
+            json!({
+                "market_id": s.market_id,
+                "mark_price": opt_json(&s.mark_price),
+                "volume_24h": s.volume_24h.to_string(),
+                "trade_count": s.trade_count,
+                "status": s.status,
+                "halt_reason": s.halt_reason,
+                "halted_at": s.halted_at,
+                "adl_event_count": s.adl_event_count,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── market status ─────────────────────────
+
+/// Render a single market's lifecycle/halt status as key/value lines.
+pub fn market_status(s: &MarketStatus) -> String {
+    let rows = [
+        ("market", s.market_id.clone()),
+        ("status", s.status.clone()),
+        ("halt reason", opt(&s.halt_reason)),
+        ("halted at", opt(&s.halted_at)),
+        ("adl events", s.adl_event_count.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<14}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render a single market's status as pretty JSON.
+pub fn market_status_json(s: &MarketStatus) -> String {
+    let value = json!({
+        "market_id": s.market_id,
+        "status": s.status,
+        "halt_reason": s.halt_reason,
+        "halted_at": s.halted_at,
+        "adl_event_count": s.adl_event_count,
+    });
+    pretty(&value)
+}
+
+// ───────────────────────── mark price ─────────────────────────
+
+/// Render a market's mark price as key/value lines.
+pub fn mark_price(m: &MarkPrice) -> String {
+    let rows = [
+        ("market", m.market_id.clone()),
+        ("mark price", m.mark_price.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<14}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render a market's mark price as pretty JSON.
+pub fn mark_price_json(m: &MarkPrice) -> String {
+    let value = json!({
+        "market_id": m.market_id,
+        "mark_price": m.mark_price.to_string(),
+    });
+    pretty(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +755,82 @@ mod tests {
         assert_eq!(row["price"], json!("84000"));
         assert_eq!(row["quantity"], json!("0.01"));
         assert_eq!(row["side"], json!("Buy"));
+    }
+
+    #[test]
+    fn market_summaries_json_uses_decimal_strings_and_null_mark() {
+        // `mark_price` and `volume_24h` arrive as JSON numbers via the SDK's
+        // float adapter; a halted market sends `null` for the mark.
+        let summaries: Vec<MarketSummary> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP",
+            "mark_price": null,
+            "volume_24h": 1234.5,
+            "trade_count": 42,
+            "status": "halted",
+            "halt_reason": "maintenance",
+            "halted_at": 1_700_000_000_000i64,
+            "adl_event_count": 3
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&market_summaries_json(&summaries)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(
+            keys(row),
+            [
+                "adl_event_count",
+                "halt_reason",
+                "halted_at",
+                "mark_price",
+                "market_id",
+                "status",
+                "trade_count",
+                "volume_24h",
+            ]
+        );
+        // Money is a decimal string; an absent mark is JSON null; counts stay numbers.
+        assert_eq!(row["mark_price"], Value::Null);
+        assert_eq!(row["volume_24h"], json!("1234.5"));
+        assert_eq!(row["trade_count"], json!(42));
+        assert_eq!(row["status"], json!("halted"));
+    }
+
+    #[test]
+    fn mark_price_json_is_a_decimal_string() {
+        // The mark-price endpoint sends the price as a decimal string.
+        let mp: MarkPrice = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "mark_price": "84000.5"
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&mark_price_json(&mp)).unwrap();
+        assert_eq!(keys(&v), ["mark_price", "market_id"]);
+        assert_eq!(v["mark_price"], json!("84000.5"));
+    }
+
+    #[test]
+    fn market_status_json_preserves_optional_halt_fields() {
+        // An active market reports no halt reason / time.
+        let status: MarketStatus = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "status": "active",
+            "halt_reason": null,
+            "halted_at": null,
+            "adl_event_count": 0
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&market_status_json(&status)).unwrap();
+        assert_eq!(
+            keys(&v),
+            [
+                "adl_event_count",
+                "halt_reason",
+                "halted_at",
+                "market_id",
+                "status",
+            ]
+        );
+        assert_eq!(v["halt_reason"], Value::Null);
+        assert_eq!(v["halted_at"], Value::Null);
+        assert_eq!(v["status"], json!("active"));
     }
 }
