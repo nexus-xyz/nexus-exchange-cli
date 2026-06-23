@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 description = "Command-line interface for the Nexus Exchange API"
+# Required by the WiX/MSI installer (dist refuses to generate main.wxs without it).
+authors = ["Nexus <oss@nexus.xyz>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nexus-xyz/nexus-exchange-cli"
 homepage = "https://github.com/nexus-xyz/nexus-exchange-cli"
@@ -16,6 +18,16 @@ publish = false
 # packages and releases it.
 [package.metadata.dist]
 dist = true
+
+# WiX/MSI settings for the Windows `msi` installer. The GUIDs are stable
+# identifiers for the product upgrade code and install path — generated once and
+# kept fixed so successive .msi versions upgrade cleanly rather than installing
+# side by side. License/EULA dialogs are disabled (the CLI has no separate EULA).
+[package.metadata.wix]
+upgrade-guid = "640C0E23-1A10-46B1-ACC9-87AC429A3053"
+path-guid = "6D86B1C3-134F-46C7-9B25-526D040A98AD"
+license = false
+eula = false
 
 # cargo-binstall support. These templates describe exactly where dist uploads
 # release artifacts and how they are laid out, so `cargo binstall

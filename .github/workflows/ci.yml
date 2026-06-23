@@ -38,3 +38,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+
+  # Ensure the release pipeline stays valid and the generated release.yml never
+  # drifts from dist-workspace.toml. Pinned to the same dist version the release
+  # workflow uses.
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      # Fails if .github/workflows/release.yml or wix/main.wxs are out of date.
+      - run: dist generate --check
+      # Fails if the release plan itself is invalid (bad targets, installers, etc).
+      - run: dist plan
