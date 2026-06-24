@@ -53,6 +53,11 @@ pub async fn stream(
     subs: &[Subscription],
     format: OutputFormat,
 ) -> Result<()> {
+    // The SDK only knows a WebSocket origin for networks that have one.
+    let ws_origin = config
+        .ws_url()
+        .context("the selected network has no WebSocket endpoint")?;
+
     // Account channels need a signed token; public channels can stream without
     // one. Only mint when we actually have credentials.
     let ws_url = if authenticated {
@@ -60,9 +65,9 @@ pub async fn stream(
             .mint_web_socket_token()
             .await
             .context("failed to mint a websocket token")?;
-        format!("{}?token={}", config.ws_url(), encode_token(&token.token))
+        format!("{}?token={}", ws_origin, encode_token(&token.token))
     } else {
-        config.ws_url().to_string()
+        ws_origin.to_string()
     };
 
     // Never log the token (it is a bearer credential); show only the host path.
