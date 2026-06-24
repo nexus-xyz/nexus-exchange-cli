@@ -5,9 +5,16 @@
 //! file, built-in default. Flags and env are merged by clap; this module adds
 //! the file layer underneath and owns the interactive `setup` flow.
 //!
-//! The config file holds an API secret, so it is created `0600` (owner
-//! read/write only) inside a `0700` directory, and the secret is never echoed
-//! while typing or printed back out.
+//! The config file holds an API secret and a wallet session token, so it is
+//! created `0600` (owner read/write only) inside a `0700` directory, and the
+//! secret is never echoed while typing or printed back out.
+//!
+//! There are two credential paths, both persisted here:
+//!   - the HMAC API key/secret pair (`api_key` + `api_secret`), used to sign
+//!     every authenticated request, and
+//!   - a wallet **session token** (`session_token`) minted by `nexus auth
+//!     login` (EIP-191 sign-in). It authenticates session-scoped routes and is
+//!     written with the same `0600` perms and precedence idiom as the secret.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -29,6 +36,10 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_secret: Option<String>,
+    /// Wallet session token minted by `nexus auth login` (EIP-191 sign-in).
+    /// Used to authenticate session-scoped routes; never echoed or printed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 impl std::fmt::Debug for FileConfig {
@@ -40,6 +51,10 @@ impl std::fmt::Debug for FileConfig {
             .field(
                 "api_secret",
                 &self.api_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -85,6 +100,16 @@ pub fn save(cfg: &FileConfig) -> Result<PathBuf> {
     write_private(&path, json.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
+}
+
+/// Persist a wallet session token (from `nexus auth login`) into the config
+/// file, preserving every other field. Loads the existing config, overwrites
+/// only `session_token`, and rewrites the file with the same `0600` perms as
+/// the API secret. Returns the path it was written to.
+pub fn save_session_token(token: &str) -> Result<PathBuf> {
+    let mut cfg = load()?.unwrap_or_default();
+    cfg.session_token = Some(token.to_string());
+    save(&cfg)
 }
 
 /// Write `bytes` to `path`, ensuring the file is owner-read/write only (`0600`).
@@ -153,6 +178,8 @@ pub fn setup() -> Result<()> {
         // Keep an existing secret if the user left the prompt blank.
         api_secret: non_empty(api_secret).or(existing.api_secret),
         base_url: existing.base_url,
+        // `setup` doesn't touch the wallet session token; preserve it.
+        session_token: existing.session_token,
     };
     // Normalize away an all-blank network so it doesn't shadow the default.
     if cfg.network.as_deref() == Some("") {
@@ -200,3 +227,103 @@ fn non_empty(s: String) -> Option<String> {
 // `IsTerminal` is in the prelude on the MSRV (1.82), but import it explicitly to
 // be unambiguous.
 use std::io::IsTerminal;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `save`/`load` resolve a single process-global path from `XDG_CONFIG_HOME`,
+    // so tests that touch the file must not run concurrently. Serialize them and
+    // point the path at a per-test temp dir.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `f` with `XDG_CONFIG_HOME` pointed at a fresh temp dir, restoring the
+    /// previous value afterwards. Serialized against other env-mutating tests.
+    fn with_temp_config<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir()
+            .join(format!("nexus-cli-test-{}", std::process::id()))
+            .join(format!("{:?}", std::time::Instant::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn session_token_round_trips_through_the_file() {
+        with_temp_config(|| {
+            // A fresh config has no token.
+            assert!(load().unwrap().is_none());
+
+            let path = save_session_token("sess_tok_abc123").unwrap();
+            let loaded = load().unwrap().expect("config should exist after save");
+            assert_eq!(loaded.session_token.as_deref(), Some("sess_tok_abc123"));
+
+            // Re-saving overwrites only the token, preserving other fields.
+            let mut cfg = loaded;
+            cfg.api_key = Some("nx_key".into());
+            cfg.api_secret = Some("secret".into());
+            save(&cfg).unwrap();
+            let again = save_session_token("sess_tok_xyz789").unwrap();
+            assert_eq!(again, path);
+            let loaded = load().unwrap().unwrap();
+            assert_eq!(loaded.session_token.as_deref(), Some("sess_tok_xyz789"));
+            assert_eq!(loaded.api_key.as_deref(), Some("nx_key"));
+            assert_eq!(loaded.api_secret.as_deref(), Some("secret"));
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn session_token_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_config(|| {
+            let path = save_session_token("sess_tok_perm").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "session-token file must be 0600");
+        });
+    }
+
+    #[test]
+    fn debug_redacts_session_token() {
+        let cfg = FileConfig {
+            session_token: Some("super-secret-token".into()),
+            api_secret: Some("super-secret-secret".into()),
+            api_key: Some("nx_visible".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("super-secret-token"),
+            "session token leaked via Debug: {dbg}"
+        );
+        assert!(!dbg.contains("super-secret-secret"));
+        assert!(dbg.contains("nx_visible"));
+        assert!(dbg.contains("<redacted>"));
+    }
+
+    /// The persisted JSON must never name a token field unless one is set, and
+    /// must use the stable `session_token` key when it is.
+    #[test]
+    fn session_token_serializes_under_stable_key() {
+        let empty = FileConfig::default();
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(!json.contains("session_token"), "empty config: {json}");
+
+        let cfg = FileConfig {
+            session_token: Some("tok".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"session_token\":\"tok\""), "got {json}");
+    }
+}

@@ -827,6 +827,48 @@ pub fn agents_json(ags: &[AgentInfo]) -> String {
     pretty(&value)
 }
 
+// ───────────────────────── wallet auth: login / register ─────────────────────────
+
+/// Render a successful EIP-191 sign-in. The session token is shown so the user
+/// can copy it, but it has also been persisted to the config file; `token` is
+/// passed in by the caller (which exposes it from the `SecretString`) — this
+/// module never holds it. `path` is where the token was saved.
+pub fn login(address: &str, token: &str, path: &str) -> String {
+    format!(
+        "Signed in. Session token saved to {} (permissions 0600).
+
+         {:<14}{}
+{:<14}{}",
+        path, "address", address, "token", token,
+    )
+}
+
+pub fn login_json(address: &str, token: &str, path: &str) -> String {
+    pretty(&json!({
+        "address": address,
+        "token": token,
+        "saved_to": path,
+    }))
+}
+
+/// Render a successful EIP-712 agent registration.
+pub fn agent_registered(agent_address: &str, expires_at: u64) -> String {
+    format!(
+        "Registered agent.
+
+{:<16}{}
+{:<16}{}",
+        "agent", agent_address, "expires(ms)", expires_at,
+    )
+}
+
+pub fn agent_registered_json(agent_address: &str, expires_at: u64) -> String {
+    pretty(&json!({
+        "agent_address": agent_address,
+        "expires_at": expires_at,
+    }))
+}
+
 // ───────────────────────── account: deposit / credit / rate-limit ─────────────────────────
 
 pub fn deposit(d: &DepositResult) -> String {
