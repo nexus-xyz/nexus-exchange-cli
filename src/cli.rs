@@ -902,6 +902,17 @@ mod tests {
     }
 
     #[test]
+    fn account_rate_limit_parses() {
+        let cli = Cli::try_parse_from(["nexus", "account", "rate-limit"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Account {
+                action: AccountCommand::RateLimit
+            }
+        ));
+    }
+
+    #[test]
     fn market_status_takes_a_market_id() {
         let cli = Cli::try_parse_from(["nexus", "market", "status", "BTC-USDX-PERP"]).unwrap();
         match cli.command {
@@ -959,6 +970,7 @@ mod tests {
             "candles",
             "health",
             "balance",
+            "account",
             "positions",
             "fills",
             "withdrawals",
