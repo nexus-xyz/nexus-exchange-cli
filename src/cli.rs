@@ -259,7 +259,7 @@ pub enum Command {
     /// List all tradable markets and their trading rules.
     Markets,
 
-    /// Per-market data: summaries, lifecycle status, mark price, ADL events.
+    /// Per-market data: summaries, lifecycle status, mark price.
     Market {
         #[command(subcommand)]
         action: MarketCommand,

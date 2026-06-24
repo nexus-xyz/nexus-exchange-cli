@@ -36,6 +36,43 @@ fn opt_json<T: std::fmt::Display>(v: &Option<T>) -> Value {
     }
 }
 
+/// Format a unix-millisecond timestamp as an ISO-8601 UTC string
+/// (`YYYY-MM-DDTHH:MM:SSZ`), matching the `datetime` fields the SDK pre-formats
+/// elsewhere. Done with date arithmetic (Howard Hinnant's `civil_from_days`) to
+/// avoid pulling in a `chrono`/`time` dependency for this single field.
+fn ms_to_iso8601(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    // Shift the epoch to 0000-03-01 so leap days fall at the end of the cycle.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // day-of-era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], Mar=0
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Format an optional unix-millisecond timestamp as ISO-8601, or `-` when absent.
+fn opt_ms_iso(ms: &Option<i64>) -> String {
+    ms.map(ms_to_iso8601).unwrap_or_else(|| "-".to_string())
+}
+
+/// Render an optional unix-millisecond timestamp as an ISO-8601 JSON string, or
+/// `null` when absent — keeping JSON timestamps consistent with `datetime`.
+fn opt_ms_iso_json(ms: &Option<i64>) -> Value {
+    match ms {
+        Some(ms) => Value::String(ms_to_iso8601(*ms)),
+        None => Value::Null,
+    }
+}
+
 /// Pretty-print a JSON value. `serde_json` only fails to serialize on types it
 /// cannot represent; the values built here are always representable.
 fn pretty(value: &Value) -> String {
@@ -563,7 +600,7 @@ pub fn market_summaries_json(ss: &[MarketSummary]) -> String {
                 "trade_count": s.trade_count,
                 "status": s.status,
                 "halt_reason": s.halt_reason,
-                "halted_at": s.halted_at,
+                "halted_at": opt_ms_iso_json(&s.halted_at),
                 "adl_event_count": s.adl_event_count,
             })
         })
@@ -654,7 +691,7 @@ pub fn summaries_json(ss: &[MarketSummary]) -> String {
                 "trade_count": s.trade_count,
                 "status": s.status,
                 "halt_reason": s.halt_reason,
-                "halted_at": s.halted_at,
+                "halted_at": opt_ms_iso_json(&s.halted_at),
                 "adl_event_count": s.adl_event_count,
             })
         })
@@ -689,7 +726,7 @@ pub fn market_status(s: &MarketStatus) -> String {
             "halt reason",
             s.halt_reason.clone().unwrap_or_else(|| "-".into()),
         ),
-        ("halted at", opt(&s.halted_at)),
+        ("halted at", opt_ms_iso(&s.halted_at)),
         ("adl events", s.adl_event_count.to_string()),
     ];
     rows.iter()
@@ -704,7 +741,7 @@ pub fn market_status_json(s: &MarketStatus) -> String {
         "market_id": s.market_id,
         "status": s.status,
         "halt_reason": s.halt_reason,
-        "halted_at": s.halted_at,
+        "halted_at": opt_ms_iso_json(&s.halted_at),
         "adl_event_count": s.adl_event_count,
     }))
 }
@@ -1311,6 +1348,17 @@ mod tests {
         assert_eq!(row["volume_24h"], json!("1234.5"));
         assert_eq!(row["trade_count"], json!(42));
         assert_eq!(row["status"], json!("halted"));
+        // `halted_at` is rendered as an ISO-8601 string (not raw unix-ms) to
+        // match the `datetime` fields used elsewhere.
+        assert_eq!(row["halted_at"], json!("2023-11-14T22:13:20Z"));
+    }
+
+    #[test]
+    fn ms_to_iso8601_formats_unix_millis_as_utc() {
+        assert_eq!(ms_to_iso8601(1_700_000_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(ms_to_iso8601(0), "1970-01-01T00:00:00Z");
+        // Leap-year day (2024-02-29).
+        assert_eq!(ms_to_iso8601(1_709_208_000_000), "2024-02-29T12:00:00Z");
     }
 
     #[test]
