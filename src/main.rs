@@ -203,6 +203,18 @@ async fn main() -> Result<()> {
                 output::orders_json(&orders)
             });
         }
+        Command::Withdrawals { limit } => {
+            require_authenticated(authenticated, "withdrawals")?;
+            let mut withdrawals = client
+                .fetch_withdrawals()
+                .await
+                .context("failed to fetch withdrawals")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            withdrawals.truncate(limit as usize);
+            emit(format, output::withdrawals(&withdrawals), || {
+                output::withdrawals_json(&withdrawals)
+            });
+        }
 
         Command::FundingPayments { limit } => {
             require_authenticated(authenticated, "funding-payments")?;
@@ -214,16 +226,6 @@ async fn main() -> Result<()> {
             payments.truncate(limit as usize);
             emit(format, output::funding_payments(&payments), || {
                 output::funding_payments_json(&payments)
-            });
-        }
-        Command::Withdrawals => {
-            require_authenticated(authenticated, "withdrawals")?;
-            let withdrawals = client
-                .fetch_withdrawals()
-                .await
-                .context("failed to fetch withdrawals")?;
-            emit(format, output::withdrawals(&withdrawals), || {
-                output::withdrawals_json(&withdrawals)
             });
         }
 

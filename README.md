@@ -170,6 +170,7 @@ nexus health                        # indexer health snapshot
 nexus balance                       # balance, collateral, equity, margin
 nexus positions                     # open positions
 nexus fills --limit 50              # recent executions
+nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
 nexus funding-payments --limit 50   # funding booked against the account
 nexus withdrawals                   # withdrawal history
@@ -257,9 +258,9 @@ nexus --output json ws trades --market BTC-USDX-PERP | jq .payload
 
 ### Credentials
 
-Authenticated commands (`balance`, `positions`, `fills`, `orders`, `order …`,
-and account WebSocket channels) HMAC-sign each request. Public market-data
-commands don't need credentials.
+Authenticated commands (`balance`, `positions`, `fills`, `withdrawals`,
+`orders`, `order …`, and account WebSocket channels) HMAC-sign each request.
+Public market-data commands don't need credentials.
 
 Credentials resolve in this order, highest priority first:
 
