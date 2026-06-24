@@ -175,6 +175,7 @@ nexus market mark-price BTC-USDX-PERP      # current mark price
 nexus balance                       # balance, collateral, equity, margin
 nexus positions                     # open positions
 nexus fills --limit 50              # recent executions
+nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
 nexus funding-payments --limit 50   # funding booked against the account
 nexus withdrawals                   # withdrawal history
@@ -194,6 +195,11 @@ nexus account credit --amount 500   # claim testnet USDX (omit --amount for the 
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account leverage BTC-USDX-PERP 10
 nexus account margin-mode BTC-USDX-PERP isolated
+
+# Wallet-signed auth (EVM key; see Credentials below)
+nexus auth login                    # EIP-191 sign-in; prompts for the key,
+                                    # stores the session token (mode 0600)
+nexus agents register --agent 0x<AGENT_ADDR>   # EIP-712; prompts for the key
 
 # API keys, agents, transfers, sub-accounts
 nexus keys list
@@ -262,9 +268,9 @@ nexus --output json ws trades --market BTC-USDX-PERP | jq .payload
 
 ### Credentials
 
-Authenticated commands (`balance`, `positions`, `fills`, `orders`, `order …`,
-and account WebSocket channels) HMAC-sign each request. Public market-data
-commands don't need credentials.
+Authenticated commands (`balance`, `positions`, `fills`, `withdrawals`,
+`orders`, `order …`, and account WebSocket channels) HMAC-sign each request.
+Public market-data commands don't need credentials.
 
 Credentials resolve in this order, highest priority first:
 
@@ -291,6 +297,39 @@ Prefer `nexus setup` or the environment variables over `--api-secret`: flags are
 visible in your shell history and in the process list. The secret is never
 echoed during setup, never printed back, and the config file is created
 owner-read/write only (`0600`).
+
+#### Wallet sign-in (session token)
+
+As an alternative to an HMAC key pair, you can authenticate with an EVM wallet.
+`nexus auth login` reads a raw private key, signs the fixed sign-in challenge
+(EIP-191), and exchanges it for a **session token** stored in the same config
+file (mode `0600`) under `session_token`. The session token authenticates
+session-scoped routes; the HMAC pair, when present, takes precedence as the
+request signer.
+
+The private key is read from `--private-key`, the `NEXUS_PRIVATE_KEY`
+environment variable, or — when neither is set and you're at a terminal — a
+hidden interactive prompt. It is used only to produce the signature and is
+**never written to disk or echoed**.
+
+| Flag | Env |
+|---|---|
+| `--private-key <KEY>` (on `auth login` / `agents register`) | `NEXUS_PRIVATE_KEY` |
+| `--session-token <TOKEN>` | `NEXUS_SESSION_TOKEN` |
+
+```sh
+export NEXUS_PRIVATE_KEY=0x<your-evm-key>
+nexus auth login            # stores the session token; prints the address
+nexus balance               # now authenticated via the stored token
+
+# Register an agent key, authorized by an EIP-712 signature from your wallet
+# (unauthenticated request — the signature is the authorization):
+nexus agents register --agent 0x<agent-address> --label my-bot
+```
+
+`agents register` defaults the expiry to 30 days out, the nonce to the current
+Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
+override any with `--expires-at` / `--nonce` / `--chain-id`.
 
 ### Shell completions
 

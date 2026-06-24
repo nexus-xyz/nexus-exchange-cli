@@ -15,12 +15,13 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
+use nexus_exchange::auth::AgentRegistration;
 use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest, TransferRequest};
-use nexus_exchange::{Client, ExposeSecret};
+use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
-    AccountCommand, AgentsCommand, Cli, Command, KeysCommand, MarketCommand, OrderCommand,
-    OutputFormat, SubAccountsCommand, TransfersCommand,
+    AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
+    OrderCommand, OutputFormat, SubAccountsCommand, TransfersCommand,
 };
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
@@ -48,10 +49,16 @@ async fn main() -> Result<()> {
     // SDK signs authenticated requests. `credentials` is resolved once here so
     // its single "half a pair" warning isn't emitted twice.
     let credentials = cli.credentials(&file);
-    let authenticated = credentials.is_some();
+    let session_token = cli.session_token(&file);
+    // Either credential path authenticates account-scoped commands. The HMAC
+    // pair is the request signer; the session token is a fallback used only
+    // when no pair is configured (both set `Config::credentials`, last wins).
+    let authenticated = credentials.is_some() || session_token.is_some();
     let mut config = cli.config(&file);
-    if let Some((key, secret)) = credentials {
-        config = config.api_key(key, secret);
+    match (credentials, session_token) {
+        (Some((key, secret)), _) => config = config.api_key(key, secret),
+        (None, Some(token)) => config = config.session_token(token),
+        (None, None) => {}
     }
     let client = Client::new(config.clone());
     let format = cli.output;
@@ -204,6 +211,18 @@ async fn main() -> Result<()> {
                 output::orders_json(&orders)
             });
         }
+        Command::Withdrawals { limit } => {
+            require_authenticated(authenticated, "withdrawals")?;
+            let mut withdrawals = client
+                .fetch_withdrawals()
+                .await
+                .context("failed to fetch withdrawals")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            withdrawals.truncate(limit as usize);
+            emit(format, output::withdrawals(&withdrawals), || {
+                output::withdrawals_json(&withdrawals)
+            });
+        }
 
         Command::FundingPayments { limit } => {
             require_authenticated(authenticated, "funding-payments")?;
@@ -217,16 +236,6 @@ async fn main() -> Result<()> {
                 output::funding_payments_json(&payments)
             });
         }
-        Command::Withdrawals => {
-            require_authenticated(authenticated, "withdrawals")?;
-            let withdrawals = client
-                .fetch_withdrawals()
-                .await
-                .context("failed to fetch withdrawals")?;
-            emit(format, output::withdrawals(&withdrawals), || {
-                output::withdrawals_json(&withdrawals)
-            });
-        }
 
         // ── trading ──
         Command::Order { action } => handle_order(&client, authenticated, action, format).await?,
@@ -235,6 +244,7 @@ async fn main() -> Result<()> {
         Command::Account { action } => {
             handle_account(&client, authenticated, action, format).await?
         }
+        Command::Auth { action } => handle_auth(&client, action, format).await?,
         Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
         Command::Agents { action } => handle_agents(&client, authenticated, action, format).await?,
         Command::Transfers { action } => {
@@ -549,6 +559,55 @@ async fn handle_account(
     Ok(())
 }
 
+/// Resolve the raw EVM private key for a wallet-signed command: use the value
+/// supplied via flag/env (clap already merged those, with the env value hidden
+/// from `--help`/`Debug`), otherwise fall back to a hidden interactive prompt
+/// when stdin is a terminal. The key is never echoed and never persisted.
+fn resolve_private_key(flag_or_env: Option<String>) -> Result<String> {
+    if let Some(key) = flag_or_env {
+        if key.trim().is_empty() {
+            anyhow::bail!("private key is empty");
+        }
+        return Ok(key);
+    }
+    if !io::stdin().is_terminal() {
+        anyhow::bail!(
+            "no private key provided — pass --private-key, set NEXUS_PRIVATE_KEY,              or run interactively to be prompted"
+        );
+    }
+    let key = rpassword::prompt_password("EVM private key (input hidden): ")
+        .context("failed to read private key")?;
+    if key.trim().is_empty() {
+        anyhow::bail!("private key is empty");
+    }
+    Ok(key)
+}
+
+/// Handle the `nexus auth` subcommands (wallet-signed sign-in).
+async fn handle_auth(client: &Client, action: AuthCommand, format: OutputFormat) -> Result<()> {
+    match action {
+        AuthCommand::Login { private_key } => {
+            // Build the signer from the raw key (validated by the SDK), then
+            // EIP-191-sign the fixed sign-in challenge and exchange it for a
+            // session token. The SDK keeps the key in a zeroizing secret; the
+            // CLI drops the `EthSigner` as soon as the request is sent.
+            let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
+                .context("invalid EVM private key")?;
+            let login = client.sign_in(&signer).await.context("failed to sign in")?;
+
+            // Persist the token via the session-token credential path (0600).
+            let token = login.token.expose_secret();
+            let path =
+                credentials::save_session_token(token).context("failed to save session token")?;
+            let path = path.display().to_string();
+            emit(format, output::login(&login.address, token, &path), || {
+                output::login_json(&login.address, token, &path)
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Handle the `nexus keys` subcommands.
 async fn handle_keys(
     client: &Client,
@@ -624,6 +683,49 @@ async fn handle_agents(
             emit(format, output::agents(&agents), || {
                 output::agents_json(&agents)
             });
+        }
+        AgentsCommand::Register {
+            agent,
+            private_key,
+            expires_at,
+            nonce,
+            chain_id,
+            label,
+            yes,
+        } => {
+            // Wallet-signed (EIP-712) and unauthenticated: the owning wallet's
+            // signature is the authorization, so no API key / session token is
+            // required. Defaults: expiry = now + 30d, nonce = now (Unix ms),
+            // both inside the spec's accepted ranges.
+            let now_ms = unix_millis()?;
+            let expires_at = expires_at.unwrap_or(now_ms + THIRTY_DAYS_MS);
+            let nonce = nonce.unwrap_or(now_ms);
+
+            let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
+                .context("invalid EVM private key")?;
+            let registration: AgentRegistration = signer
+                .register_agent(&agent, expires_at, nonce, chain_id, label)
+                .context("failed to sign agent registration")?;
+
+            if !confirm(
+                &format!(
+                    "Register agent {agent} (expires {expires_at} ms, nonce {nonce}, chain {chain_id})"
+                ),
+                yes,
+            )? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+
+            let result = client
+                .register_agent(&registration)
+                .await
+                .context("failed to register agent")?;
+            emit(
+                format,
+                output::agent_registered(&result.agent_address, result.expires_at),
+                || output::agent_registered_json(&result.agent_address, result.expires_at),
+            );
         }
         AgentsCommand::Revoke { address, yes } => {
             require_authenticated(authenticated, "agents revoke")?;
@@ -836,6 +938,19 @@ fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Thirty days in milliseconds — the default agent-registration expiry window
+/// (the spec accepts `[now+1d, now+90d]`).
+const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Current Unix time in milliseconds, used to default the agent-registration
+/// nonce and expiry.
+fn unix_millis() -> Result<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?;
+    Ok(now.as_millis() as u64)
+}
+
 /// Parse a price/quantity into the SDK's [`Decimal`], rejecting non-positive or
 /// malformed values so we don't ship an obviously-bad order to the exchange.
 fn parse_amount(field: &str, value: &str) -> Result<Decimal> {
@@ -872,6 +987,76 @@ fn confirm(prompt: &str, yes: bool) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Canonical Hardhat/ethers account #0 — a published, externally verifiable
+    // keypair, so the address and signatures below are deterministic and pinned
+    // against the SDK's own known-answer vectors (`src/auth/eth.rs`).
+    const TEST_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const TEST_ADDR: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    /// The sign-in path the CLI drives produces the exact, deterministic EIP-191
+    /// signature for a known key. This is what `auth login` sends as the body.
+    #[test]
+    fn sign_in_is_deterministic_for_a_known_key() {
+        let signer = EthSigner::from_hex(TEST_KEY).unwrap();
+        assert_eq!(signer.address(), TEST_ADDR);
+
+        let a = signer.sign_in().unwrap();
+        let b = signer.sign_in().unwrap();
+        assert_eq!(a.signature, b.signature, "signing must be deterministic");
+        assert_eq!(
+            a.signature,
+            "0xff4ddf3b1af438fe00d02368ad8fa5fc5e57667e6826dbda3ddddc395a5287bb6eab0bc97652f6e7e1f08f665b868ca143da79e18dae8021799cdafc4af670ea1b"
+        );
+    }
+
+    /// The register-agent path produces the exact, deterministic EIP-712
+    /// signature for a known key, chain id, expiry, and nonce.
+    #[test]
+    fn register_agent_is_deterministic_for_a_known_key() {
+        let signer = EthSigner::from_hex(TEST_KEY).unwrap();
+        let agent = "0x1234567890abcdef1234567890abcdef12345678";
+        let reg: AgentRegistration = signer
+            .register_agent(agent, 1_782_000_000_000, 1, 393, None)
+            .unwrap();
+        assert_eq!(reg.wallet, TEST_ADDR);
+        assert_eq!(reg.agent, agent);
+        assert_eq!(
+            reg.signature,
+            "0x5df263ed6d1b619a72d436a01104f9036af6258cacf56dea973321cbe722a99550644eea6bf75656d48e982d2ce5db9ef13c4aced4539cf3c2ff87802b0197cc1b"
+        );
+    }
+
+    /// A malformed private key is rejected before any network call.
+    #[test]
+    fn from_hex_rejects_a_bad_key() {
+        assert!(EthSigner::from_hex("not-hex").is_err());
+    }
+
+    /// `resolve_private_key` returns a flag/env value verbatim and never logs it.
+    #[test]
+    fn resolve_private_key_passes_through_flag_value() {
+        let key = resolve_private_key(Some(TEST_KEY.to_string())).unwrap();
+        assert_eq!(key, TEST_KEY);
+        // An empty value is rejected rather than silently used.
+        assert!(resolve_private_key(Some("   ".to_string())).is_err());
+    }
+
+    /// Neither the rendered login output nor its JSON form ever contains the
+    /// private key — only the recovered address, the session token, and the
+    /// save path. Guards against the key leaking through the output layer.
+    #[test]
+    fn login_output_never_contains_the_private_key() {
+        let signer = EthSigner::from_hex(TEST_KEY).unwrap();
+        // The flow renders the *response* (address + token), not the key.
+        let human = output::login(&signer.address(), "sess_tok_123", "/tmp/config.json");
+        let json = output::login_json(&signer.address(), "sess_tok_123", "/tmp/config.json");
+        for out in [&human, &json] {
+            assert!(!out.contains(TEST_KEY), "private key leaked: {out}");
+            assert!(out.contains(TEST_ADDR));
+            assert!(out.contains("sess_tok_123"));
+        }
+    }
 
     #[test]
     fn parse_amount_accepts_positive_decimals() {

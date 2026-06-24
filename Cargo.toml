@@ -76,6 +76,15 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 rpassword = "7"
 
+# Dev-only: the `tests/smoke.rs` integration test runs the built `nexus` binary
+# (`assert_cmd`) against a local mock HTTP server (`wiremock`, the same mock the
+# SDK's own integration tests use) serving canned, spec-shaped responses. This
+# keeps the smoke offline and deterministic — no live network. tokio is already
+# a runtime dependency; the test reuses it for the async mock server.
+[dev-dependencies]
+assert_cmd = "2"
+wiremock = "0.6"
+
 # Release-build profile used by `dist`. Inherits the standard release profile and
 # enables thin LTO for smaller, faster shipped binaries without the long compile
 # times of full LTO.
