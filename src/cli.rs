@@ -105,7 +105,8 @@ pub enum OutputFormat {
 }
 
 /// Order side. Maps onto the SDK's [`Side`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SideArg {
     Buy,
     Sell,
@@ -121,7 +122,8 @@ impl From<SideArg> for Side {
 }
 
 /// Order type. Maps onto the SDK's [`OrderType`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OrderTypeArg {
     Limit,
     Market,
@@ -137,7 +139,8 @@ impl From<OrderTypeArg> for OrderType {
 }
 
 /// Time in force. Maps onto the SDK's [`TimeInForce`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TifArg {
     /// Good-til-cancelled.
     Gtc,
@@ -235,6 +238,33 @@ pub enum Command {
         market_id: String,
     },
 
+    /// List tickers for every market.
+    Tickers,
+
+    /// List per-market 24h summaries (mark price, volume, status).
+    Summaries,
+
+    /// Show the current mark price for a market.
+    MarkPrice {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
+    /// Show the lifecycle/halt status for a market.
+    MarketStatus {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
+    /// Show the funding-rate history for a market.
+    FundingRates {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Maximum number of samples to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
     /// Show the order book (bids/asks) for a market.
     Orderbook {
         /// Market identifier, e.g. `BTC-USDX-PERP`.
@@ -281,10 +311,50 @@ pub enum Command {
     /// List your open orders.
     Orders,
 
-    /// Place or cancel orders.
+    /// Your funding payments (perp funding booked against the account).
+    FundingPayments {
+        /// Maximum number of payments to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
+    /// Your withdrawal history.
+    Withdrawals,
+
+    /// Place, amend, cancel, or fetch orders.
     Order {
         #[command(subcommand)]
         action: OrderCommand,
+    },
+
+    /// Manage account settings (deposit, credit, leverage, margin, rate-limit).
+    Account {
+        #[command(subcommand)]
+        action: AccountCommand,
+    },
+
+    /// Manage HMAC API keys (list/create/delete).
+    Keys {
+        #[command(subcommand)]
+        action: KeysCommand,
+    },
+
+    /// Manage registered agent keys (list/revoke).
+    Agents {
+        #[command(subcommand)]
+        action: AgentsCommand,
+    },
+
+    /// Manage collateral transfers (list/create).
+    Transfers {
+        #[command(subcommand)]
+        action: TransfersCommand,
+    },
+
+    /// Manage sub-accounts (list/create).
+    SubAccounts {
+        #[command(subcommand)]
+        action: SubAccountsCommand,
     },
 
     /// Stream live data over WebSocket. Public channels (`trades`, `book`,
@@ -353,6 +423,167 @@ pub enum OrderCommand {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Fetch a single order by id.
+    Get {
+        /// Order id.
+        order_id: String,
+    },
+
+    /// Amend an open order in place (atomic cancel-replace). Set only the
+    /// fields you want to change.
+    Amend {
+        /// Order id to amend.
+        order_id: String,
+        /// New limit price.
+        #[arg(long)]
+        price: Option<String>,
+        /// New order quantity (base units).
+        #[arg(long)]
+        quantity: Option<String>,
+        /// New time in force.
+        #[arg(long, value_enum)]
+        tif: Option<TifArg>,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Submit a batch of orders from a JSON file (an array of order objects),
+    /// or `-` to read the array from stdin.
+    Batch {
+        /// Path to a JSON file containing an array of order requests, or `-`
+        /// for stdin.
+        file: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Deposit collateral into the account.
+    Deposit {
+        /// Amount to deposit (quote asset).
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Claim synthetic (testnet) USDX credit from the faucet. Omit `--amount`
+    /// to claim the full remaining daily allowance.
+    Credit {
+        /// Amount to claim; defaults to the remaining daily allowance.
+        #[arg(long)]
+        amount: Option<String>,
+    },
+
+    /// Show the caller's rate-limit status.
+    RateLimit,
+
+    /// Set the leverage for a market.
+    Leverage {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Leverage multiplier (e.g. 10 for 10x). Must be at least 1.
+        leverage: u32,
+    },
+
+    /// Set the margin mode (cross/isolated) for a market.
+    MarginMode {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Margin mode.
+        #[arg(value_enum)]
+        mode: MarginModeArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// List the API keys on the authenticated session.
+    List,
+    /// Create a new API key. The secret is shown once — store it immediately.
+    Create {
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete an API key by id.
+    Delete {
+        /// Key id to delete.
+        key_id: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentsCommand {
+    /// List registered agent keys for the authenticated wallet.
+    List,
+    /// Revoke a registered agent by address.
+    Revoke {
+        /// Agent address (0x-prefixed).
+        address: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransfersCommand {
+    /// List collateral transfers.
+    List,
+    /// Create a transfer between accounts (e.g. to/from a sub-account).
+    Create {
+        /// Source account id to debit.
+        #[arg(long)]
+        from: String,
+        /// Destination account id to credit.
+        #[arg(long)]
+        to: String,
+        /// Amount of collateral to move; must be positive.
+        #[arg(long)]
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SubAccountsCommand {
+    /// List sub-accounts of the authenticated master account.
+    List,
+    /// Create a new sub-account with a label.
+    Create {
+        /// Human-readable label for the sub-account.
+        label: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Margin mode. Maps onto the SDK's [`MarginMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MarginModeArg {
+    Cross,
+    Isolated,
+}
+
+impl From<MarginModeArg> for nexus_exchange::types::MarginMode {
+    fn from(m: MarginModeArg) -> Self {
+        match m {
+            MarginModeArg::Cross => nexus_exchange::types::MarginMode::Cross,
+            MarginModeArg::Isolated => nexus_exchange::types::MarginMode::Isolated,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -570,6 +801,11 @@ mod tests {
         for cmd in [
             "markets",
             "ticker",
+            "tickers",
+            "summaries",
+            "mark-price",
+            "market-status",
+            "funding-rates",
             "orderbook",
             "trades",
             "candles",
@@ -579,6 +815,13 @@ mod tests {
             "fills",
             "orders",
             "order",
+            "funding-payments",
+            "withdrawals",
+            "account",
+            "keys",
+            "agents",
+            "transfers",
+            "sub-accounts",
             "ws",
             "setup",
             "completions",
@@ -603,6 +846,98 @@ mod tests {
             }
         }
         check(&mut Cli::command());
+    }
+
+    #[test]
+    fn order_get_parses() {
+        let cli = Cli::try_parse_from(["nexus", "order", "get", "o123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Order {
+                action: OrderCommand::Get { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn account_leverage_parses() {
+        let cli =
+            Cli::try_parse_from(["nexus", "account", "leverage", "BTC-USDX-PERP", "10"]).unwrap();
+        match cli.command {
+            Command::Account {
+                action:
+                    AccountCommand::Leverage {
+                        market_id,
+                        leverage,
+                    },
+            } => {
+                assert_eq!(market_id, "BTC-USDX-PERP");
+                assert_eq!(leverage, 10);
+            }
+            _ => panic!("expected account leverage"),
+        }
+    }
+
+    #[test]
+    fn account_margin_mode_parses_enum() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "account",
+            "margin-mode",
+            "BTC-USDX-PERP",
+            "isolated",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Account {
+                action: AccountCommand::MarginMode { mode, .. },
+            } => assert_eq!(mode, MarginModeArg::Isolated),
+            _ => panic!("expected account margin-mode"),
+        }
+    }
+
+    #[test]
+    fn keys_and_agents_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "keys", "list"])
+                .unwrap()
+                .command,
+            Command::Keys {
+                action: KeysCommand::List
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "agents", "revoke", "0xabc"])
+                .unwrap()
+                .command,
+            Command::Agents {
+                action: AgentsCommand::Revoke { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn transfers_create_requires_flags() {
+        // Missing --to/--amount is an error.
+        assert!(Cli::try_parse_from(["nexus", "transfers", "create", "--from", "a"]).is_err());
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "transfers",
+            "create",
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--amount",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Transfers {
+                action: TransfersCommand::Create { .. }
+            }
+        ));
     }
 
     /// `order place`/`cancel` help spells out their flags, so the trading surface
