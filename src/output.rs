@@ -36,6 +36,43 @@ fn opt_json<T: std::fmt::Display>(v: &Option<T>) -> Value {
     }
 }
 
+/// Format a unix-millisecond timestamp as an ISO-8601 UTC string
+/// (`YYYY-MM-DDTHH:MM:SSZ`), matching the `datetime` fields the SDK pre-formats
+/// elsewhere. Done with date arithmetic (Howard Hinnant's `civil_from_days`) to
+/// avoid pulling in a `chrono`/`time` dependency for this single field.
+fn ms_to_iso8601(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    // Shift the epoch to 0000-03-01 so leap days fall at the end of the cycle.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // day-of-era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], Mar=0
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Format an optional unix-millisecond timestamp as ISO-8601, or `-` when absent.
+fn opt_ms_iso(ms: &Option<i64>) -> String {
+    ms.map(ms_to_iso8601).unwrap_or_else(|| "-".to_string())
+}
+
+/// Render an optional unix-millisecond timestamp as an ISO-8601 JSON string, or
+/// `null` when absent — keeping JSON timestamps consistent with `datetime`.
+fn opt_ms_iso_json(ms: &Option<i64>) -> Value {
+    match ms {
+        Some(ms) => Value::String(ms_to_iso8601(*ms)),
+        None => Value::Null,
+    }
+}
+
 /// Pretty-print a JSON value. `serde_json` only fails to serialize on types it
 /// cannot represent; the values built here are always representable.
 fn pretty(value: &Value) -> String {
@@ -525,6 +562,52 @@ pub fn cancel(value: &Value, human_note: &str) -> String {
     format!("{human_note}\n{}", pretty(value))
 }
 
+// ───────────────────────── market summaries ─────────────────────────
+
+/// Render per-market summaries (24h volume, halt state) as an aligned table.
+pub fn market_summaries(ss: &[MarketSummary]) -> String {
+    if ss.is_empty() {
+        return "No market summaries returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
+        "MARKET", "MARK PRICE", "VOLUME 24H", "TRADES", "STATUS", "ADL EVTS"
+    );
+    for s in ss {
+        out.push_str(&format!(
+            "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
+            s.market_id,
+            opt(&s.mark_price),
+            s.volume_24h,
+            s.trade_count,
+            s.status,
+            s.adl_event_count,
+        ));
+    }
+    out.push_str(&format!("\n{} market(s).", ss.len()));
+    out
+}
+
+/// Render per-market summaries as pretty JSON.
+pub fn market_summaries_json(ss: &[MarketSummary]) -> String {
+    let value: Value = ss
+        .iter()
+        .map(|s| {
+            json!({
+                "market_id": s.market_id,
+                "mark_price": opt_json(&s.mark_price),
+                "volume_24h": s.volume_24h.to_string(),
+                "trade_count": s.trade_count,
+                "status": s.status,
+                "halt_reason": s.halt_reason,
+                "halted_at": opt_ms_iso_json(&s.halted_at),
+                "adl_event_count": s.adl_event_count,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
 // ───────────────────────── tickers / summaries ─────────────────────────
 
 /// Render every market's ticker as one aligned row each.
@@ -608,7 +691,7 @@ pub fn summaries_json(ss: &[MarketSummary]) -> String {
                 "trade_count": s.trade_count,
                 "status": s.status,
                 "halt_reason": s.halt_reason,
-                "halted_at": s.halted_at,
+                "halted_at": opt_ms_iso_json(&s.halted_at),
                 "adl_event_count": s.adl_event_count,
             })
         })
@@ -618,6 +701,7 @@ pub fn summaries_json(ss: &[MarketSummary]) -> String {
 
 // ───────────────────────── mark price / market status ─────────────────────────
 
+/// Render a market's mark price as key/value lines.
 pub fn mark_price(m: &MarkPrice) -> String {
     format!(
         "{:<14}{}\n{:<14}{}",
@@ -625,6 +709,7 @@ pub fn mark_price(m: &MarkPrice) -> String {
     )
 }
 
+/// Render a market's mark price as pretty JSON.
 pub fn mark_price_json(m: &MarkPrice) -> String {
     pretty(&json!({
         "market_id": m.market_id,
@@ -632,6 +717,7 @@ pub fn mark_price_json(m: &MarkPrice) -> String {
     }))
 }
 
+/// Render a single market's lifecycle/halt status as key/value lines.
 pub fn market_status(s: &MarketStatus) -> String {
     let rows = [
         ("market", s.market_id.clone()),
@@ -640,7 +726,7 @@ pub fn market_status(s: &MarketStatus) -> String {
             "halt reason",
             s.halt_reason.clone().unwrap_or_else(|| "-".into()),
         ),
-        ("halted at", opt(&s.halted_at)),
+        ("halted at", opt_ms_iso(&s.halted_at)),
         ("adl events", s.adl_event_count.to_string()),
     ];
     rows.iter()
@@ -649,12 +735,13 @@ pub fn market_status(s: &MarketStatus) -> String {
         .join("\n")
 }
 
+/// Render a single market's status as pretty JSON.
 pub fn market_status_json(s: &MarketStatus) -> String {
     pretty(&json!({
         "market_id": s.market_id,
         "status": s.status,
         "halt_reason": s.halt_reason,
-        "halted_at": s.halted_at,
+        "halted_at": opt_ms_iso_json(&s.halted_at),
         "adl_event_count": s.adl_event_count,
     }))
 }
@@ -1224,6 +1311,94 @@ mod tests {
         assert_eq!(row["price"], json!("84000"));
         assert_eq!(row["quantity"], json!("0.01"));
         assert_eq!(row["side"], json!("Buy"));
+    }
+
+    #[test]
+    fn market_summaries_json_uses_decimal_strings_and_null_mark() {
+        // `mark_price` and `volume_24h` arrive as JSON numbers via the SDK's
+        // float adapter; a halted market sends `null` for the mark.
+        let summaries: Vec<MarketSummary> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP",
+            "mark_price": null,
+            "volume_24h": 1234.5,
+            "trade_count": 42,
+            "status": "halted",
+            "halt_reason": "maintenance",
+            "halted_at": 1_700_000_000_000i64,
+            "adl_event_count": 3
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&market_summaries_json(&summaries)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(
+            keys(row),
+            [
+                "adl_event_count",
+                "halt_reason",
+                "halted_at",
+                "mark_price",
+                "market_id",
+                "status",
+                "trade_count",
+                "volume_24h",
+            ]
+        );
+        // Money is a decimal string; an absent mark is JSON null; counts stay numbers.
+        assert_eq!(row["mark_price"], Value::Null);
+        assert_eq!(row["volume_24h"], json!("1234.5"));
+        assert_eq!(row["trade_count"], json!(42));
+        assert_eq!(row["status"], json!("halted"));
+        // `halted_at` is rendered as an ISO-8601 string (not raw unix-ms) to
+        // match the `datetime` fields used elsewhere.
+        assert_eq!(row["halted_at"], json!("2023-11-14T22:13:20Z"));
+    }
+
+    #[test]
+    fn ms_to_iso8601_formats_unix_millis_as_utc() {
+        assert_eq!(ms_to_iso8601(1_700_000_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(ms_to_iso8601(0), "1970-01-01T00:00:00Z");
+        // Leap-year day (2024-02-29).
+        assert_eq!(ms_to_iso8601(1_709_208_000_000), "2024-02-29T12:00:00Z");
+    }
+
+    #[test]
+    fn mark_price_json_is_a_decimal_string() {
+        // The mark-price endpoint sends the price as a decimal string.
+        let mp: MarkPrice = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "mark_price": "84000.5"
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&mark_price_json(&mp)).unwrap();
+        assert_eq!(keys(&v), ["mark_price", "market_id"]);
+        assert_eq!(v["mark_price"], json!("84000.5"));
+    }
+
+    #[test]
+    fn market_status_json_preserves_optional_halt_fields() {
+        // An active market reports no halt reason / time.
+        let status: MarketStatus = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "status": "active",
+            "halt_reason": null,
+            "halted_at": null,
+            "adl_event_count": 0
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&market_status_json(&status)).unwrap();
+        assert_eq!(
+            keys(&v),
+            [
+                "adl_event_count",
+                "halt_reason",
+                "halted_at",
+                "market_id",
+                "status",
+            ]
+        );
+        assert_eq!(v["halt_reason"], Value::Null);
+        assert_eq!(v["halted_at"], Value::Null);
+        assert_eq!(v["status"], json!("active"));
     }
 
     // ───────────────────────── fixtures ─────────────────────────

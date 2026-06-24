@@ -259,6 +259,12 @@ pub enum Command {
     /// List all tradable markets and their trading rules.
     Markets,
 
+    /// Per-market data: summaries, lifecycle status, mark price.
+    Market {
+        #[command(subcommand)]
+        action: MarketCommand,
+    },
+
     /// Fetch the ticker for a single market, e.g. `BTC-USDX-PERP`.
     Ticker {
         /// Market identifier, e.g. `BTC-USDX-PERP`.
@@ -416,6 +422,24 @@ pub enum Command {
     Completions {
         /// Target shell.
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarketCommand {
+    /// Per-market summaries with 24h volume and halt state.
+    Summary,
+
+    /// Show the lifecycle/halt status for a single market.
+    Status {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
+    /// Show the current mark price for a single market.
+    MarkPrice {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
     },
 }
 
@@ -867,6 +891,17 @@ mod tests {
     }
 
     #[test]
+    fn market_summary_parses() {
+        let cli = Cli::try_parse_from(["nexus", "market", "summary"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Market {
+                action: MarketCommand::Summary
+            }
+        ));
+    }
+
+    #[test]
     fn account_rate_limit_parses() {
         let cli = Cli::try_parse_from(["nexus", "account", "rate-limit"]).unwrap();
         assert!(matches!(
@@ -875,6 +910,30 @@ mod tests {
                 action: AccountCommand::RateLimit
             }
         ));
+    }
+
+    #[test]
+    fn market_status_takes_a_market_id() {
+        let cli = Cli::try_parse_from(["nexus", "market", "status", "BTC-USDX-PERP"]).unwrap();
+        match cli.command {
+            Command::Market {
+                action: MarketCommand::Status { market_id },
+            } => assert_eq!(market_id, "BTC-USDX-PERP"),
+            _ => panic!("expected market status"),
+        }
+        // The market id is required.
+        assert!(Cli::try_parse_from(["nexus", "market", "status"]).is_err());
+    }
+
+    #[test]
+    fn market_mark_price_takes_a_market_id() {
+        let cli = Cli::try_parse_from(["nexus", "market", "mark-price", "BTC-USDX-PERP"]).unwrap();
+        match cli.command {
+            Command::Market {
+                action: MarketCommand::MarkPrice { market_id },
+            } => assert_eq!(market_id, "BTC-USDX-PERP"),
+            _ => panic!("expected market mark-price"),
+        }
     }
 
     #[test]
@@ -899,6 +958,7 @@ mod tests {
         assert!(help.contains("nexus"), "help should name the binary");
         for cmd in [
             "markets",
+            "market",
             "ticker",
             "tickers",
             "summaries",

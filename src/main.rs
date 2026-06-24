@@ -20,8 +20,8 @@ use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest, TransferRequest};
 use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
-    AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, OrderCommand,
-    OutputFormat, SubAccountsCommand, TransfersCommand,
+    AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
+    OrderCommand, OutputFormat, SubAccountsCommand, TransfersCommand,
 };
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
                 output::markets_json(&markets)
             });
         }
+        Command::Market { action } => handle_market(&client, action, format).await?,
         Command::Ticker { market_id } => {
             let ticker = client
                 .fetch_ticker(&market_id)
@@ -276,6 +277,41 @@ async fn main() -> Result<()> {
         Command::Completions { .. } | Command::Setup => unreachable!("handled above"),
     }
 
+    Ok(())
+}
+
+/// Handle the read-only `market` subcommands (summary / status / mark-price).
+/// All are public market data and need no credentials.
+async fn handle_market(client: &Client, action: MarketCommand, format: OutputFormat) -> Result<()> {
+    match action {
+        MarketCommand::Summary => {
+            let summaries = client
+                .fetch_market_summaries()
+                .await
+                .context("failed to fetch market summaries")?;
+            emit(format, output::market_summaries(&summaries), || {
+                output::market_summaries_json(&summaries)
+            });
+        }
+        MarketCommand::Status { market_id } => {
+            let status = client
+                .fetch_market_status(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch status for {market_id}"))?;
+            emit(format, output::market_status(&status), || {
+                output::market_status_json(&status)
+            });
+        }
+        MarketCommand::MarkPrice { market_id } => {
+            let mark = client
+                .fetch_mark_price(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch mark price for {market_id}"))?;
+            emit(format, output::mark_price(&mark), || {
+                output::mark_price_json(&mark)
+            });
+        }
+    }
     Ok(())
 }
 
