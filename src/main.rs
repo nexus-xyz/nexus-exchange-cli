@@ -15,10 +15,13 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
-use nexus_exchange::types::{Decimal, OrderRequest};
-use nexus_exchange::Client;
+use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest, TransferRequest};
+use nexus_exchange::{Client, ExposeSecret};
 
-use cli::{Cli, Command, OrderCommand, OutputFormat};
+use cli::{
+    AccountCommand, AgentsCommand, Cli, Command, KeysCommand, OrderCommand, OutputFormat,
+    SubAccountsCommand, TransfersCommand,
+};
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
 #[tokio::main]
@@ -71,6 +74,51 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("failed to fetch ticker for {market_id}"))?;
             emit(format, output::ticker(&ticker), || {
                 output::ticker_json(&ticker)
+            });
+        }
+        Command::Tickers => {
+            let tickers = client
+                .fetch_tickers()
+                .await
+                .context("failed to fetch tickers")?;
+            emit(format, output::tickers(&tickers), || {
+                output::tickers_json(&tickers)
+            });
+        }
+        Command::Summaries => {
+            let summaries = client
+                .fetch_market_summaries()
+                .await
+                .context("failed to fetch market summaries")?;
+            emit(format, output::summaries(&summaries), || {
+                output::summaries_json(&summaries)
+            });
+        }
+        Command::MarkPrice { market_id } => {
+            let mp = client
+                .fetch_mark_price(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch mark price for {market_id}"))?;
+            emit(format, output::mark_price(&mp), || {
+                output::mark_price_json(&mp)
+            });
+        }
+        Command::MarketStatus { market_id } => {
+            let status = client
+                .fetch_market_status(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch market status for {market_id}"))?;
+            emit(format, output::market_status(&status), || {
+                output::market_status_json(&status)
+            });
+        }
+        Command::FundingRates { market_id, limit } => {
+            let samples = client
+                .fetch_funding_rate_history(&market_id, Some(limit))
+                .await
+                .with_context(|| format!("failed to fetch funding rates for {market_id}"))?;
+            emit(format, output::funding_rates(&samples), || {
+                output::funding_rates_json(&samples)
             });
         }
         Command::Health => {
@@ -168,8 +216,34 @@ async fn main() -> Result<()> {
             });
         }
 
+        Command::FundingPayments { limit } => {
+            require_authenticated(authenticated, "funding-payments")?;
+            let mut payments = client
+                .fetch_funding_payments(None)
+                .await
+                .context("failed to fetch funding payments")?;
+            // The SDK returns the full set; honor the CLI's `--limit` client-side.
+            payments.truncate(limit as usize);
+            emit(format, output::funding_payments(&payments), || {
+                output::funding_payments_json(&payments)
+            });
+        }
+
         // ── trading ──
         Command::Order { action } => handle_order(&client, authenticated, action, format).await?,
+
+        // ── account / keys / agents / transfers / sub-accounts ──
+        Command::Account { action } => {
+            handle_account(&client, authenticated, action, format).await?
+        }
+        Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
+        Command::Agents { action } => handle_agents(&client, authenticated, action, format).await?,
+        Command::Transfers { action } => {
+            handle_transfers(&client, authenticated, action, format).await?
+        }
+        Command::SubAccounts { action } => {
+            handle_sub_accounts(&client, authenticated, action, format).await?
+        }
 
         // ── websocket ──
         Command::Ws {
@@ -300,8 +374,379 @@ async fn handle_order(
                 );
             }
         }
+
+        OrderCommand::Get { order_id } => {
+            require_authenticated(authenticated, "order get")?;
+            let order = client
+                .fetch_order(&order_id)
+                .await
+                .with_context(|| format!("failed to fetch order {order_id}"))?;
+            emit(format, output::order_detail(&order), || {
+                output::order_detail_json(&order)
+            });
+        }
+
+        OrderCommand::Amend {
+            order_id,
+            price,
+            quantity,
+            tif,
+            yes,
+        } => {
+            require_authenticated(authenticated, "order amend")?;
+            let mut amend = AmendOrder::new();
+            if let Some(p) = price.as_deref() {
+                amend = amend.price(parse_amount("price", p)?);
+            }
+            if let Some(q) = quantity.as_deref() {
+                amend = amend.quantity(parse_amount("quantity", q)?);
+            }
+            if let Some(t) = tif {
+                amend = amend.time_in_force(t.into());
+            }
+            if !confirm(&format!("Amend order {order_id}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let result = client
+                .amend_order(&order_id, &amend)
+                .await
+                .with_context(|| format!("failed to amend order {order_id}"))?;
+            emit(format, output::order_result(&result), || {
+                output::order_result_json(&result)
+            });
+        }
+
+        OrderCommand::Batch { file, yes } => {
+            require_authenticated(authenticated, "order batch")?;
+            let requests = read_order_batch(&file)?;
+            if requests.is_empty() {
+                anyhow::bail!("the batch file contains no orders");
+            }
+            if !confirm(
+                &format!("Submit a batch of {} order(s)", requests.len()),
+                yes,
+            )? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let value = client
+                .create_orders(&requests)
+                .await
+                .context("failed to submit order batch")?;
+            emit(
+                format,
+                output::cancel(&value, &format!("submitted {} order(s).", requests.len())),
+                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+            );
+        }
     }
     Ok(())
+}
+
+/// Handle the `nexus account` subcommands.
+async fn handle_account(
+    client: &Client,
+    authenticated: bool,
+    action: AccountCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        AccountCommand::Deposit { amount, yes } => {
+            require_authenticated(authenticated, "account deposit")?;
+            let amount = parse_amount("amount", &amount)?;
+            if !confirm(&format!("Deposit {amount}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let result = client.deposit(amount).await.context("failed to deposit")?;
+            emit(format, output::deposit(&result), || {
+                output::deposit_json(&result)
+            });
+        }
+        AccountCommand::Credit { amount } => {
+            require_authenticated(authenticated, "account credit")?;
+            let amount = match amount.as_deref() {
+                Some(a) => Some(parse_amount("amount", a)?),
+                None => None,
+            };
+            let result = client
+                .claim_credit(amount)
+                .await
+                .context("failed to claim credit")?;
+            emit(format, output::credit(&result), || {
+                output::credit_json(&result)
+            });
+        }
+        AccountCommand::RateLimit => {
+            require_authenticated(authenticated, "account rate-limit")?;
+            let status = client
+                .fetch_rate_limit_status()
+                .await
+                .context("failed to fetch rate-limit status")?;
+            emit(format, output::rate_limit(&status), || {
+                output::rate_limit_json(&status)
+            });
+        }
+        AccountCommand::Leverage {
+            market_id,
+            leverage,
+        } => {
+            require_authenticated(authenticated, "account leverage")?;
+            let result = client
+                .set_leverage(&market_id, leverage)
+                .await
+                .with_context(|| format!("failed to set leverage for {market_id}"))?;
+            emit(format, output::leverage(&result), || {
+                output::leverage_json(&result)
+            });
+        }
+        AccountCommand::MarginMode { market_id, mode } => {
+            require_authenticated(authenticated, "account margin-mode")?;
+            let result = client
+                .set_margin_mode(&market_id, mode.into())
+                .await
+                .with_context(|| format!("failed to set margin mode for {market_id}"))?;
+            emit(format, output::margin_mode(&result), || {
+                output::margin_mode_json(&result)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Handle the `nexus keys` subcommands.
+async fn handle_keys(
+    client: &Client,
+    authenticated: bool,
+    action: KeysCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        KeysCommand::List => {
+            require_authenticated(authenticated, "keys list")?;
+            let keys = client
+                .fetch_api_keys()
+                .await
+                .context("failed to fetch API keys")?;
+            emit(format, output::api_keys(&keys), || {
+                output::api_keys_json(&keys)
+            });
+        }
+        KeysCommand::Create { yes } => {
+            require_authenticated(authenticated, "keys create")?;
+            if !confirm("Create a new API key", yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let created = client
+                .create_api_key()
+                .await
+                .context("failed to create API key")?;
+            // Expose the one-time secret once for display; the SDK keeps it in
+            // a zeroizing SecretString otherwise.
+            let secret = created.secret.expose_secret();
+            let tier = created.tier.as_deref();
+            emit(
+                format,
+                output::created_api_key(&created.key_id, secret, tier),
+                || output::created_api_key_json(&created.key_id, secret, tier),
+            );
+        }
+        KeysCommand::Delete { key_id, yes } => {
+            require_authenticated(authenticated, "keys delete")?;
+            if !confirm(&format!("Delete API key {key_id}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let value = client
+                .delete_api_key(&key_id)
+                .await
+                .with_context(|| format!("failed to delete API key {key_id}"))?;
+            emit(
+                format,
+                output::cancel(&value, &format!("deleted API key {key_id}.")),
+                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Handle the `nexus agents` subcommands.
+async fn handle_agents(
+    client: &Client,
+    authenticated: bool,
+    action: AgentsCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        AgentsCommand::List => {
+            require_authenticated(authenticated, "agents list")?;
+            let agents = client
+                .fetch_agents()
+                .await
+                .context("failed to fetch agents")?;
+            emit(format, output::agents(&agents), || {
+                output::agents_json(&agents)
+            });
+        }
+        AgentsCommand::Revoke { address, yes } => {
+            require_authenticated(authenticated, "agents revoke")?;
+            if !confirm(&format!("Revoke agent {address}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let value = client
+                .revoke_agent(&address)
+                .await
+                .with_context(|| format!("failed to revoke agent {address}"))?;
+            emit(
+                format,
+                output::cancel(&value, &format!("revoked agent {address}.")),
+                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Handle the `nexus transfers` subcommands.
+async fn handle_transfers(
+    client: &Client,
+    authenticated: bool,
+    action: TransfersCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        TransfersCommand::List => {
+            require_authenticated(authenticated, "transfers list")?;
+            let transfers = client
+                .fetch_transfers()
+                .await
+                .context("failed to fetch transfers")?;
+            emit(format, output::transfers(&transfers), || {
+                output::transfers_json(&transfers)
+            });
+        }
+        TransfersCommand::Create {
+            from,
+            to,
+            amount,
+            yes,
+        } => {
+            require_authenticated(authenticated, "transfers create")?;
+            let amount = parse_amount("amount", &amount)?;
+            if !confirm(&format!("Transfer {amount} from {from} to {to}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let request = TransferRequest::new(from, to, amount);
+            let transfer = client
+                .create_transfer(&request)
+                .await
+                .context("failed to create transfer")?;
+            emit(format, output::transfer(&transfer), || {
+                output::transfer_json(&transfer)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Handle the `nexus sub-accounts` subcommands.
+async fn handle_sub_accounts(
+    client: &Client,
+    authenticated: bool,
+    action: SubAccountsCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        SubAccountsCommand::List => {
+            require_authenticated(authenticated, "sub-accounts list")?;
+            let accounts = client
+                .fetch_sub_accounts()
+                .await
+                .context("failed to fetch sub-accounts")?;
+            emit(format, output::sub_accounts(&accounts), || {
+                output::sub_accounts_json(&accounts)
+            });
+        }
+        SubAccountsCommand::Create { label, yes } => {
+            require_authenticated(authenticated, "sub-accounts create")?;
+            if !confirm(&format!("Create sub-account {label:?}"), yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let account = client
+                .create_sub_account(&label)
+                .await
+                .context("failed to create sub-account")?;
+            emit(format, output::sub_account(&account), || {
+                output::sub_account_json(&account)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One entry in a batch file. Mirrors the `order place` flags so a batch reads
+/// the same way the single-order command does. Amounts are JSON strings to
+/// preserve decimal precision. The SDK's `OrderRequest` is serialize-only, so
+/// we deserialize this CLI-side shape and build the request from it.
+#[derive(serde::Deserialize)]
+struct BatchOrder {
+    market: String,
+    side: cli::SideArg,
+    #[serde(rename = "type")]
+    order_type: cli::OrderTypeArg,
+    #[serde(default)]
+    price: Option<String>,
+    quantity: String,
+    #[serde(default)]
+    tif: Option<cli::TifArg>,
+    #[serde(default)]
+    reduce_only: Option<bool>,
+    #[serde(default)]
+    client_order_id: Option<String>,
+}
+
+impl BatchOrder {
+    fn into_request(self) -> Result<OrderRequest> {
+        use cli::OrderTypeArg;
+        let quantity = parse_amount("quantity", &self.quantity)?;
+        let tif = self.tif.unwrap_or(cli::TifArg::Gtc);
+        let mut request = match self.order_type {
+            OrderTypeArg::Limit => {
+                let p = self
+                    .price
+                    .as_deref()
+                    .context("price is required for a limit order in the batch")?;
+                let price = parse_amount("price", p)?;
+                OrderRequest::limit(self.market, self.side.into(), price, quantity, tif.into())
+            }
+            OrderTypeArg::Market => OrderRequest::market(self.market, self.side.into(), quantity),
+        };
+        request.reduce_only = self.reduce_only;
+        request.client_order_id = self.client_order_id;
+        Ok(request)
+    }
+}
+
+/// Read a JSON array of batch order objects from a file path, or from stdin
+/// when `file` is `-`, and convert them into SDK [`OrderRequest`]s.
+fn read_order_batch(file: &str) -> Result<Vec<OrderRequest>> {
+    let bytes = if file == "-" {
+        let mut buf = Vec::new();
+        io::Read::read_to_end(&mut io::stdin(), &mut buf)
+            .context("failed to read order batch from stdin")?;
+        buf
+    } else {
+        std::fs::read(file).with_context(|| format!("failed to read order batch file {file}"))?
+    };
+    let entries: Vec<BatchOrder> = serde_json::from_slice(&bytes)
+        .context("order batch must be a JSON array of order objects")?;
+    entries.into_iter().map(BatchOrder::into_request).collect()
 }
 
 /// Map CLI channel arguments to validated [`Subscription`]s.
