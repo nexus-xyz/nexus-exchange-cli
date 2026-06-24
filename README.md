@@ -150,6 +150,8 @@ minisign -G -p minisign.pub -s minisign.key
 
 ## Usage
 
+Runnable, copy-pasteable recipes for each flow live in [`examples/`](./examples).
+
 ```sh
 nexus --help
 
@@ -317,6 +319,32 @@ cargo test --all-features
 ```
 
 CI runs the same three checks on every push and pull request.
+
+### API coverage
+
+The CLI targets a specific released version of the Exchange API spec, pinned in
+[`.api-version`](./.api-version) (currently `v0.4.0`, matching the wrapped
+[`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK).
+[`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
+actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
+verifies — in the `spec-drift` CI workflow — that:
+
+- every endpoint in `endpoints.txt` exists in the pinned spec (no rename/typo/
+  removal slips through), and
+- the set stays in sync with the SDK methods the CLI actually calls (parsed from
+  `src/main.rs` / `src/wsclient.rs`), modulo two documented allowlists in the
+  script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
+
+The check also prints the coverage number the dashboard reads: the CLI currently
+exercises **31 of 40** spec operations (**77.5%**). Run it locally with a fetched
+spec:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
+python3 scripts/check_spec_drift.py openapi.pinned.json
+```
+
+See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
 
 ## License
 

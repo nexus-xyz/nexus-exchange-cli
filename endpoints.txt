@@ -1,0 +1,65 @@
+# Spec operations the CLI's commands exercise, checked against the pinned spec
+# (.api-version) by scripts/check_spec_drift.py. This is the CLI counterpart to
+# the same-named file in the Rust SDK (nexus-exchange-rs): it turns the
+# dashboard's CLI API-coverage panel from "no data" into a real percentage.
+#
+# The check validates this file BOTH ways:
+#   * every line must exist in the pinned spec (no removed/renamed/typo'd op);
+#   * the set must equal the SDK methods the CLI actually calls (parsed from
+#     src/main.rs and src/wsclient.rs and mapped to spec ops via METHOD_OP in
+#     check_spec_drift.py), modulo two documented allowlists in that script:
+#       - CODE_ONLY_OPS    — a command exists and calls an SDK method, but the
+#         op is AHEAD OF the pinned spec, so it is kept OUT of this file (adding
+#         it here would fail the spec check). E.g. order amend, account
+#         leverage/margin-mode, funding-payments, transfers, sub-accounts.
+#       - NON_REST_TARGETS — exercised without a named REST method call; e.g.
+#         GET /ws (the WebSocket upgrade, opened by the streaming client, not a
+#         `client.<method>()` REST call).
+#
+# So: add a line here whenever a CLI command starts exercising a new spec op (a
+# new `client.<method>()` call mapped in METHOD_OP), or the drift check fails.
+# Format:  METHOD /path   (placeholders match the spec, e.g. {market_id})
+#
+# Commands that DON'T appear here, by design: `setup` and `completions` are
+# local-only (no API call); the wallet-auth `auth login` / `agents register`
+# flows are owned by a separate in-flight PR (ENG-4046) and will add their lines
+# (POST /auth/login, POST /agents/register) when they land.
+
+# ── public market data ──
+GET /markets
+GET /markets/summary
+GET /tickers
+GET /markets/{market_id}/ticker
+GET /markets/{market_id}/orderbook
+GET /markets/{market_id}/trades
+GET /markets/{market_id}/candles
+GET /markets/{market_id}/funding
+GET /markets/{market_id}/mark-price
+GET /markets/{market_id}/status
+GET /health
+
+# ── authenticated account (read) ──
+GET /account
+GET /positions
+GET /fills
+GET /orders
+GET /orders/{order_id}
+GET /withdrawals
+GET /account/rate-limit
+GET /keys
+GET /agents
+
+# ── trading & account mutations ──
+POST /orders
+POST /orders/batch
+DELETE /orders/{order_id}
+DELETE /orders
+POST /account/deposit
+POST /account/credit
+POST /keys
+DELETE /keys/{key_id}
+DELETE /agents/{address}
+
+# ── websocket ──
+POST /ws/token
+GET /ws
