@@ -57,6 +57,18 @@ pub struct Credentials {
     /// flags are visible in your shell history and process list.
     #[arg(long, global = true, env = "NEXUS_API_SECRET", hide_env_values = true)]
     pub api_secret: Option<String>,
+
+    /// Wallet session token from `nexus auth login`. Authenticates
+    /// session-scoped routes when no HMAC key/secret pair is configured. Prefer
+    /// the env var or the stored login over the flag (flags are visible in your
+    /// shell history and process list).
+    #[arg(
+        long,
+        global = true,
+        env = "NEXUS_SESSION_TOKEN",
+        hide_env_values = true
+    )]
+    pub session_token: Option<String>,
 }
 
 impl std::fmt::Debug for Credentials {
@@ -66,6 +78,10 @@ impl std::fmt::Debug for Credentials {
             .field(
                 "api_secret",
                 &self.api_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -225,6 +241,17 @@ impl Cli {
             (None, None) => None,
         }
     }
+
+    /// Resolve a wallet session token, layering flag/env over the config file
+    /// (the same precedence as the HMAC pair). Returns `None` when none is
+    /// configured. Handed to [`Config::session_token`] only when no HMAC key
+    /// pair is present, so the HMAC pair takes precedence as the request signer.
+    pub fn session_token(&self, file: &FileConfig) -> Option<String> {
+        self.credentials
+            .session_token
+            .clone()
+            .or_else(|| file.session_token.clone())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -335,6 +362,12 @@ pub enum Command {
     Account {
         #[command(subcommand)]
         action: AccountCommand,
+    },
+
+    /// Wallet-signed authentication (EIP-191 sign-in for a session token).
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommand,
     },
 
     /// Manage HMAC API keys (list/create/delete).
@@ -506,6 +539,23 @@ pub enum AccountCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Sign in with an EVM wallet (EIP-191) and store the session token.
+    ///
+    /// The raw private key is read from `--private-key`, the
+    /// `NEXUS_PRIVATE_KEY` environment variable, or — when neither is set and
+    /// stdin is a terminal — a hidden interactive prompt. It is used only to
+    /// produce the sign-in signature and is never written to disk or echoed.
+    Login {
+        /// Raw EVM private key (`0x`-prefix optional). Prefer the env var or the
+        /// hidden prompt over the flag, which is visible in your shell history
+        /// and process list.
+        #[arg(long, env = "NEXUS_PRIVATE_KEY", hide_env_values = true)]
+        private_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum KeysCommand {
     /// List the API keys on the authenticated session.
     List,
@@ -529,6 +579,39 @@ pub enum KeysCommand {
 pub enum AgentsCommand {
     /// List registered agent keys for the authenticated wallet.
     List,
+    /// Register an agent key, authorized by an EIP-712 signature from the
+    /// owning wallet. The wallet's raw private key produces the signature and
+    /// is never written to disk or echoed; the request itself is unauthenticated
+    /// (the signature is the authorization), so no API key or session token is
+    /// required.
+    Register {
+        /// Agent address to authorize (`0x`-prefixed, 20 bytes).
+        #[arg(long)]
+        agent: String,
+        /// Owning wallet's raw EVM private key (`0x`-prefix optional). Prefer the
+        /// env var or the hidden prompt over the flag, which is visible in your
+        /// shell history and process list.
+        #[arg(long, env = "NEXUS_PRIVATE_KEY", hide_env_values = true)]
+        private_key: Option<String>,
+        /// Authorization expiry, Unix milliseconds. The spec expects expiry in
+        /// `[now+1d, now+90d]`; defaults to 30 days from now when omitted.
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Monotonic nonce; defaults to the current Unix-ms timestamp (a safe
+        /// starting value, per the spec).
+        #[arg(long)]
+        nonce: Option<u64>,
+        /// EIP-712 domain chain id (the exchange's chain id). Part of the signed
+        /// payload, so it must match what the server verifies against.
+        #[arg(long, default_value_t = 393)]
+        chain_id: u64,
+        /// Optional human-readable label for the agent.
+        #[arg(long)]
+        label: Option<String>,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Revoke a registered agent by address.
     Revoke {
         /// Agent address (0x-prefixed).
@@ -636,6 +719,7 @@ mod tests {
             base_url: None,
             api_key: None,
             api_secret: None,
+            session_token: None,
         };
         // No flag → file network wins.
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
@@ -823,6 +907,7 @@ mod tests {
             "funding-payments",
             "withdrawals",
             "account",
+            "auth",
             "keys",
             "agents",
             "transfers",
@@ -899,6 +984,90 @@ mod tests {
             } => assert_eq!(mode, MarginModeArg::Isolated),
             _ => panic!("expected account margin-mode"),
         }
+    }
+
+    #[test]
+    fn auth_login_parses_and_takes_private_key_flag() {
+        let cli =
+            Cli::try_parse_from(["nexus", "auth", "login", "--private-key", "0xabc"]).unwrap();
+        match cli.command {
+            Command::Auth {
+                action: AuthCommand::Login { private_key },
+            } => assert_eq!(private_key.as_deref(), Some("0xabc")),
+            _ => panic!("expected auth login"),
+        }
+        // The private key is optional (env var / prompt fallback).
+        let cli = Cli::try_parse_from(["nexus", "auth", "login"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Auth {
+                action: AuthCommand::Login { private_key: None }
+            }
+        ));
+    }
+
+    #[test]
+    fn agents_register_parses_with_defaults() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "agents",
+            "register",
+            "--agent",
+            "0x1234567890abcdef1234567890abcdef12345678",
+            "--private-key",
+            "0xkey",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Agents {
+                action:
+                    AgentsCommand::Register {
+                        agent,
+                        chain_id,
+                        nonce,
+                        expires_at,
+                        label,
+                        ..
+                    },
+            } => {
+                assert_eq!(agent, "0x1234567890abcdef1234567890abcdef12345678");
+                assert_eq!(chain_id, 393, "chain id defaults to the exchange chain");
+                assert_eq!(nonce, None, "nonce defaults at call time, not parse time");
+                assert_eq!(expires_at, None);
+                assert_eq!(label, None);
+            }
+            _ => panic!("expected agents register"),
+        }
+    }
+
+    #[test]
+    fn session_token_resolves_flag_over_file() {
+        let file = FileConfig {
+            session_token: Some("file-token".into()),
+            ..Default::default()
+        };
+        // No flag -> file token.
+        let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
+        assert_eq!(cli.session_token(&file).as_deref(), Some("file-token"));
+        // Flag wins.
+        let cli =
+            Cli::try_parse_from(["nexus", "--session-token", "flag-token", "balance"]).unwrap();
+        assert_eq!(cli.session_token(&file).as_deref(), Some("flag-token"));
+        // Neither set -> None.
+        let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
+        assert_eq!(cli.session_token(&FileConfig::default()), None);
+    }
+
+    #[test]
+    fn debug_redacts_session_token() {
+        let cli =
+            Cli::try_parse_from(["nexus", "--session-token", "topsecrettoken", "balance"]).unwrap();
+        let dbg = format!("{cli:?}");
+        assert!(
+            !dbg.contains("topsecrettoken"),
+            "session token leaked via Debug: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"));
     }
 
     #[test]
