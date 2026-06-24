@@ -6,8 +6,10 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountSummary, Fill, HealthStatus, MarkPrice, Market, MarketStatus, MarketSummary, Ohlcv,
-    Order, OrderBook, OrderResponse, Position, PriceLevel, Side, Ticker, Trade,
+    AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment,
+    FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus,
+    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, Position, PriceLevel, RateLimitStatus,
+    Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -569,14 +571,124 @@ pub fn market_summaries_json(ss: &[MarketSummary]) -> String {
     pretty(&value)
 }
 
-// ───────────────────────── market status ─────────────────────────
+// ───────────────────────── tickers / summaries ─────────────────────────
+
+/// Render every market's ticker as one aligned row each.
+pub fn tickers(ts: &std::collections::HashMap<String, Ticker>) -> String {
+    if ts.is_empty() {
+        return "No tickers returned.".to_string();
+    }
+    // Sort by symbol so the output is stable across runs (HashMap order isn't).
+    let mut rows: Vec<&Ticker> = ts.values().collect();
+    rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    let mut out = format!(
+        "{:<16}  {:>14}  {:>14}  {:>14}  {:>12}\n",
+        "MARKET", "LAST", "BID", "ASK", "CHANGE %"
+    );
+    for t in &rows {
+        out.push_str(&format!(
+            "{:<16}  {:>14}  {:>14}  {:>14}  {:>12}\n",
+            t.symbol,
+            opt(&t.last),
+            opt(&t.bid),
+            opt(&t.ask),
+            opt(&t.percentage),
+        ));
+    }
+    out.push_str(&format!("\n{} ticker(s).", rows.len()));
+    out
+}
+
+pub fn tickers_json(ts: &std::collections::HashMap<String, Ticker>) -> String {
+    let mut rows: Vec<&Ticker> = ts.values().collect();
+    rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    let value: Value = rows
+        .iter()
+        .map(|t| {
+            json!({
+                "symbol": t.symbol,
+                "datetime": t.datetime,
+                "last": opt_json(&t.last),
+                "bid": opt_json(&t.bid),
+                "ask": opt_json(&t.ask),
+                "percentage": opt_json(&t.percentage),
+                "base_volume": opt_json(&t.base_volume),
+                "quote_volume": opt_json(&t.quote_volume),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render per-market 24h summaries as an aligned table.
+pub fn summaries(ss: &[MarketSummary]) -> String {
+    if ss.is_empty() {
+        return "No market summaries returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>14}  {:>16}  {:>10}  {:<8}\n",
+        "MARKET", "MARK", "VOLUME 24H", "TRADES", "STATUS"
+    );
+    for s in ss {
+        out.push_str(&format!(
+            "{:<16}  {:>14}  {:>16}  {:>10}  {:<8}\n",
+            s.market_id,
+            opt(&s.mark_price),
+            s.volume_24h,
+            s.trade_count,
+            s.status,
+        ));
+    }
+    out.push_str(&format!("\n{} market summary(ies).", ss.len()));
+    out
+}
+
+pub fn summaries_json(ss: &[MarketSummary]) -> String {
+    let value: Value = ss
+        .iter()
+        .map(|s| {
+            json!({
+                "market_id": s.market_id,
+                "mark_price": opt_json(&s.mark_price),
+                "volume_24h": s.volume_24h.to_string(),
+                "trade_count": s.trade_count,
+                "status": s.status,
+                "halt_reason": s.halt_reason,
+                "halted_at": s.halted_at,
+                "adl_event_count": s.adl_event_count,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── mark price / market status ─────────────────────────
+
+/// Render a market's mark price as key/value lines.
+pub fn mark_price(m: &MarkPrice) -> String {
+    format!(
+        "{:<14}{}\n{:<14}{}",
+        "market", m.market_id, "mark price", m.mark_price
+    )
+}
+
+/// Render a market's mark price as pretty JSON.
+pub fn mark_price_json(m: &MarkPrice) -> String {
+    pretty(&json!({
+        "market_id": m.market_id,
+        "mark_price": m.mark_price.to_string(),
+    }))
+}
 
 /// Render a single market's lifecycle/halt status as key/value lines.
 pub fn market_status(s: &MarketStatus) -> String {
     let rows = [
         ("market", s.market_id.clone()),
         ("status", s.status.clone()),
-        ("halt reason", opt(&s.halt_reason)),
+        (
+            "halt reason",
+            s.halt_reason.clone().unwrap_or_else(|| "-".into()),
+        ),
         ("halted at", opt(&s.halted_at)),
         ("adl events", s.adl_event_count.to_string()),
     ];
@@ -588,23 +700,393 @@ pub fn market_status(s: &MarketStatus) -> String {
 
 /// Render a single market's status as pretty JSON.
 pub fn market_status_json(s: &MarketStatus) -> String {
-    let value = json!({
+    pretty(&json!({
         "market_id": s.market_id,
         "status": s.status,
         "halt_reason": s.halt_reason,
         "halted_at": s.halted_at,
         "adl_event_count": s.adl_event_count,
-    });
+    }))
+}
+
+// ───────────────────────── funding ─────────────────────────
+
+pub fn funding_rates(fs: &[FundingSample]) -> String {
+    if fs.is_empty() {
+        return "No funding samples returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>16}  {:>14}  {:>14}  {:>14}\n",
+        "TIME(ms)", "FUNDING RATE", "PREMIUM", "MARK", "ORACLE"
+    );
+    for f in fs {
+        out.push_str(&format!(
+            "{:<16}  {:>16}  {:>14}  {:>14}  {:>14}\n",
+            f.timestamp, f.funding_rate, f.premium_index, f.mark_price, f.oracle_price,
+        ));
+    }
+    out.push_str(&format!("\n{} sample(s).", fs.len()));
+    out
+}
+
+pub fn funding_rates_json(fs: &[FundingSample]) -> String {
+    let value: Value = fs
+        .iter()
+        .map(|f| {
+            json!({
+                "timestamp": f.timestamp,
+                "funding_rate": f.funding_rate.to_string(),
+                "premium_index": f.premium_index.to_string(),
+                "mark_price": f.mark_price.to_string(),
+                "oracle_price": f.oracle_price.to_string(),
+            })
+        })
+        .collect();
     pretty(&value)
 }
 
-// ───────────────────────── mark price ─────────────────────────
+pub fn funding_payments(fs: &[FundingPayment]) -> String {
+    if fs.is_empty() {
+        return "No funding payments returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:>16}  {:>14}  {:<16}\n",
+        "MARKET", "AMOUNT", "RATE", "TIME(ms)"
+    );
+    for f in fs {
+        out.push_str(&format!(
+            "{:<16}  {:>16}  {:>14}  {:<16}\n",
+            f.market_id,
+            f.amount,
+            opt(&f.funding_rate),
+            f.timestamp,
+        ));
+    }
+    out.push_str(&format!("\n{} payment(s).", fs.len()));
+    out
+}
 
-/// Render a market's mark price as key/value lines.
-pub fn mark_price(m: &MarkPrice) -> String {
+pub fn funding_payments_json(fs: &[FundingPayment]) -> String {
+    let value: Value = fs
+        .iter()
+        .map(|f| {
+            json!({
+                "market_id": f.market_id,
+                "amount": f.amount.to_string(),
+                "funding_rate": opt_json(&f.funding_rate),
+                "timestamp": f.timestamp,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── single order (get) ─────────────────────────
+
+/// Single-order detail view, reusing the key/value `order` renderer.
+pub fn order_detail(o: &Order) -> String {
+    order(o)
+}
+
+pub fn order_detail_json(o: &Order) -> String {
+    pretty(&order_value(o))
+}
+
+// ───────────────────────── api keys ─────────────────────────
+
+pub fn api_keys(ks: &[ApiKeyInfo]) -> String {
+    if ks.is_empty() {
+        return "No API keys.".to_string();
+    }
+    let mut out = format!("{:<24}  {:<12}\n", "KEY ID", "TIER");
+    for k in ks {
+        out.push_str(&format!("{:<24}  {:<12}\n", k.key_id, k.tier));
+    }
+    out.push_str(&format!("\n{} key(s).", ks.len()));
+    out
+}
+
+pub fn api_keys_json(ks: &[ApiKeyInfo]) -> String {
+    let value: Value = ks
+        .iter()
+        .map(|k| json!({ "key_id": k.key_id, "tier": k.tier }))
+        .collect();
+    pretty(&value)
+}
+
+/// Render a newly created API key. The secret is shown once — surface it
+/// prominently and warn it is unrecoverable. `secret` is passed in by the
+/// caller (which exposes it from the `SecretString`); this module never holds
+/// the secret.
+pub fn created_api_key(key_id: &str, secret: &str, tier: Option<&str>) -> String {
+    format!(
+        "Created API key. Store the secret now — it is shown only once.\n\n\
+         {:<14}{}\n{:<14}{}\n{:<14}{}",
+        "key id",
+        key_id,
+        "secret",
+        secret,
+        "tier",
+        tier.unwrap_or("-"),
+    )
+}
+
+pub fn created_api_key_json(key_id: &str, secret: &str, tier: Option<&str>) -> String {
+    pretty(&json!({
+        "key_id": key_id,
+        "secret": secret,
+        "tier": tier,
+    }))
+}
+
+// ───────────────────────── agents ─────────────────────────
+
+pub fn agents(ags: &[AgentInfo]) -> String {
+    if ags.is_empty() {
+        return "No registered agents.".to_string();
+    }
+    let mut out = format!(
+        "{:<44}  {:<16}  {:<16}  {:<16}\n",
+        "ADDRESS", "EXPIRES(ms)", "REGISTERED(ms)", "LABEL"
+    );
+    for a in ags {
+        out.push_str(&format!(
+            "{:<44}  {:<16}  {:<16}  {:<16}\n",
+            a.address,
+            a.expires_at,
+            a.registered_at,
+            a.label.as_deref().unwrap_or("-"),
+        ));
+    }
+    out.push_str(&format!("\n{} agent(s).", ags.len()));
+    out
+}
+
+pub fn agents_json(ags: &[AgentInfo]) -> String {
+    let value: Value = ags
+        .iter()
+        .map(|a| {
+            json!({
+                "address": a.address,
+                "expires_at": a.expires_at,
+                "registered_at": a.registered_at,
+                "label": a.label,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── account: deposit / credit / rate-limit ─────────────────────────
+
+pub fn deposit(d: &DepositResult) -> String {
+    format!("{:<14}{}", "balance", d.balance)
+}
+
+pub fn deposit_json(d: &DepositResult) -> String {
+    pretty(&json!({ "balance": d.balance.to_string() }))
+}
+
+pub fn credit(c: &CreditResult) -> String {
     let rows = [
-        ("market", m.market_id.clone()),
-        ("mark price", m.mark_price.to_string()),
+        ("credited", c.amount.to_string()),
+        ("credited today", c.credited_today.to_string()),
+        ("daily limit", c.daily_limit.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<18}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn credit_json(c: &CreditResult) -> String {
+    pretty(&json!({
+        "amount": c.amount.to_string(),
+        "credited_today": c.credited_today.to_string(),
+        "daily_limit": c.daily_limit.to_string(),
+    }))
+}
+
+pub fn rate_limit(r: &RateLimitStatus) -> String {
+    let rows = [
+        ("tier", r.tier.clone()),
+        ("limit", opt(&r.limit)),
+        ("remaining", opt(&r.remaining)),
+        ("reset at (ms)", opt(&r.reset_at_ms)),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<16}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn rate_limit_json(r: &RateLimitStatus) -> String {
+    pretty(&json!({
+        "tier": r.tier,
+        "limit": r.limit,
+        "remaining": r.remaining,
+        "reset_at_ms": r.reset_at_ms,
+    }))
+}
+
+// ───────────────────────── leverage / margin mode ─────────────────────────
+
+pub fn leverage(l: &LeverageUpdate) -> String {
+    format!(
+        "{:<14}{}\n{:<14}{}x",
+        "market", l.market_id, "leverage", l.leverage
+    )
+}
+
+pub fn leverage_json(l: &LeverageUpdate) -> String {
+    pretty(&json!({ "market_id": l.market_id, "leverage": l.leverage }))
+}
+
+pub fn margin_mode(m: &MarginModeUpdate) -> String {
+    format!(
+        "{:<14}{}\n{:<14}{:?}",
+        "market", m.market_id, "margin mode", m.margin_mode
+    )
+}
+
+pub fn margin_mode_json(m: &MarginModeUpdate) -> String {
+    pretty(&json!({
+        "market_id": m.market_id,
+        "margin_mode": format!("{:?}", m.margin_mode),
+    }))
+}
+
+// ───────────────────────── withdrawals / transfers / sub-accounts ─────────────────────────
+
+pub fn withdrawals(ws: &[Withdrawal]) -> String {
+    if ws.is_empty() {
+        return "No withdrawals.".to_string();
+    }
+    let mut out = format!(
+        "{:<24}  {:>16}  {:<16}  {:<12}\n",
+        "ID", "AMOUNT", "TIME(ms)", "STATUS"
+    );
+    for w in ws {
+        out.push_str(&format!(
+            "{:<24}  {:>16}  {:<16}  {:<12}\n",
+            w.id, w.amount, w.timestamp, w.status,
+        ));
+    }
+    out.push_str(&format!("\n{} withdrawal(s).", ws.len()));
+    out
+}
+
+pub fn withdrawals_json(ws: &[Withdrawal]) -> String {
+    let value: Value = ws
+        .iter()
+        .map(|w| {
+            json!({
+                "id": w.id,
+                "amount": w.amount.to_string(),
+                "timestamp": w.timestamp,
+                "status": w.status,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+pub fn transfers(ts: &[Transfer]) -> String {
+    if ts.is_empty() {
+        return "No transfers.".to_string();
+    }
+    let mut out = format!(
+        "{:<24}  {:<20}  {:<20}  {:>16}  {:<12}\n",
+        "ID", "FROM", "TO", "AMOUNT", "STATUS"
+    );
+    for t in ts {
+        out.push_str(&format!(
+            "{:<24}  {:<20}  {:<20}  {:>16}  {:<12}\n",
+            t.id, t.from_account, t.to_account, t.amount, t.status,
+        ));
+    }
+    out.push_str(&format!("\n{} transfer(s).", ts.len()));
+    out
+}
+
+pub fn transfers_json(ts: &[Transfer]) -> String {
+    let value: Value = ts.iter().map(transfer_value).collect();
+    pretty(&value)
+}
+
+fn transfer_value(t: &Transfer) -> Value {
+    json!({
+        "id": t.id,
+        "from_account": t.from_account,
+        "to_account": t.to_account,
+        "amount": t.amount.to_string(),
+        "timestamp": t.timestamp,
+        "status": t.status,
+    })
+}
+
+/// Render a single transfer result (the `POST /transfers` response).
+pub fn transfer(t: &Transfer) -> String {
+    let rows = [
+        ("id", t.id.clone()),
+        ("from", t.from_account.clone()),
+        ("to", t.to_account.clone()),
+        ("amount", t.amount.to_string()),
+        ("status", t.status.clone()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<10}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn transfer_json(t: &Transfer) -> String {
+    pretty(&transfer_value(t))
+}
+
+pub fn sub_accounts(ss: &[SubAccount]) -> String {
+    if ss.is_empty() {
+        return "No sub-accounts.".to_string();
+    }
+    let mut out = format!("{:<24}  {:<20}  {:>16}\n", "ACCOUNT ID", "LABEL", "EQUITY");
+    for s in ss {
+        out.push_str(&format!(
+            "{:<24}  {:<20}  {:>16}\n",
+            s.account_id,
+            if s.label.is_empty() { "-" } else { &s.label },
+            opt(&s.equity),
+        ));
+    }
+    out.push_str(&format!("\n{} sub-account(s).", ss.len()));
+    out
+}
+
+pub fn sub_accounts_json(ss: &[SubAccount]) -> String {
+    let value: Value = ss.iter().map(sub_account_value).collect();
+    pretty(&value)
+}
+
+fn sub_account_value(s: &SubAccount) -> Value {
+    json!({
+        "account_id": s.account_id,
+        "label": s.label,
+        "equity": opt_json(&s.equity),
+    })
+}
+
+/// Render a single created sub-account.
+pub fn sub_account(s: &SubAccount) -> String {
+    let rows = [
+        ("account id", s.account_id.clone()),
+        (
+            "label",
+            if s.label.is_empty() {
+                "-".into()
+            } else {
+                s.label.clone()
+            },
+        ),
+        ("equity", opt(&s.equity)),
     ];
     rows.iter()
         .map(|(k, v)| format!("{k:<14}{v}"))
@@ -612,13 +1094,8 @@ pub fn mark_price(m: &MarkPrice) -> String {
         .join("\n")
 }
 
-/// Render a market's mark price as pretty JSON.
-pub fn mark_price_json(m: &MarkPrice) -> String {
-    let value = json!({
-        "market_id": m.market_id,
-        "mark_price": m.mark_price.to_string(),
-    });
-    pretty(&value)
+pub fn sub_account_json(s: &SubAccount) -> String {
+    pretty(&sub_account_value(s))
 }
 
 #[cfg(test)]

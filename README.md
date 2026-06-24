@@ -156,6 +156,11 @@ nexus --help
 # Public market data
 nexus markets                       # tradable markets and their rules
 nexus ticker BTC-USDX-PERP          # ticker for one market
+nexus tickers                       # tickers for every market
+nexus summaries                     # per-market 24h summaries
+nexus mark-price BTC-USDX-PERP      # current mark price
+nexus market-status BTC-USDX-PERP   # lifecycle / halt status
+nexus funding-rates BTC-USDX-PERP --limit 50
 nexus orderbook BTC-USDX-PERP       # bids/asks
 nexus trades BTC-USDX-PERP --limit 50
 nexus candles BTC-USDX-PERP --timeframe 1m --limit 100
@@ -171,12 +176,35 @@ nexus balance                       # balance, collateral, equity, margin
 nexus positions                     # open positions
 nexus fills --limit 50              # recent executions
 nexus orders                        # open orders
+nexus funding-payments --limit 50   # funding booked against the account
+nexus withdrawals                   # withdrawal history
 
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
+nexus order get <ORDER_ID>          # fetch one order
+nexus order amend <ORDER_ID> --price 85000 --quantity 0.02
+nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID>
 nexus order cancel --all
+
+# Account management (see Credentials below)
+nexus account deposit 1000          # deposit collateral
+nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
+nexus account rate-limit            # rate-limit tier / remaining tokens
+nexus account leverage BTC-USDX-PERP 10
+nexus account margin-mode BTC-USDX-PERP isolated
+
+# API keys, agents, transfers, sub-accounts
+nexus keys list
+nexus keys create                   # secret is shown ONCE — store it now
+nexus keys delete <KEY_ID>
+nexus agents list
+nexus agents revoke <AGENT_ADDRESS>
+nexus transfers list
+nexus transfers create --from <ACCT> --to <SUBACCT> --amount 100
+nexus sub-accounts list
+nexus sub-accounts create "trading-bot-1"
 
 # Live streaming over WebSocket (Ctrl-C to stop)
 nexus ws trades --market BTC-USDX-PERP      # public channels need --market
@@ -184,6 +212,17 @@ nexus ws orders fills positions             # account channels (need credentials
 
 # First-time setup (interactive)
 nexus setup
+```
+
+The `order batch` file is a JSON array of order objects mirroring the
+`order place` flags, with string amounts to preserve precision:
+
+```json
+[
+  {"market": "BTC-USDX-PERP", "side": "buy", "type": "limit",
+   "price": "84000", "quantity": "0.01", "tif": "gtc"},
+  {"market": "ETH-USDX-PERP", "side": "sell", "type": "market", "quantity": "1"}
+]
 ```
 
 Every subcommand supports `--help`.
