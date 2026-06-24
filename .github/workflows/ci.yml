@@ -39,6 +39,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
 
+  # Emit a machine-readable line-coverage % for the dashboard. Additive and
+  # non-gating: there is no --fail-under threshold, so coverage never blocks a
+  # merge. Uses cargo-llvm-cov (LLVM source-based coverage).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --all-features --summary-only --json --output-path coverage.json
+          cargo llvm-cov --all-features --summary-only
+      - name: Write coverage summary
+        run: |
+          PCT=$(jq -r '.data[0].totals.lines.percent' coverage.json)
+          printf '### Line coverage: %.2f%%\n' "$PCT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.json
+
   # Ensure the release pipeline stays valid and the generated release.yml never
   # drifts from dist-workspace.toml. Pinned to the same dist version the release
   # workflow uses.
