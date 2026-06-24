@@ -867,6 +867,17 @@ mod tests {
     }
 
     #[test]
+    fn account_rate_limit_parses() {
+        let cli = Cli::try_parse_from(["nexus", "account", "rate-limit"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Account {
+                action: AccountCommand::RateLimit
+            }
+        ));
+    }
+
+    #[test]
     fn order_cancel_all_conflicts_with_id() {
         // `--all` and a positional id are mutually exclusive.
         assert!(Cli::try_parse_from(["nexus", "order", "cancel", "abc", "--all"]).is_err());
@@ -899,6 +910,7 @@ mod tests {
             "candles",
             "health",
             "balance",
+            "account",
             "positions",
             "fills",
             "withdrawals",
