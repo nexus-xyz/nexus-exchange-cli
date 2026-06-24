@@ -9,6 +9,16 @@ use crate::credentials::FileConfig;
 // Re-export for use in main.rs.
 pub use clap_complete::Shell;
 
+/// `User-Agent` the CLI reports to the API so the indexer can attribute traffic
+/// to the CLI specifically (vs. the Rust SDK, the web frontend, or raw callers).
+///
+/// The version is the crate version baked in at compile time, so it can never
+/// drift from `Cargo.toml`. The string is a fixed constant with no user- or
+/// environment-supplied input, so it carries no HTTP-header-injection risk; the
+/// SDK additionally falls back to its own default UA if a value ever contained
+/// bytes illegal in a header.
+const USER_AGENT: &str = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
+
 /// Command-line interface for the Nexus Exchange API.
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version, about, long_about = None)]
@@ -160,21 +170,20 @@ impl From<NetworkArg> for Network {
 impl Cli {
     /// Resolve the SDK [`Config`], layering: `--base-url` > `--network`/env >
     /// config-file `base_url` > config-file `network` > the SDK default
-    /// (stable).
+    /// (stable). Every resolved config carries the CLI's [`USER_AGENT`].
     pub fn config(&self, file: &FileConfig) -> Config {
-        if let Some(url) = &self.base_url {
-            return Config::with_base_url(url.clone());
-        }
-        if let Some(net) = self.network {
-            return Config::new(net.into());
-        }
-        if let Some(url) = &file.base_url {
-            return Config::with_base_url(url.clone());
-        }
-        if let Some(net) = file.network.as_deref().and_then(NetworkArg::parse) {
-            return Config::new(net.into());
-        }
-        Config::default()
+        let config = if let Some(url) = &self.base_url {
+            Config::with_base_url(url.clone())
+        } else if let Some(net) = self.network {
+            Config::new(net.into())
+        } else if let Some(url) = &file.base_url {
+            Config::with_base_url(url.clone())
+        } else if let Some(net) = file.network.as_deref().and_then(NetworkArg::parse) {
+            Config::new(net.into())
+        } else {
+            Config::default()
+        };
+        config.with_user_agent(USER_AGENT)
     }
 
     /// Resolve an API key/secret pair, layering flags/env over the config file.
@@ -483,6 +492,19 @@ mod tests {
             cli.credentials(&file),
             Some(("flag-key".into(), "file-secret".into()))
         );
+    }
+
+    #[test]
+    fn sets_descriptive_user_agent() {
+        let expected = format!("nexus-cli/{}", env!("CARGO_PKG_VERSION"));
+
+        // Network path.
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(cli.config(&FileConfig::default()).user_agent(), expected);
+
+        // Explicit base-url path also carries the UA.
+        let cli = Cli::try_parse_from(["nexus", "--base-url", "http://x:1", "markets"]).unwrap();
+        assert_eq!(cli.config(&FileConfig::default()).user_agent(), expected);
     }
 
     #[test]
