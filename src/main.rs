@@ -1019,4 +1019,109 @@ mod tests {
             assert!(out.contains("sess_tok_123"));
         }
     }
+
+    #[test]
+    fn parse_amount_accepts_positive_decimals() {
+        assert_eq!(
+            parse_amount("price", "84000").unwrap(),
+            Decimal::from_str("84000").unwrap()
+        );
+        assert_eq!(
+            parse_amount("quantity", "0.001").unwrap(),
+            Decimal::from_str("0.001").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_amount_rejects_zero_negative_and_garbage() {
+        for bad in ["0", "-1", "-0.5", "abc", "", "1.2.3", "NaN"] {
+            let err =
+                parse_amount("amount", bad).expect_err(&format!("{bad:?} should be rejected"));
+            // The field name and the offending value are echoed back.
+            let msg = err.to_string();
+            assert!(
+                msg.contains("amount"),
+                "message should name the field: {msg}"
+            );
+            assert!(
+                msg.contains("positive"),
+                "message should explain the constraint: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_authenticated_gates_on_the_flag() {
+        assert!(require_authenticated(true, "balance").is_ok());
+        let err = require_authenticated(false, "balance").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("balance"), "names the command: {msg}");
+        assert!(msg.contains("credentials"), "explains why: {msg}");
+    }
+
+    #[test]
+    fn confirm_short_circuits_on_yes() {
+        // With --yes we proceed without reading stdin (so this is safe in CI,
+        // where stdin is not a terminal).
+        assert!(confirm("do a thing", true).unwrap());
+    }
+
+    #[test]
+    fn confirm_refuses_non_interactive_without_yes() {
+        // Tests run with a non-terminal stdin, so this exercises the refusal
+        // path rather than blocking on a read.
+        let err = confirm("place order", false).unwrap_err();
+        assert!(err.to_string().contains("refusing to proceed"));
+    }
+
+    #[test]
+    fn build_subscriptions_validates_channels() {
+        // Unknown channel is rejected and the error lists the valid sets.
+        let err = build_subscriptions(&["bogus".into()], None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown channel"), "{msg}");
+        assert!(msg.contains("trades"), "lists public channels: {msg}");
+        assert!(msg.contains("orders"), "lists account channels: {msg}");
+
+        // A public channel requires --market.
+        let err = build_subscriptions(&["trades".into()], None, None).unwrap_err();
+        assert!(err.to_string().contains("requires --market"));
+    }
+
+    #[test]
+    fn build_subscriptions_scopes_market_correctly() {
+        let subs = build_subscriptions(
+            &["trades".into(), "orders".into()],
+            Some("BTC-USDX-PERP".into()),
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(subs.len(), 2);
+        // Public channel keeps the market; account channel drops it.
+        assert_eq!(subs[0].channel, "trades");
+        assert_eq!(subs[0].market.as_deref(), Some("BTC-USDX-PERP"));
+        assert_eq!(subs[0].since, Some(42));
+        assert_eq!(subs[1].channel, "orders");
+        assert_eq!(subs[1].market, None);
+    }
+
+    #[test]
+    fn emit_runs_the_json_closure_only_for_json() {
+        use std::cell::Cell;
+        // Human format must not invoke the JSON renderer.
+        let called = Cell::new(false);
+        emit(OutputFormat::Human, "human".into(), || {
+            called.set(true);
+            "json".into()
+        });
+        assert!(!called.get(), "JSON closure should be skipped for Human");
+
+        // JSON format must invoke it.
+        let called = Cell::new(false);
+        emit(OutputFormat::Json, "human".into(), || {
+            called.set(true);
+            "json".into()
+        });
+        assert!(called.get(), "JSON closure should run for Json");
+    }
 }

@@ -1225,4 +1225,241 @@ mod tests {
         assert_eq!(row["quantity"], json!("0.01"));
         assert_eq!(row["side"], json!("Buy"));
     }
+
+    // ───────────────────────── fixtures ─────────────────────────
+
+    fn market_fixture() -> Vec<Market> {
+        serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP", "base_asset": "BTC", "quote_asset": "USDX",
+            "tick_size": "0.5", "lot_size": "0.001", "min_order_size": "0.001",
+            "max_order_size": "100", "initial_margin_rate": "0.05",
+            "maintenance_margin_rate": "0.03", "max_leverage": 20
+        }]))
+        .unwrap()
+    }
+
+    fn orderbook_fixture() -> OrderBook {
+        serde_json::from_value(json!({
+            "symbol": "BTC-USDX-PERP",
+            "bids": [[84000.0, 1.5], [83999.5, 2.0]],
+            "asks": [[84001.0, 0.5]],
+            "timestamp": 1_700_000_000_000i64,
+            "datetime": "2023-11-14T22:13:20Z",
+            "nonce": 99
+        }))
+        .unwrap()
+    }
+
+    fn trades_fixture() -> Vec<Trade> {
+        serde_json::from_value(json!([{
+            "id": "t1", "symbol": "BTC-USDX-PERP", "side": "buy",
+            "price": 84000.0, "amount": 0.01, "cost": 840.0,
+            "timestamp": 1_700_000_000_000i64, "datetime": "2023-11-14T22:13:20Z",
+            "is_liquidation": false
+        }]))
+        .unwrap()
+    }
+
+    fn account_fixture() -> AccountSummary {
+        serde_json::from_value(json!({
+            "balance": "1000", "collateral": "1000", "equity": "1050",
+            "available_margin": "900",
+            "positions": [{
+                "market_id": "BTC-USDX-PERP", "side": "Buy", "size": "0.5",
+                "entry_price": "80000", "unrealized_pnl": "50",
+                "realized_pnl": "0", "liquidation_price": "60000"
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn fills_fixture() -> Vec<Fill> {
+        serde_json::from_value(json!([{
+            "id": "f1", "order_id": "o1", "market_id": "BTC-USDX-PERP",
+            "side": "sell", "price": "84000", "size": "0.01", "fee": "0.42",
+            "taker_or_maker": "taker", "timestamp": 1_700_000_000_000i64,
+            "is_liquidation": false
+        }]))
+        .unwrap()
+    }
+
+    fn order_fixture() -> Order {
+        serde_json::from_value(json!({
+            "id": "o1", "market_id": "BTC-USDX-PERP", "account_id": "0xabc",
+            "side": "Buy", "order_type": "Limit", "price": "84000",
+            "quantity": "0.01", "filled_qty": "0", "status": "Open",
+            "time_in_force": "GTC"
+        }))
+        .unwrap()
+    }
+
+    // ───────────────────────── human renderers ─────────────────────────
+
+    #[test]
+    fn human_renderers_include_headers_and_counts() {
+        let m = markets(&market_fixture());
+        assert!(m.contains("MARKET") && m.contains("BTC-USDX-PERP"));
+        assert!(m.contains("1 market(s)."));
+
+        let ob = orderbook(&orderbook_fixture());
+        assert!(ob.contains("order book") && ob.contains("BID PRICE"));
+        assert!(ob.contains("2 bid level(s), 1 ask level(s)."));
+
+        let tr = trades(&trades_fixture());
+        assert!(tr.contains("SIDE") && tr.contains("Buy"));
+        assert!(tr.contains("1 trade(s)."));
+
+        let bal = balance(&account_fixture());
+        assert!(bal.contains("balance") && bal.contains("1050"));
+        // Balance embeds the positions table when positions are present.
+        assert!(bal.contains("MARKET") && bal.contains("1 position(s)."));
+
+        let f = fills(&fills_fixture());
+        assert!(f.contains("ROLE") && f.contains("taker"));
+        assert!(f.contains("1 fill(s)."));
+
+        let o = order(&order_fixture());
+        assert!(o.contains("status") && o.contains("Open"));
+    }
+
+    #[test]
+    fn empty_collections_render_friendly_messages() {
+        assert_eq!(markets(&[]), "No markets returned.");
+        assert_eq!(trades(&[]), "No trades returned.");
+        assert_eq!(candles(&[]), "No candles returned.");
+        assert_eq!(positions(&[]), "No open positions.");
+        assert_eq!(fills(&[]), "No fills returned.");
+        assert_eq!(orders(&[]), "No open orders.");
+    }
+
+    #[test]
+    fn ticker_and_health_human_render() {
+        let ticker_v: Ticker = serde_json::from_value(json!({
+            "symbol": "BTC-USDX-PERP", "timestamp": 1i64, "datetime": "d",
+            "last": 99.0, "bid": null, "ask": null
+        }))
+        .unwrap();
+        let t = ticker(&ticker_v);
+        assert!(t.contains("symbol") && t.contains("BTC-USDX-PERP"));
+        // Absent optionals show as `-`.
+        assert!(t.contains("bid           -"));
+
+        let health_v: HealthStatus = serde_json::from_value(json!({
+            "events_received": 7, "fills_total": 3, "uptime_seconds": 42,
+            "connected": true
+        }))
+        .unwrap();
+        let h = health(&health_v);
+        assert!(h.contains("connected") && h.contains("true"));
+        // Missing `health` field defaults to "unknown".
+        assert!(h.contains("unknown"));
+    }
+
+    // ───────────────────────── remaining JSON renderers ─────────────────────────
+
+    #[test]
+    fn orderbook_json_is_ccxt_level_arrays() {
+        let v: Value = serde_json::from_str(&orderbook_json(&orderbook_fixture())).unwrap();
+        assert_eq!(v["symbol"], json!("BTC-USDX-PERP"));
+        assert_eq!(v["nonce"], json!(99));
+        // Levels are [price, size] decimal-string pairs.
+        assert_eq!(v["bids"][0], json!(["84000", "1.5"]));
+        assert_eq!(v["asks"][0], json!(["84001", "0.5"]));
+    }
+
+    #[test]
+    fn trades_json_uses_decimal_strings() {
+        let v: Value = serde_json::from_str(&trades_json(&trades_fixture())).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(row["side"], json!("Buy"));
+        assert_eq!(row["price"], json!("84000"));
+        assert_eq!(row["is_liquidation"], json!(false));
+    }
+
+    #[test]
+    fn candles_json_is_ohlcv_tuples() {
+        let candles_v: Vec<Ohlcv> = serde_json::from_value(json!([[
+            1_700_000_000_000i64,
+            84000.0,
+            84100.0,
+            83900.0,
+            84050.0,
+            12.5
+        ]]))
+        .unwrap();
+        let human = candles(&candles_v);
+        assert!(human.contains("OPEN") && human.contains("1 candle(s)."));
+        let v: Value = serde_json::from_str(&candles_json(&candles_v)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        // [ts, o, h, l, c, v] with money as strings, ts as a number.
+        assert_eq!(row[0], json!(1_700_000_000_000i64));
+        assert_eq!(row[1], json!("84000"));
+        assert_eq!(row[5], json!("12.5"));
+    }
+
+    #[test]
+    fn balance_json_carries_positions_and_decimal_strings() {
+        let v: Value = serde_json::from_str(&balance_json(&account_fixture())).unwrap();
+        assert_eq!(v["equity"], json!("1050"));
+        let pos = &v["positions"][0];
+        assert_eq!(pos["market_id"], json!("BTC-USDX-PERP"));
+        assert_eq!(pos["liquidation_price"], json!("60000"));
+    }
+
+    #[test]
+    fn positions_json_nulls_absent_liquidation_price() {
+        let ps: Vec<Position> = serde_json::from_value(json!([{
+            "market_id": "ETH-USDX-PERP", "side": "Sell", "size": "1",
+            "entry_price": "3000", "unrealized_pnl": "-10", "realized_pnl": "0",
+            "liquidation_price": null
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&positions_json(&ps)).unwrap();
+        assert_eq!(v[0]["liquidation_price"], Value::Null);
+    }
+
+    #[test]
+    fn fills_json_preserves_taker_or_maker() {
+        let v: Value = serde_json::from_str(&fills_json(&fills_fixture())).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(row["taker_or_maker"], json!("taker"));
+        assert_eq!(row["fee"], json!("0.42"));
+        assert_eq!(row["side"], json!("Sell"));
+    }
+
+    #[test]
+    fn order_result_counts_immediate_fills() {
+        let resp: OrderResponse = serde_json::from_value(json!({
+            "order": {
+                "id": "o1", "market_id": "BTC-USDX-PERP", "side": "Buy",
+                "order_type": "Market", "quantity": "0.01", "filled_qty": "0.01",
+                "status": "Filled", "time_in_force": "IOC"
+            },
+            "fills": [{"x": 1}, {"y": 2}]
+        }))
+        .unwrap();
+        let human = order_result(&resp);
+        assert!(human.contains("immediate fills") && human.contains('2'));
+        let v: Value = serde_json::from_str(&order_result_json(&resp)).unwrap();
+        assert_eq!(v["order"]["status"], json!("Filled"));
+        assert_eq!(v["fills"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn orders_human_table_lists_rows() {
+        let os = vec![order_fixture()];
+        let out = orders(&os);
+        assert!(out.contains("ID") && out.contains("STATUS"));
+        assert!(out.contains("o1") && out.contains("BTC-USDX-PERP"));
+        assert!(out.contains("1 order(s)."));
+    }
+
+    #[test]
+    fn cancel_pairs_a_note_with_the_pretty_body() {
+        let body = json!({"cancelled": true});
+        let out = cancel(&body, "cancelled order o1.");
+        assert!(out.starts_with("cancelled order o1."));
+        // The server body is pretty-printed beneath the note.
+        assert!(out.contains("\"cancelled\": true"));
+    }
 }
