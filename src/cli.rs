@@ -308,6 +308,13 @@ pub enum Command {
         limit: u32,
     },
 
+    /// List your withdrawal history.
+    Withdrawals {
+        /// Maximum number of withdrawals to return.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+
     /// List your open orders.
     Orders,
 
@@ -317,9 +324,6 @@ pub enum Command {
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
-
-    /// Your withdrawal history.
-    Withdrawals,
 
     /// Place, amend, cancel, or fetch orders.
     Order {
@@ -825,6 +829,7 @@ mod tests {
             "account",
             "positions",
             "fills",
+            "withdrawals",
             "orders",
             "order",
             "funding-payments",

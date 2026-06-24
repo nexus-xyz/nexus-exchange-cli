@@ -200,3 +200,174 @@ fn non_empty(s: String) -> Option<String> {
 // `IsTerminal` is in the prelude on the MSRV (1.82), but import it explicitly to
 // be unambiguous.
 use std::io::IsTerminal;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `config_path` reads process-global env (`XDG_CONFIG_HOME` / `HOME`), and
+    // the tests mutate it, so they must not run concurrently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Point the config dir at a fresh temp directory for the duration of a
+    /// test, restoring the previous env afterward.
+    struct TempConfigHome {
+        dir: PathBuf,
+        prev_xdg: Option<std::ffi::OsString>,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    impl TempConfigHome {
+        fn new(tag: &str) -> Self {
+            let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+            let prev_home = std::env::var_os("HOME");
+            let dir = std::env::temp_dir().join(format!(
+                "nexus-cli-test-{}-{}-{:?}",
+                std::process::id(),
+                tag,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+            Self {
+                dir,
+                prev_xdg,
+                prev_home,
+            }
+        }
+    }
+
+    impl Drop for TempConfigHome {
+        fn drop(&mut self) {
+            match &self.prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match &self.prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn config_path_prefers_xdg_then_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("path-xdg");
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-example");
+        let p = config_path().unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/xdg-example/nexus/config.json"));
+
+        // With XDG unset, fall back to $HOME/.config.
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", "/home/someone");
+        let p = config_path().unwrap();
+        assert_eq!(p, PathBuf::from("/home/someone/.config/nexus/config.json"));
+    }
+
+    #[test]
+    fn config_path_errors_without_xdg_or_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_home = std::env::var_os("HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        let err = config_path().unwrap_err();
+        assert!(err.to_string().contains("config directory"));
+        // Restore.
+        if let Some(v) = prev_xdg {
+            std::env::set_var("XDG_CONFIG_HOME", v);
+        }
+        if let Some(v) = prev_home {
+            std::env::set_var("HOME", v);
+        }
+    }
+
+    #[test]
+    fn load_missing_file_is_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("missing");
+        // Nothing written yet.
+        assert!(load().unwrap().is_none());
+    }
+
+    #[test]
+    fn save_then_load_round_trips_and_skips_none_fields() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("roundtrip");
+        let cfg = FileConfig {
+            network: Some("beta".into()),
+            base_url: None,
+            api_key: Some("nx_abc".into()),
+            api_secret: Some("shh".into()),
+        };
+        let path = save(&cfg).unwrap();
+        assert!(path.exists());
+
+        // Round-trips through disk.
+        let loaded = load().unwrap().expect("config should be present");
+        assert_eq!(loaded.network.as_deref(), Some("beta"));
+        assert_eq!(loaded.api_key.as_deref(), Some("nx_abc"));
+        assert_eq!(loaded.api_secret.as_deref(), Some("shh"));
+        assert_eq!(loaded.base_url, None);
+
+        // `None` fields are omitted from the serialized JSON.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("base_url"),
+            "None field should be skipped: {raw}"
+        );
+        assert!(raw.contains("api_key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("perms");
+        let path = save(&FileConfig {
+            api_key: Some("k".into()),
+            api_secret: Some("s".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config file must be 0600, was {mode:o}");
+    }
+
+    #[test]
+    fn load_malformed_json_is_an_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("malformed");
+        let path = config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let err = load().unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn non_empty_trims_and_nullifies_blank() {
+        assert_eq!(non_empty("  hi  ".into()), Some("hi".to_string()));
+        assert_eq!(non_empty("   ".into()), None);
+        assert_eq!(non_empty("".into()), None);
+    }
+
+    #[test]
+    fn debug_redacts_the_secret() {
+        let cfg = FileConfig {
+            api_secret: Some("topsecret".into()),
+            api_key: Some("nx_visible".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("topsecret"), "secret leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("nx_visible"));
+    }
+}

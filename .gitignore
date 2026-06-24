@@ -3,3 +3,5 @@
 # installer/ Cloudflare Worker
 node_modules/
 .wrangler/
+
+coverage.json
