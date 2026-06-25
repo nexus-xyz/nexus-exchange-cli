@@ -4,8 +4,11 @@
 # "release PR" that bumps `version` in Cargo.toml + Cargo.lock and writes
 # CHANGELOG.md. Semver follows commit type: feat -> minor, fix -> patch,
 # feat!/BREAKING CHANGE -> major. Merging the release PR creates the `v<version>`
-# tag, which in turn fires the existing signed `release.yml` (cargo-dist build ->
-# minisign -> upload -> Homebrew).
+# tag AND a *draft* GitHub Release (`"draft": true` in release-please-config.json),
+# which in turn fires the existing signed `release.yml` (cargo-dist build ->
+# minisign -> upload -> Homebrew). dist runs with `create-release = false`, so it
+# uploads its artifacts INTO that draft Release and undrafts it — it never creates
+# its own Release, so there is no `gh release create` collision on the tag.
 #
 # This is COMPLEMENTARY to the cargo-dist pipeline (see EDR-003). release-please
 # only edits Cargo.toml / Cargo.lock / CHANGELOG.md / the manifest — it never

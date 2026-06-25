@@ -13,6 +13,13 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
+# release-please owns the git tag AND the GitHub Release (it runs on merge of the
+# release PR and creates both). dist must NOT create its own Release, or its host
+# job's `gh release create <tag>` collides with the Release release-please already
+# made and fails the cut. With create-release = false, dist instead UPLOADS its
+# artifacts into the existing Release. (Tagging still happens via release-please,
+# so the `on: push: tags` trigger for release.yml is preserved.)
+create-release = false
 # The installers to generate for each app
 installers = ["shell", "powershell", "homebrew", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
