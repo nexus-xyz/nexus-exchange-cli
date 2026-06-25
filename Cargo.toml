@@ -45,10 +45,8 @@ name = "nexus"
 path = "src/main.rs"
 
 [dependencies]
-# The Nexus Exchange SDK. The crate is not yet on crates.io (it ships with
-# `publish = false`), so we depend on it from git, pinned to `main`. Swap this
-# for a `version = "x.y"` line once the SDK is published.
-nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", branch = "main" }
+# The Nexus Exchange SDK. Published on crates.io, version 0.2.0.
+nexus-exchange = "0.2.0"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
