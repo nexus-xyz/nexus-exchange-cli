@@ -52,6 +52,20 @@ const CACHE_MAX_AGE_S = 300; // 5 min: fresh enough to pick up a new release fas
 
 const RELEASES_PAGE = `https://github.com/${DEFAULTS.owner}/${DEFAULTS.repo}/releases`;
 
+// The legacy compute CLI (`nexus-compute-cli`, formerly `nexus-cli`) ships a
+// single rendered POSIX installer to Firebase Hosting (see its
+// firebase-hosting-release.yml, which sed-renders public/install.sh.template and
+// deploys it; firebase.json serves it at /install.sh). We proxy it under
+// `/compute` so the prover one-liner keeps working after the bare cli.nexus.xyz
+// root flips to the exchange CLI (EDR-003 / ENG-3937). It is POSIX-sh ONLY —
+// there is no PowerShell variant. These are pinned constants, never derived from
+// the request, so the no-SSRF guarantee carries over to this route.
+const COMPUTE = Object.freeze({
+  origin: "https://nexus-cli.web.app",
+  url: "https://nexus-cli.web.app/install.sh",
+  releasesPage: "https://github.com/nexus-xyz/nexus-cli/releases",
+});
+
 /**
  * Decide which installer variant to serve. Order of precedence:
  *   1. explicit path suffix (`/install.ps1`, `/install.sh`)
@@ -69,6 +83,22 @@ export function pickVariant(request) {
   const ua = (request.headers.get("user-agent") || "").toLowerCase();
   if (ua.includes("powershell")) return "ps1";
   return "sh";
+}
+
+/**
+ * Route a request to an installer "channel" purely by path (never host/query):
+ *   /compute, /compute/, /compute.sh, /compute.ps1  -> legacy compute CLI
+ *   everything else                                 -> exchange `nexus` CLI
+ * `/compute.ps1` routes here too so it gets the explicit "sh only" rejection
+ * rather than silently falling through to the exchange PowerShell installer.
+ * @returns {"compute"|"default"}
+ */
+export function pickRoute(request) {
+  const path = new URL(request.url).pathname.toLowerCase().replace(/\/+$/, "");
+  if (path === "/compute" || path === "/compute.sh" || path === "/compute.ps1") {
+    return "compute";
+  }
+  return "default";
 }
 
 /**
@@ -130,8 +160,8 @@ function psQuote(s) {
  * pipeline degrades safely. `reason` is always quoted (it can contain a request
  * method or status code), so it cannot break out of the string.
  */
-export function errorScript(ext, reason) {
-  const msg = `nexus installer unavailable: ${reason}. See ${RELEASES_PAGE}`;
+export function errorScript(ext, reason, page = RELEASES_PAGE) {
+  const msg = `nexus installer unavailable: ${reason}. See ${page}`;
   if (ext === "ps1") {
     return `Write-Error ${psQuote(msg)}\nexit 1\n`;
   }
@@ -158,23 +188,19 @@ function looksLikeInstaller(body, ext) {
  * Core handler. Pure with respect to its inputs: pass `deps.fetch` to stub the
  * network in tests. Never throws — every path returns a Response.
  */
-export async function handleInstall(request, env = {}, deps = {}) {
-  const fetchImpl = deps.fetch || fetch;
-  const ext = pickVariant(request);
-
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return new Response(errorScript(ext, `method ${request.method} not allowed`), {
-      status: 405,
-      headers: { ...baseHeaders(ext), allow: "GET, HEAD" },
-    });
-  }
-
-  let target;
+/**
+ * Fetch a pinned installer URL and return it as a safe text/plain script, or a
+ * fail-closed error script on any problem. `target` MUST already be a trusted,
+ * non-request-derived URL; its origin is re-asserted against `expectedOrigin` as
+ * defense in depth before any fetch. Never throws. `page` is the releases page
+ * referenced by error scripts (channel-specific).
+ */
+async function serveUpstream(request, target, expectedOrigin, ext, fetchImpl, page) {
+  // Defense in depth: never fetch anything that isn't the pinned origin/https.
   try {
-    target = upstreamUrl(configFrom(env), ext);
+    if (new URL(target).origin !== expectedOrigin) throw new Error("origin");
   } catch {
-    // Misconfiguration is an operator bug, not a client error.
-    return new Response(errorScript(ext, "installer is misconfigured"), {
+    return new Response(errorScript(ext, "installer is misconfigured", page), {
       status: 500,
       headers: baseHeaders(ext),
     });
@@ -191,14 +217,14 @@ export async function handleInstall(request, env = {}, deps = {}) {
       cf: { cacheTtl: CACHE_MAX_AGE_S, cacheEverything: true },
     });
   } catch {
-    return new Response(errorScript(ext, "could not reach the release host"), {
+    return new Response(errorScript(ext, "could not reach the release host", page), {
       status: 502,
       headers: baseHeaders(ext),
     });
   }
 
   if (!upstream.ok) {
-    return new Response(errorScript(ext, `release host returned HTTP ${upstream.status}`), {
+    return new Response(errorScript(ext, `release host returned HTTP ${upstream.status}`, page), {
       status: 502,
       headers: baseHeaders(ext),
     });
@@ -206,7 +232,7 @@ export async function handleInstall(request, env = {}, deps = {}) {
 
   const declaredLen = Number(upstream.headers.get("content-length") || "0");
   if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
-    return new Response(errorScript(ext, "installer is unexpectedly large"), {
+    return new Response(errorScript(ext, "installer is unexpectedly large", page), {
       status: 502,
       headers: baseHeaders(ext),
     });
@@ -215,7 +241,7 @@ export async function handleInstall(request, env = {}, deps = {}) {
   const body = await upstream.text();
   const byteLen = new TextEncoder().encode(body).length;
   if (byteLen > MAX_BODY_BYTES || !looksLikeInstaller(body, ext)) {
-    return new Response(errorScript(ext, "release host did not return a valid installer"), {
+    return new Response(errorScript(ext, "release host did not return a valid installer", page), {
       status: 502,
       headers: baseHeaders(ext),
     });
@@ -227,6 +253,43 @@ export async function handleInstall(request, env = {}, deps = {}) {
     return new Response(null, { status: 200, headers });
   }
   return new Response(body, { status: 200, headers });
+}
+
+export async function handleInstall(request, env = {}, deps = {}) {
+  const fetchImpl = deps.fetch || fetch;
+  const ext = pickVariant(request);
+  const route = pickRoute(request);
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(errorScript(ext, `method ${request.method} not allowed`), {
+      status: 405,
+      headers: { ...baseHeaders(ext), allow: "GET, HEAD" },
+    });
+  }
+
+  if (route === "compute") {
+    // The compute installer is POSIX-sh only; there is no PowerShell variant, so
+    // never hand a PowerShell pipeline an sh script — fail closed instead.
+    if (ext === "ps1") {
+      return new Response(
+        errorScript("ps1", "the compute installer is POSIX sh only; use the sh one-liner", COMPUTE.releasesPage),
+        { status: 404, headers: baseHeaders("ps1") },
+      );
+    }
+    return serveUpstream(request, COMPUTE.url, COMPUTE.origin, "sh", fetchImpl, COMPUTE.releasesPage);
+  }
+
+  let target;
+  try {
+    target = upstreamUrl(configFrom(env), ext);
+  } catch {
+    // Misconfiguration is an operator bug, not a client error.
+    return new Response(errorScript(ext, "installer is misconfigured"), {
+      status: 500,
+      headers: baseHeaders(ext),
+    });
+  }
+  return serveUpstream(request, target, "https://github.com", ext, fetchImpl, RELEASES_PAGE);
 }
 
 export default {

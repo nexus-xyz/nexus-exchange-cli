@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import worker, {
   handleInstall,
   pickVariant,
+  pickRoute,
   upstreamUrl,
   errorScript,
 } from "./installer.mjs";
@@ -197,6 +198,90 @@ test("errorScript is safely quoted against injection", () => {
   const ps = errorScript("ps1", "weird ' quote");
   assert.match(ps, /^Write-Error '/);
   assert.match(ps, /''/); // embedded quote doubled
+});
+
+// --- /compute route: the legacy compute CLI installer (ENG-3937) ---------------
+
+const COMPUTE_URL = "https://nexus-cli.web.app/install.sh";
+
+test("/compute serves the compute installer from the pinned Firebase origin", async () => {
+  const { fetchImpl, calls } = stubFetch({ body: SH_BODY });
+  const res = await handleInstall(req("https://cli.nexus.xyz/compute", { ua: "curl/8" }), {}, { fetch: fetchImpl });
+
+  assert.equal(res.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, COMPUTE_URL);
+  assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("x-installer-variant"), "sh");
+  assert.equal(await res.text(), SH_BODY);
+});
+
+test("/compute.sh and /compute/ also route to the compute installer", async () => {
+  for (const path of ["/compute.sh", "/compute/", "/compute"]) {
+    const { fetchImpl, calls } = stubFetch({ body: SH_BODY });
+    const res = await handleInstall(req(`https://cli.nexus.xyz${path}`, { ua: "curl/8" }), {}, { fetch: fetchImpl });
+    assert.equal(res.status, 200, path);
+    assert.equal(calls[0].url, COMPUTE_URL, path);
+  }
+});
+
+test("the default route still goes to the exchange CLI on GitHub (no regression)", async () => {
+  const { fetchImpl, calls } = stubFetch({ body: SH_BODY });
+  const res = await handleInstall(req("https://cli.nexus.xyz/", { ua: "curl/8" }), {}, { fetch: fetchImpl });
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].url, SH_URL);
+});
+
+test("/compute has no PowerShell variant — ps1 is refused without touching the network", async () => {
+  const { fetchImpl, calls } = stubFetch();
+  const res = await handleInstall(
+    req("https://cli.nexus.xyz/compute", { ua: "Mozilla/5.0 WindowsPowerShell/5.1" }),
+    {},
+    { fetch: fetchImpl },
+  );
+  assert.equal(res.status, 404);
+  assert.equal(calls.length, 0, "must not fetch for an unsupported variant");
+  const text = await res.text();
+  assert.match(text, /^Write-Error /);
+  assert.match(text, /POSIX sh only/);
+});
+
+test("/compute.ps1 is routed to compute and rejected (never falls through to exchange ps1)", async () => {
+  const { fetchImpl, calls } = stubFetch();
+  const res = await handleInstall(req("https://cli.nexus.xyz/compute.ps1", { ua: "curl/8" }), {}, { fetch: fetchImpl });
+  assert.equal(res.status, 404);
+  assert.equal(calls.length, 0);
+});
+
+test("/compute SSRF: path/query never influence the pinned upstream URL", async () => {
+  const { fetchImpl, calls } = stubFetch({ body: SH_BODY });
+  await handleInstall(
+    req("https://cli.nexus.xyz/compute?host=evil.com&url=https://attacker/x.sh", { ua: "curl/8" }),
+    {},
+    { fetch: fetchImpl },
+  );
+  assert.equal(calls[0].url, COMPUTE_URL);
+  assert.ok(calls[0].url.startsWith("https://nexus-cli.web.app/"));
+});
+
+test("/compute fails closed: an upstream error yields a 502 safe script, not the body", async () => {
+  const { fetchImpl } = stubFetch({ status: 500, body: "<!DOCTYPE html><title>err</title>" });
+  const res = await handleInstall(req("https://cli.nexus.xyz/compute", { ua: "curl/8" }), {}, { fetch: fetchImpl });
+  assert.equal(res.status, 502);
+  const text = await res.text();
+  assert.match(text, /^#!\/bin\/sh/);
+  assert.doesNotMatch(text, /DOCTYPE/);
+  assert.match(text, /nexus-cli\/releases/); // points at the compute releases page
+});
+
+test("pickRoute: only the compute entrypoints match; everything else is default", () => {
+  for (const p of ["/compute", "/compute/", "/COMPUTE", "/compute.sh", "/compute.ps1"]) {
+    assert.equal(pickRoute(req(`https://x${p}`)), "compute", p);
+  }
+  for (const p of ["/", "/install.sh", "/install.ps1", "/computex", "/compute/extra", "/foo"]) {
+    assert.equal(pickRoute(req(`https://x${p}`)), "default", p);
+  }
 });
 
 test("default export fetch handler works end-to-end", async () => {
