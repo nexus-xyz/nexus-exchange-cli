@@ -3,7 +3,6 @@
   "release-type": "rust",
   "include-component-in-tag": false,
   "draft": true,
-  "release-as": "0.1.0",
   "packages": {
     ".": {}
   }
