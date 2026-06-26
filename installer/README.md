@@ -85,27 +85,39 @@ npm run dev          # local preview
 npm run deploy       # deploy to Cloudflare (needs account access)
 ```
 
-## Deploying (one-time infra)
+## Deploying (cutover — ENG-3938)
 
-These steps require Cloudflare access to the `nexus.xyz` zone and are **not**
-done by CI:
+⚠️ **Outward-facing, prover-community blast radius.** Flipping `cli.nexus.xyz`
+from the legacy compute installer to the exchange CLI strands provers if done
+early. Deploy only after the gates below are all green, and coordinate timing.
+
+**Gates (ENG-3938):** signed exchange release verified (ENG-3936 ✅), `/compute`
+route merged (ENG-3937), compute rename *released* (ENG-3920), and DNS ownership
+reconciled (ENG-3922).
+
+**DNS + route are Terraform-owned, not Wrangler-owned.** Per EDR-003 / ENG-3922,
+Terraform owns the `cli.nexus.xyz` record *and* the Worker route binding; Wrangler
+only uploads the script. So `wrangler.toml` declares no `routes` and never sets
+`custom_domain` (that conflicts with the Terraform record — nexus#2270).
+
+Cutover steps (require Cloudflare access to the `nexus.xyz` zone; **not** CI):
 
 1. **Auth:** `wrangler login` (or set `CLOUDFLARE_API_TOKEN`).
-2. **Deploy:** `cd installer && wrangler deploy`.
-   Because `wrangler.toml` declares `routes = [{ pattern = "cli.nexus.xyz",
-   custom_domain = true }]`, Wrangler provisions the **DNS record and TLS
-   certificate for `cli.nexus.xyz`** automatically, as long as the `nexus.xyz`
-   zone is on the same Cloudflare account. This is the DNS half of the ticket.
-3. **Verify:**
+2. **Upload the script:** `cd installer && wrangler deploy` (uploads the Worker;
+   does not touch DNS).
+3. **Bind traffic in Terraform (monorepo):** add a `cloudflare_workers_route`
+   for `cli.nexus.xyz` → this Worker (`nexus-cli-installer`) and repoint the
+   `module "cli"` record (`proxied = true`) off the Firebase CNAME. Atlantis
+   plan/apply.
+4. **Verify both paths:**
    ```sh
-   curl -fsS https://cli.nexus.xyz | head -5      # should print a #!/bin/sh script
-   curl -fsS -A 'PowerShell/7.4' https://cli.nexus.xyz | head -5   # PowerShell variant
-   curl -fsS https://cli.nexus.xyz | sh           # actually installs on macOS/Linux
+   curl -fsS https://cli.nexus.xyz | head -5            # exchange installer (#!/bin/sh)
+   curl -fsS -A 'PowerShell/7.4' https://cli.nexus.xyz | head -5   # exchange PowerShell variant
+   curl -fsS https://cli.nexus.xyz/compute | head -5    # compute installer
    ```
-
-If you host DNS outside Cloudflare, point `cli.nexus.xyz` at the Worker via a
-[Workers route](https://developers.cloudflare.com/workers/configuration/routing/)
-instead and drop `custom_domain = true`.
+5. **Comms/docs:** update any public doc that points compute users at the bare
+   one-liner to use `/compute` (or the alias) — the default now installs the
+   exchange CLI.
 
 ## Configuration
 
