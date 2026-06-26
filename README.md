@@ -78,12 +78,9 @@ signatures:
 **1. minisign signatures** (`.minisig`, offline — no service to trust). Verify
 an artifact against the project's public key:
 
-<!-- TODO(maintainers): replace the placeholder below with the real public key
-     (the contents of minisign.pub) when the signing keypair is created. -->
-
 ```sh
 minisign -Vm nexus-exchange-cli-x86_64-unknown-linux-gnu.tar.gz \
-  -P '<PUBLISHED_MINISIGN_PUBLIC_KEY>'
+  -P 'RWQ5th6qraoqAGncPLWGZthh5ObywWnTc8j0r1w8e0cX4kH9vuVc06ek'
 ```
 
 **2. GitHub build-provenance attestations** (proves the artifact was built by
