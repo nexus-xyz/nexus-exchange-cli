@@ -124,6 +124,48 @@ Builds also run on every PR as a dry-run (`pr-run-mode = "upload"`), so the full
 cross-platform build is a blocking check — no release is created and no publish
 jobs run on PRs.
 
+#### First release (one-time bootstrap)
+
+The very first cut (`v0.1.0`) needs two one-time nudges, because release-please
+derives the next version by bumping the last *released* version — and there is
+no prior release to bump from yet:
+
+- `.release-please-manifest.json` is seeded at `0.0.0` (the "nothing released
+  yet" baseline), so release-please proposes a brand-new version rather than
+  treating the `0.1.0` already in `Cargo.toml` as shipped.
+- `release-as: "0.1.0"` in [`release-please-config.json`](./release-please-config.json)
+  pins that first proposal to exactly `0.1.0`, independent of how the conventional
+  commits would otherwise bump a `0.x` baseline.
+
+To cut it, in order:
+
+1. **Complete the signing setup below first.** The minisign publish job fails
+   closed, so a release cut before the key/variable exist would publish an
+   *unsigned* `v0.1.0` — defeating the point. Verify `MINISIGN_PUBLIC_KEY` (the
+   repo variable *and* the README key) plus the `MINISIGN_SECRET_KEY` /
+   `MINISIGN_PASSWORD` / `RELEASE_PLEASE_TOKEN` / `HOMEBREW_TAP_TOKEN` secrets are
+   all set.
+2. Merge this bootstrap to `main`. release-please opens a `release 0.1.0` PR.
+3. Merge that PR → it tags `v0.1.0` and opens the draft Release → `release.yml`
+   builds, attests, signs (minisign), uploads into the draft, and undrafts it.
+4. **Remove `release-as` immediately afterwards.** It is sticky: left in place it
+   pins *every* future release to `0.1.0`, so the next release PR would be stuck
+   at the same version. Open a one-line follow-up PR deleting the
+   `"release-as": "0.1.0"` line. The manifest will by then read `0.1.0`, so
+   subsequent releases bump from there normally. (Leaving it in is fail-safe — it
+   blocks the next release loudly rather than mis-versioning, but remove it so the
+   flow self-advances.)
+
+After undrafting, confirm the install path end-to-end (this is the actual
+"done"):
+
+```sh
+# The cargo-dist "latest" installer asset now resolves (no longer 404s):
+curl -fsSL https://github.com/nexus-xyz/nexus-exchange-cli/releases/latest/download/nexus-exchange-cli-installer.sh | head -5
+# Once the cli.nexus.xyz Worker is deployed, the one-liner installs a working nexus:
+curl https://cli.nexus.xyz | sh && nexus --version
+```
+
 #### Signing setup (maintainers)
 
 Configure these repository **secrets** before the first signed release. The
