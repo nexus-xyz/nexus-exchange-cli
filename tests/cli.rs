@@ -222,3 +222,130 @@ fn json_output_flag_is_accepted() {
     assert_ne!(out.code, Some(0));
     assert!(out.stderr.contains("failed to fetch health"));
 }
+
+/// Every public market-data command must route through to the SDK and surface a
+/// transport failure (proving the command is wired to a real fetch, not stubbed
+/// or mis-dispatched). Each case is a command + the `context` string main.rs
+/// attaches to the request, so a renamed/dropped handler is caught here.
+///
+/// This is the runtime counterpart to the static `endpoints.txt` <-> command
+/// drift check (scripts/check_spec_drift.py): the drift check proves the mapping
+/// is complete; these prove the mapped commands actually fire a request.
+#[test]
+fn public_commands_route_to_a_fetch() {
+    let dead = "http://127.0.0.1:1";
+    let cases: &[(&[&str], &str)] = &[
+        (&["markets"], "failed to fetch markets"),
+        (&["summaries"], "failed to fetch market summaries"),
+        (&["tickers"], "failed to fetch tickers"),
+        (&["ticker", "BTC-USDX-PERP"], "failed to fetch ticker"),
+        (
+            &["orderbook", "BTC-USDX-PERP"],
+            "failed to fetch order book",
+        ),
+        (&["trades", "BTC-USDX-PERP"], "failed to fetch trades"),
+        (&["candles", "BTC-USDX-PERP"], "failed to fetch candles"),
+        (
+            &["funding-rates", "BTC-USDX-PERP"],
+            "failed to fetch funding rates",
+        ),
+        (
+            &["mark-price", "BTC-USDX-PERP"],
+            "failed to fetch mark price",
+        ),
+        (
+            &["market-status", "BTC-USDX-PERP"],
+            "failed to fetch market status",
+        ),
+        (&["health"], "failed to fetch health"),
+    ];
+    for (args, want) in cases {
+        let mut full = vec!["--base-url", dead];
+        full.extend_from_slice(args);
+        let out = run(&full);
+        assert_ne!(
+            out.code,
+            Some(0),
+            "`{args:?}` should fail against a dead port"
+        );
+        assert!(
+            out.stderr.contains(want),
+            "`{args:?}` stderr should contain {want:?}, got: {}",
+            out.stderr
+        );
+    }
+}
+
+/// Authenticated read commands, given credentials, must pass the auth gate and
+/// route to a fetch (transport failure against the dead port), not refuse.
+#[test]
+fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["balance"], "failed to fetch account balance"),
+        (&["positions"], "failed to fetch positions"),
+        (&["fills"], "failed to fetch fills"),
+        (&["orders"], "failed to fetch open orders"),
+        (&["withdrawals"], "failed to fetch withdrawals"),
+        (&["account", "rate-limit"], "failed to fetch rate-limit"),
+        (&["keys", "list"], "failed to fetch API keys"),
+        (&["agents", "list"], "failed to fetch agents"),
+    ];
+    for (args, want) in cases {
+        let mut cmd = bin();
+        cmd.args([
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ]);
+        cmd.args(*args);
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`{args:?}` should fail (dead port)"
+        );
+        assert!(
+            stderr.contains(want),
+            "`{args:?}` should reach a fetch ({want:?}), got: {stderr}"
+        );
+        // It must NOT have stopped at the auth gate — credentials were supplied.
+        assert!(
+            !stderr.contains("authenticated command"),
+            "`{args:?}` should pass the auth gate with credentials, got: {stderr}"
+        );
+    }
+}
+
+/// The `examples/batch_orders.json` recipe must parse as a valid order batch:
+/// with credentials it gets past the file read/parse and the confirmation
+/// (`--yes`) all the way to the network attempt, proving the example is current.
+#[test]
+fn batch_orders_example_parses_and_routes() {
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/batch_orders.json");
+    let out = bin()
+        .args([
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "order",
+            "batch",
+            example,
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    // Reached the SDK submit (transport failure), not a parse error.
+    assert!(
+        stderr.contains("failed to submit order batch"),
+        "example should parse and route to the batch submit, got: {stderr}"
+    );
+}

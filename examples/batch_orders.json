@@ -1,0 +1,27 @@
+[
+  {
+    "market": "BTC-USDX-PERP",
+    "side": "buy",
+    "type": "limit",
+    "price": "83000",
+    "quantity": "0.01",
+    "tif": "gtc",
+    "client_order_id": "ladder-1"
+  },
+  {
+    "market": "BTC-USDX-PERP",
+    "side": "buy",
+    "type": "limit",
+    "price": "82500",
+    "quantity": "0.01",
+    "tif": "gtc",
+    "client_order_id": "ladder-2"
+  },
+  {
+    "market": "ETH-USDX-PERP",
+    "side": "sell",
+    "type": "market",
+    "quantity": "0.1",
+    "reduce_only": true
+  }
+]
