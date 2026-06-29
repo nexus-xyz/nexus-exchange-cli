@@ -474,14 +474,14 @@ async fn handle_order(
                 eprintln!("aborted.");
                 return Ok(());
             }
-            let value = client
+            let results = client
                 .create_orders(&requests)
                 .await
                 .context("failed to submit order batch")?;
             emit(
                 format,
-                output::cancel(&value, &format!("submitted {} order(s).", requests.len())),
-                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                output::order_batch(&results, &format!("submitted {} order(s).", requests.len())),
+                || output::order_batch_json(&results),
             );
         }
     }

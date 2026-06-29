@@ -8,8 +8,8 @@
 use nexus_exchange::types::{
     AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment,
     FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus,
-    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, Position, PriceLevel, RateLimitStatus,
-    Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult, Position, PriceLevel,
+    RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -556,6 +556,49 @@ pub fn order_result_json(r: &OrderResponse) -> String {
     pretty(&value)
 }
 
+/// Render a `POST /orders/batch` result. The batch is non-atomic: each entry
+/// independently reports a placed order or a per-order rejection, so we render
+/// every entry in request order and lead with a placed/rejected tally so a
+/// partial failure is obvious without scanning the whole list.
+pub fn order_batch(results: &[OrderResult], note: &str) -> String {
+    let placed = results.iter().filter(|r| r.succeeded()).count();
+    let rejected = results.len() - placed;
+    let mut out = format!("{note}\n{placed} placed, {rejected} rejected.\n");
+    for (i, r) in results.iter().enumerate() {
+        match r {
+            OrderResult::Placed { order: o, fills } => {
+                out.push_str(&format!("\n[{i}] OK\n{}", order(o)));
+                out.push_str(&format!("\n{:<16}{}\n", "immediate fills", fills.len()));
+            }
+            OrderResult::Rejected { error, message } => {
+                out.push_str(&format!("\n[{i}] REJECTED  {error}: {message}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// Render a batch result as JSON, preserving the wire's `outcome` tag so a
+/// rejected entry stays distinguishable from a placed one.
+pub fn order_batch_json(results: &[OrderResult]) -> String {
+    let value: Value = results
+        .iter()
+        .map(|r| match r {
+            OrderResult::Placed { order: o, fills } => json!({
+                "outcome": "ok",
+                "order": order_value(o),
+                "fills": fills,
+            }),
+            OrderResult::Rejected { error, message } => json!({
+                "outcome": "err",
+                "error": error,
+                "message": message,
+            }),
+        })
+        .collect();
+    pretty(&value)
+}
+
 /// Render a cancel response. The exact body shape isn't fixed by the spec, so
 /// we pretty-print whatever the server returned (and a short human note).
 pub fn cancel(value: &Value, human_note: &str) -> String {
@@ -571,13 +614,13 @@ pub fn market_summaries(ss: &[MarketSummary]) -> String {
     }
     let mut out = format!(
         "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
-        "MARKET", "MARK PRICE", "VOLUME 24H", "TRADES", "STATUS", "ADL EVTS"
+        "MARKET", "LAST PRICE", "VOLUME 24H", "TRADES", "STATUS", "ADL EVTS"
     );
     for s in ss {
         out.push_str(&format!(
             "{:<16}  {:>14}  {:>16}  {:>10}  {:<10}  {:>9}\n",
             s.market_id,
-            opt(&s.mark_price),
+            opt(&s.last_trade_price),
             s.volume_24h,
             s.trade_count,
             s.status,
@@ -595,7 +638,7 @@ pub fn market_summaries_json(ss: &[MarketSummary]) -> String {
         .map(|s| {
             json!({
                 "market_id": s.market_id,
-                "mark_price": opt_json(&s.mark_price),
+                "last_trade_price": opt_json(&s.last_trade_price),
                 "volume_24h": s.volume_24h.to_string(),
                 "trade_count": s.trade_count,
                 "status": s.status,
@@ -664,13 +707,13 @@ pub fn summaries(ss: &[MarketSummary]) -> String {
     }
     let mut out = format!(
         "{:<16}  {:>14}  {:>16}  {:>10}  {:<8}\n",
-        "MARKET", "MARK", "VOLUME 24H", "TRADES", "STATUS"
+        "MARKET", "LAST", "VOLUME 24H", "TRADES", "STATUS"
     );
     for s in ss {
         out.push_str(&format!(
             "{:<16}  {:>14}  {:>16}  {:>10}  {:<8}\n",
             s.market_id,
-            opt(&s.mark_price),
+            opt(&s.last_trade_price),
             s.volume_24h,
             s.trade_count,
             s.status,
@@ -686,7 +729,7 @@ pub fn summaries_json(ss: &[MarketSummary]) -> String {
         .map(|s| {
             json!({
                 "market_id": s.market_id,
-                "mark_price": opt_json(&s.mark_price),
+                "last_trade_price": opt_json(&s.last_trade_price),
                 "volume_24h": s.volume_24h.to_string(),
                 "trade_count": s.trade_count,
                 "status": s.status,
@@ -1314,12 +1357,12 @@ mod tests {
     }
 
     #[test]
-    fn market_summaries_json_uses_decimal_strings_and_null_mark() {
-        // `mark_price` and `volume_24h` arrive as JSON numbers via the SDK's
-        // float adapter; a halted market sends `null` for the mark.
+    fn market_summaries_json_uses_decimal_strings_and_null_last_trade() {
+        // `last_trade_price` and `volume_24h` arrive as JSON numbers via the
+        // SDK's float adapter; a market with no trades sends `null` for the price.
         let summaries: Vec<MarketSummary> = serde_json::from_value(json!([{
             "market_id": "BTC-USDX-PERP",
-            "mark_price": null,
+            "last_trade_price": null,
             "volume_24h": 1234.5,
             "trade_count": 42,
             "status": "halted",
@@ -1336,15 +1379,15 @@ mod tests {
                 "adl_event_count",
                 "halt_reason",
                 "halted_at",
-                "mark_price",
+                "last_trade_price",
                 "market_id",
                 "status",
                 "trade_count",
                 "volume_24h",
             ]
         );
-        // Money is a decimal string; an absent mark is JSON null; counts stay numbers.
-        assert_eq!(row["mark_price"], Value::Null);
+        // Money is a decimal string; an absent price is JSON null; counts stay numbers.
+        assert_eq!(row["last_trade_price"], Value::Null);
         assert_eq!(row["volume_24h"], json!("1234.5"));
         assert_eq!(row["trade_count"], json!(42));
         assert_eq!(row["status"], json!("halted"));
@@ -1636,5 +1679,46 @@ mod tests {
         assert!(out.starts_with("cancelled order o1."));
         // The server body is pretty-printed beneath the note.
         assert!(out.contains("\"cancelled\": true"));
+    }
+
+    fn batch_fixture() -> Vec<OrderResult> {
+        // A non-atomic batch where the second order rejected; the array keeps
+        // request order and reports each outcome independently.
+        serde_json::from_value(json!([
+            {
+                "outcome": "ok",
+                "order": {
+                    "id": "o1", "market_id": "BTC-USDX-PERP", "side": "Buy",
+                    "order_type": "Limit", "price": "84000", "quantity": "0.01",
+                    "filled_qty": "0", "status": "Open", "time_in_force": "GTC"
+                },
+                "fills": []
+            },
+            {
+                "outcome": "err",
+                "error": "INSUFFICIENT_MARGIN",
+                "message": "not enough margin"
+            }
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn order_batch_tallies_and_renders_each_outcome() {
+        let out = order_batch(&batch_fixture(), "submitted 2 order(s).");
+        assert!(out.contains("submitted 2 order(s)."));
+        assert!(out.contains("1 placed, 1 rejected."));
+        assert!(out.contains("[0] OK") && out.contains("o1"));
+        assert!(out.contains("[1] REJECTED  INSUFFICIENT_MARGIN: not enough margin"));
+    }
+
+    #[test]
+    fn order_batch_json_preserves_outcome_tags() {
+        let v: Value = serde_json::from_str(&order_batch_json(&batch_fixture())).unwrap();
+        let rows = v.as_array().unwrap();
+        assert_eq!(rows[0]["outcome"], json!("ok"));
+        assert_eq!(rows[0]["order"]["id"], json!("o1"));
+        assert_eq!(rows[1]["outcome"], json!("err"));
+        assert_eq!(rows[1]["error"], json!("INSUFFICIENT_MARGIN"));
     }
 }
