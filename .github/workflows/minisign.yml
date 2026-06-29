@@ -75,10 +75,22 @@ jobs:
           echo "Signing artifacts for release: $tag"
 
       - name: Install minisign
+        env:
+          # Pin the upstream release + its sha256. minisign is NOT packaged for
+          # this job's ubuntu-22.04 runner (apt-get errors "Unable to locate
+          # package minisign"), so fetch the official static binary instead —
+          # runner-independent and version-deterministic. Verify the download
+          # before trusting it: this binary is what signs the release.
+          MINISIGN_VERSION: "0.12"
+          MINISIGN_SHA256: "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73"
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
+          tmp="$(mktemp -d)"
+          url="https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/minisign-${MINISIGN_VERSION}-linux.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp/minisign.tar.gz"
+          echo "${MINISIGN_SHA256}  $tmp/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/minisign.tar.gz" -C "$tmp"
+          sudo install -m 0755 "$tmp/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
           minisign -v
 
       - name: Load signing key
@@ -125,6 +137,11 @@ jobs:
           verified=0
           for f in "$WORKDIR"/*.tar.gz "$WORKDIR"/*.tar.xz "$WORKDIR"/*.zip "$WORKDIR"/*.msi; do
             [ -f "$f" ] || continue
+            # dist attaches its own `source.tar.gz`, which matches *.tar.gz but
+            # carries no build-provenance attestation — `gh attestation verify`
+            # would fail it and (set -e) abort the whole signing job. It is not a
+            # built binary distributable, so skip it here and below.
+            [ "$(basename "$f")" = "source.tar.gz" ] && continue
             echo "Verifying provenance: $(basename "$f")"
             gh attestation verify "$f" \
               --repo "$GH_REPO" \
@@ -153,6 +170,8 @@ jobs:
           for f in "$WORKDIR"/*.tar.gz "$WORKDIR"/*.tar.xz "$WORKDIR"/*.zip "$WORKDIR"/*.msi; do
             [ -f "$f" ] || continue
             base="$(basename "$f")"
+            # Skip dist's un-attested source.tar.gz (see the provenance step).
+            [ "$base" = "source.tar.gz" ] && continue
 
             # minisign reads the key password from stdin when no tty is present,
             # so feed it via a pipe — it never appears in argv or the logs. If

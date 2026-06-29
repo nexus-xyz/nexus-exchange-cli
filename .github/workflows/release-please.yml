@@ -38,13 +38,35 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          # A PAT (or GitHub App token), NOT the default GITHUB_TOKEN. Merging the
-          # release PR creates the `v<version>` tag, and the existing `release.yml`
-          # is triggered by `on: push: tags`. GitHub deliberately does NOT fire
-          # further workflows for events created by the built-in GITHUB_TOKEN, so
-          # the tag must be pushed under a separate token for the cargo-dist
-          # release to run. Scope: contents:write + pull-requests:write on this
-          # repo. See README "Cutting a release".
+          # A PAT (or GitHub App token), NOT the default GITHUB_TOKEN. The tag is
+          # pushed in the next step under this token (see there); the built-in
+          # GITHUB_TOKEN cannot trigger the downstream tag-listening release.yml.
+          # Scope: contents:write + pull-requests:write on this repo. See README
+          # "Cutting a release".
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Create the git tag ourselves when a release is cut. release-please makes a
+      # *draft* GitHub Release ("draft": true), and GitHub does NOT materialise the
+      # underlying git tag for a draft Release until it is published — so the
+      # tag-listening release.yml (on: push: tags) would never fire and the
+      # cargo-dist build/sign/upload-into-draft/undraft handoff would stall.
+      # Pushing the tag under RELEASE_PLEASE_TOKEN (a PAT, not GITHUB_TOKEN) both
+      # supplies the missing ref and triggers release.yml. Idempotent: tolerate an
+      # already-existing ref so re-runs are safe.
+      - name: Create release tag (draft Releases don't create the git tag)
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists; nothing to do"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG" -f "sha=$SHA"
+            echo "created tag $TAG at $SHA -> release.yml will now run"
+          fi
