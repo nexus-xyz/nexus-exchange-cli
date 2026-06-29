@@ -38,3 +38,62 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+
+  # Emit a machine-readable line-coverage % for the dashboard. Additive and
+  # non-gating: there is no --fail-under threshold, so coverage never blocks a
+  # merge. Uses cargo-llvm-cov (LLVM source-based coverage).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --all-features --summary-only --json --output-path coverage.json
+          cargo llvm-cov --all-features --summary-only
+      - name: Write coverage summary
+        run: |
+          PCT=$(jq -r '.data[0].totals.lines.percent' coverage.json)
+          printf '### Line coverage: %.2f%%\n' "$PCT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.json
+
+  # Ensure the release pipeline stays valid and the generated release.yml never
+  # drifts from dist-workspace.toml. Pinned to the same dist version the release
+  # workflow uses.
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      # Fails if .github/workflows/release.yml or wix/main.wxs are out of date.
+      - run: dist generate --check
+      # Fails if the release plan itself is invalid (bad targets, installers, etc).
+      - run: dist plan
+
+  installer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Security-critical Worker logic: the 19 Node tests must gate every PR.
+      # They import only node:test/node:assert, so run them before any install —
+      # the security gate stays green even if the npm registry is unavailable.
+      - run: node --test
+      # Reproducible install from the committed lockfile (only wrangler needs it).
+      - run: npm ci
+      # Validate wrangler.toml + bundle the Worker without deploying.
+      - run: npx wrangler deploy --dry-run --outdir /tmp/installer-dist
