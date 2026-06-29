@@ -59,7 +59,7 @@ path = "src/main.rs"
 [dependencies]
 # The Nexus Exchange SDK. The crate is not yet on crates.io (it ships with
 # `publish = false`), so we depend on it from git, pinned to `main`. Swap this
-# for a `version = "x.y"` line once the SDK is published.
+# for a `version = "0.3"` line once the SDK is published to crates.io (ENG-4212).
 #
 # The CLI is a thin command/output layer over this SDK: every request — public
 # market data, the authenticated account, trading, and WebSocket streaming —
