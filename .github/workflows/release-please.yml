@@ -35,7 +35,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      # Mint a short-lived token from the org release GitHub App (nexus-release-bot)
+      # Mint a short-lived token from the org release GitHub App (nexus-release-bot2)
       # so release PRs, the release commit, and the tag are authored by the App —
       # not a personal account (ENG-4354). Like a PAT, and unlike the built-in
       # GITHUB_TOKEN, an App-installation token CAN trigger the downstream

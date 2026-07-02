@@ -173,8 +173,8 @@ secrets are absent; the artifacts are still produced, just unsigned.)
 
 | Secret | Used for |
 |---|---|
-| `RELEASE_BOT_APP_ID` | App ID of the `nexus-release-bot` GitHub App. `release-please.yml` mints a short-lived installation token from it (`actions/create-github-app-token`) so release PRs / commits / tags are authored by the App, not a person. |
-| `RELEASE_BOT_PRIVATE_KEY` | Private key (`.pem`) for `nexus-release-bot`, used with the App ID to mint the token. Required so the tag it pushes on release-PR merge triggers the tag-listening `release.yml` — the default `GITHUB_TOKEN` cannot trigger downstream workflows. App scope: `contents:write` + `pull-requests:write` on this repo. |
+| `RELEASE_BOT_APP_ID` | App ID of the `nexus-release-bot2` GitHub App. `release-please.yml` mints a short-lived installation token from it (`actions/create-github-app-token`) so release PRs / commits / tags are authored by the App (`nexus-release-bot2[bot]`), not a person. |
+| `RELEASE_BOT_PRIVATE_KEY` | Private key (`.pem`) for `nexus-release-bot2`, used with the App ID to mint the token. Required so the tag it pushes on release-PR merge triggers the tag-listening `release.yml` — the default `GITHUB_TOKEN` cannot trigger downstream workflows. App scope: `contents:write` + `pull-requests:write` on this repo. |
 | `MINISIGN_SECRET_KEY` | minisign secret key contents (per-artifact `.minisig`) |
 | `MINISIGN_PASSWORD` | password for the minisign secret key |
 | `HOMEBREW_TAP_TOKEN` | push access to the `nexus-xyz/homebrew-tap` repo |
