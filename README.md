@@ -140,8 +140,8 @@ To cut it, in order:
    closed, so a release cut before the key/variable exist would publish an
    *unsigned* `v0.1.0` — defeating the point. Verify `MINISIGN_PUBLIC_KEY` (the
    repo variable *and* the README key) plus the `MINISIGN_SECRET_KEY` /
-   `MINISIGN_PASSWORD` / `RELEASE_PLEASE_TOKEN` / `HOMEBREW_TAP_TOKEN` secrets are
-   all set.
+   `MINISIGN_PASSWORD` / `RELEASE_BOT_APP_ID` / `RELEASE_BOT_PRIVATE_KEY` /
+   `HOMEBREW_TAP_TOKEN` secrets are all set.
 2. Merge this bootstrap to `main`. release-please opens a `release 0.1.0` PR.
 3. Merge that PR → it tags `v0.1.0` and opens the draft Release → `release.yml`
    builds, attests, signs (minisign), uploads into the draft, and undrafts it.
@@ -173,7 +173,8 @@ secrets are absent; the artifacts are still produced, just unsigned.)
 
 | Secret | Used for |
 |---|---|
-| `RELEASE_PLEASE_TOKEN` | PAT (or GitHub App token) for the release-please workflow. Required so the tag it pushes on release-PR merge triggers the tag-listening `release.yml` — the default `GITHUB_TOKEN` cannot trigger downstream workflows. Scope: `contents:write` + `pull-requests:write` on this repo. |
+| `RELEASE_BOT_APP_ID` | App ID of the `nexus-release-bot2` GitHub App. `release-please.yml` mints a short-lived installation token from it (`actions/create-github-app-token`) so release PRs / commits / tags are authored by the App (`nexus-release-bot2[bot]`), not a person. |
+| `RELEASE_BOT_PRIVATE_KEY` | Private key (`.pem`) for `nexus-release-bot2`, used with the App ID to mint the token. Required so the tag it pushes on release-PR merge triggers the tag-listening `release.yml` — the default `GITHUB_TOKEN` cannot trigger downstream workflows. App scope: `contents:write` + `pull-requests:write` on this repo. |
 | `MINISIGN_SECRET_KEY` | minisign secret key contents (per-artifact `.minisig`) |
 | `MINISIGN_PASSWORD` | password for the minisign secret key |
 | `HOMEBREW_TAP_TOKEN` | push access to the `nexus-xyz/homebrew-tap` repo |
