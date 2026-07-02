@@ -5,13 +5,16 @@ name = "nexus-cli-installer"
 main = "src/installer.mjs"
 compatibility_date = "2025-05-05"
 
-# Workers Custom Domains. Setting `custom_domain = true` makes Cloudflare create
-# and manage the DNS record (and TLS cert) for cli.nexus.xyz pointing at this
-# Worker — this is the "DNS for cli.nexus.xyz" half of the ticket, as code. The
-# nexus.xyz zone must live on the same Cloudflare account for wrangler to bind it.
-routes = [
-  { pattern = "cli.nexus.xyz", custom_domain = true }
-]
+# DNS + route binding for cli.nexus.xyz are owned by TERRAFORM, not Wrangler.
+# Convention (EDR-003 / ENG-3922): Terraform owns DNS, Wrangler owns script
+# uploads. So this config intentionally declares NO `routes` and does NOT use
+# `custom_domain` — `wrangler deploy` only uploads the Worker script. Traffic is
+# bound to cli.nexus.xyz by a `cloudflare_workers_route` in the monorepo
+# Terraform (workers/ workspace), which also owns the CNAME record.
+#
+# This previously set `routes = [{ pattern = "cli.nexus.xyz", custom_domain =
+# true }]`, which made Wrangler claim the DNS+TLS and conflicted with the
+# Terraform-managed record (ENG-3922, nexus#2270). Do NOT re-add custom_domain.
 
 # Pinned upstream coordinates. These are the defaults baked into the Worker; we
 # set them explicitly here so the source of truth for "which repo/app do we
