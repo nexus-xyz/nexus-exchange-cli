@@ -27,9 +27,29 @@ the script body back with a `200`, choosing the variant from the request:
 
 | Request | Served |
 |---|---|
-| default / `curl` / `wget` | `…-installer.sh` |
-| `User-Agent` contains `PowerShell`, or path ends `.ps1`, or `?powershell` | `…-installer.ps1` |
-| path ends `.sh` | `…-installer.sh` (forced) |
+| default / `curl` / `wget` | exchange `…-installer.sh` |
+| `User-Agent` contains `PowerShell`, or path ends `.ps1`, or `?powershell` | exchange `…-installer.ps1` |
+| path ends `.sh` | exchange `…-installer.sh` (forced) |
+| path is `/compute` (or `/compute.sh`) | **legacy compute CLI** installer (see below) |
+
+## `/compute` — the legacy compute CLI (ENG-3937)
+
+`cli.nexus.xyz/compute` serves the prover/compute CLI (`nexus-compute-cli`,
+formerly `nexus-cli`) so it stays installable from the same host after the bare
+root flips to the exchange CLI:
+
+```sh
+curl https://cli.nexus.xyz/compute | sh        # macOS + Linux (POSIX sh only)
+```
+
+That CLI publishes a single rendered `install.sh` to **Firebase Hosting**
+(`https://nexus-cli.web.app/install.sh` — produced by nexus-cli's
+`firebase-hosting-release.yml`). The `/compute` route proxies that pinned URL
+through the **same** security scaffold as the default route, with two
+differences: the asserted upstream origin is `https://nexus-cli.web.app` (not
+`github.com`), and there is **no PowerShell variant** — a `.ps1`/PowerShell
+request to `/compute` fails closed with a `404` error script rather than handing
+an sh body to `iex`.
 
 Those release artifacts (the `…-installer.{sh,ps1}` scripts, plus the
 cross-platform binaries they fetch — including the Windows build behind the
