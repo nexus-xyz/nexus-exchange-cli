@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.1.0...v0.2.0) (2026-07-02)
+
+
+### Features
+
+* **installer:** add /compute route for the legacy compute CLI (ENG-3937) ([#27](https://github.com/nexus-xyz/nexus-exchange-cli/issues/27)) ([224acca](https://github.com/nexus-xyz/nexus-exchange-cli/commit/224acca5f656c185766581b73baac29b9b189d7b))
+
 ## 0.1.0 (2026-06-26)
 
 
