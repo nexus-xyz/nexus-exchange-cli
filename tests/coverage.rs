@@ -72,13 +72,17 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
         ops.len()
     );
     // A representative sampling across the surface must be present, so a future
-    // edit can't silently gut the file and keep the check green.
+    // edit can't silently gut the file and keep the check green. The mix spans
+    // both stacks of the /api/v1 migration (ENG-4949): ops that moved to the
+    // host-root `/api/v1` surface and ops that (for now) stay on the gateway.
     for want in [
+        // Migrated to /api/v1:
+        ("GET", "/api/v1/account"),
+        ("POST", "/api/v1/orders"),
+        ("DELETE", "/api/v1/orders/{order_id}"),
+        // No /api/v1 variant yet — still on the gateway root:
         ("GET", "/markets"),
         ("GET", "/health"),
-        ("GET", "/account"),
-        ("POST", "/orders"),
-        ("DELETE", "/orders/{order_id}"),
         ("GET", "/keys"),
         ("GET", "/ws"),
         ("POST", "/ws/token"),

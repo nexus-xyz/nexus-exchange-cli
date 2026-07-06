@@ -420,10 +420,37 @@ cargo test --all-features
 
 CI runs the same three checks on every push and pull request.
 
+### Direct-service base (`/api/v1`)
+
+The gateway REST proxy is being eliminated: each backend service now serves its
+own REST API directly, at the **host-root `/api/v1`** prefix (parent
+[ENG-4740](https://linear.app/nexus-labs/issue/ENG-4740)). The migration is
+**dual-stack** ([ENG-4751](https://linear.app/nexus-labs/issue/ENG-4751)) — the
+legacy `/api/exchange` gateway paths stay live, so endpoints without an `/api/v1`
+variant keep routing through the gateway.
+
+The CLI is a thin layer over the [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs)
+SDK and issues no path of its own: the SDK picks the base per request off the
+`/api/v1/` prefix. Runtime routing therefore flips to `/api/v1` when this crate
+bumps its `nexus-exchange` dependency to the regenerated SDK release
+([ENG-4947](https://linear.app/nexus-labs/issue/ENG-4947), `nexus-exchange-rs`
+PR #85). The `.api-version` / `endpoints.txt` bookkeeping below tracks that
+surface so the two move together.
+
+> **⚠️ Pending release.** The `/api/v1` spec lives only on the unmerged
+> [`nexus-exchange-api#41`](https://github.com/nexus-xyz/nexus-exchange-api/pull/41)
+> ([ENG-4943](https://linear.app/nexus-labs/issue/ENG-4943)); no release contains
+> it yet. Until that PR merges and the `v0.6.1` tag is cut, the `spec-drift`
+> workflow is **temporarily pinned to that PR's branch** (see the
+> `TODO(ENG-4949)` restore notes in
+> [`.github/workflows/spec-drift.yml`](./.github/workflows/spec-drift.yml)), and
+> the local command below fetches from the same branch.
+
 ### API coverage
 
 The CLI targets a specific released version of the Exchange API spec, pinned in
-[`.api-version`](./.api-version) (currently `v0.4.0`, matching the wrapped
+[`.api-version`](./.api-version) (`v0.6.1`, the release that adds the `/api/v1`
+surface, matching the wrapped
 [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK).
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
@@ -436,11 +463,16 @@ verifies — in the `spec-drift` CI workflow — that:
   script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **31 of 40** spec operations (**77.5%**). Run it locally with a fetched
-spec:
+exercises **31 of 84** spec operations (**36.9%**). The denominator jumped with
+the `/api/v1` release because the spec now carries both stacks (gateway +
+`/api/v1`) plus the admin/stats surfaces the CLI does not target. Run it locally
+with a fetched spec:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
+# TODO(ENG-4949): while the /api/v1 spec is unreleased, fetch it from the
+# ENG-4943 PR branch. Restore to `.../$(cat .api-version)/openapi.json` once
+# nexus-exchange-api#41 merges and v0.6.1 is cut.
+curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/lucascampos/eng-4943-nexus-exchange-api-add-apiv1-routes-to-openapi-spec-cut/openapi.json -o openapi.pinned.json
 python3 scripts/check_spec_drift.py openapi.pinned.json
 ```
 
