@@ -3,6 +3,7 @@
   "release-type": "rust",
   "include-component-in-tag": false,
   "draft": true,
+  "last-release-sha": "a3cf52b109bb2a42f4f35f9d1accb067f8a7dee5",
   "packages": {
     ".": {}
   }
