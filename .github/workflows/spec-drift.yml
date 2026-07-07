@@ -38,17 +38,6 @@ jobs:
 
       - name: Read pinned spec version
         id: pin
-        # ⚠️ TEMPORARY — ENG-4949, blocked on ENG-4943 (nexus-xyz/nexus-exchange-api#41).
-        # The /api/v1 spec is not released yet, so the tag pinned in .api-version
-        # (v0.6.1) does not exist on the remote. Until #41 merges and that tag is
-        # cut, this step overrides the fetch ref to the ENG-4943 PR branch so CI
-        # validates against the /api/v1 spec. TODO(ENG-4949) RESTORE when #41 lands:
-        #   1. delete SPEC_BRANCH_OVERRIDE below (the fetch then falls back to the
-        #      validated tag from .api-version);
-        #   2. confirm .api-version matches the actual cut tag (expected v0.6.1);
-        #   3. re-enable caching (see the Cache/Fetch steps below).
-        env:
-          SPEC_BRANCH_OVERRIDE: lucascampos/eng-4943-nexus-exchange-api-add-apiv1-routes-to-openapi-spec-cut
         run: |
           tag="$(cat .api-version)"
           # Validate before it reaches any URL / cache key: a crafted
@@ -58,37 +47,20 @@ jobs:
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if [[ -n "$SPEC_BRANCH_OVERRIDE" ]]; then
-            # A branch ref is mutable, so its content is NOT safe to cache under a
-            # stable key: signal a branch pin so the cache is skipped and the spec
-            # is fetched fresh every run. The ref is a hardcoded constant here
-            # (workflow code, not attacker-supplied data), so it carries no
-            # injection risk the .api-version tag validation would otherwise guard.
-            echo "ref=$SPEC_BRANCH_OVERRIDE" >> "$GITHUB_OUTPUT"
-            echo "is_tag=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::spec-drift is pinned to the ENG-4943 PR branch, not a release tag (ENG-4949; restore on merge)"
-          else
-            echo "ref=$tag" >> "$GITHUB_OUTPUT"
-            echo "is_tag=true" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Cache the pinned spec
         id: cache
-        # Only a release tag is immutable enough to cache; skipped while pinned to
-        # a branch (TODO(ENG-4949): drops to always-on once the override is gone).
-        if: steps.pin.outputs.is_tag == 'true'
         uses: actions/cache@v4
         with:
           path: openapi.pinned.json
           key: spec-${{ steps.pin.outputs.tag }}
 
-      - name: Fetch spec (cache miss, or always while branch-pinned)
-        if: steps.pin.outputs.is_tag != 'true' || steps.cache.outputs.cache-hit != 'true'
+      - name: Fetch spec (cache miss)
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
-          # Passed via env (not interpolated into the script) so the ref is
-          # data, not code. For a tag it is validated to ^v[0-9.]+$ above; for the
-          # temporary branch pin it is a fixed constant in this workflow.
-          SPEC_REF: ${{ steps.pin.outputs.ref }}
+          # Passed via env (not interpolated into the script) so the tag is
+          # data, not code; it is validated to ^v[0-9.]+$ above.
+          SPEC_REF: ${{ steps.pin.outputs.tag }}
         run: |
           curl -fsSL \
             "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_REF}/openapi.json" \
