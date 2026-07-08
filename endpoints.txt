@@ -20,46 +20,67 @@
 # new `client.<method>()` call mapped in METHOD_OP), or the drift check fails.
 # Format:  METHOD /path   (placeholders match the spec, e.g. {market_id})
 #
+# ── /api/v1 migration (ENG-4949, parent ENG-4740) ──────────────────────────────
+# The gateway REST proxy is being eliminated: each backend service now exposes
+# its own REST API under the host-root `/api/v1` prefix. This move is DUAL-STACK
+# (ENG-4751) — the legacy `/api/exchange` gateway paths stay live, so operations
+# that do NOT yet have an `/api/v1` variant remain on the bare gateway path.
+#
+# Which op lands where is decided in the SDK, not here: the CLI is a thin layer
+# over `nexus-exchange`, and the regenerated SDK (ENG-4947, nexus-exchange-rs
+# PR #85) selects the base per request off the `/api/v1/` path prefix. The lines
+# below mirror that SDK routing exactly — `/api/v1/...` for the migrated ops, the
+# bare gateway path for the rest. Runtime routing flips only when this crate bumps
+# its `nexus-exchange` dependency to the regenerated SDK release (ENG-4947); this
+# file and the drift check are the spec-coverage bookkeeping that goes with it.
+#
 # Commands that DON'T appear here, by design: `setup` and `completions` are
 # local-only (no API call); the wallet-auth `auth login` / `agents register`
-# flows are owned by a separate in-flight PR (ENG-4046) and will add their lines
-# (POST /auth/login, POST /agents/register) when they land.
+# flows are unauthenticated wallet-signed requests with no `/api/v1` variant and
+# are covered by the SDK's own coverage file, not this one.
 
 # ── public market data ──
+# Migrated to the /api/v1 direct-indexer surface:
+GET /api/v1/markets/summary
+GET /api/v1/tickers
+GET /api/v1/markets/{market_id}/ticker
+GET /api/v1/markets/{market_id}/orderbook
+GET /api/v1/markets/{market_id}/trades
+GET /api/v1/markets/{market_id}/candles
+GET /api/v1/markets/{market_id}/funding
+GET /api/v1/markets/{market_id}/mark-price
+GET /api/v1/markets/{market_id}/status
+# No /api/v1 variant yet — stay on the /api/exchange gateway (dual-stack):
 GET /markets
-GET /markets/summary
-GET /tickers
-GET /markets/{market_id}/ticker
-GET /markets/{market_id}/orderbook
-GET /markets/{market_id}/trades
-GET /markets/{market_id}/candles
-GET /markets/{market_id}/funding
-GET /markets/{market_id}/mark-price
-GET /markets/{market_id}/status
 GET /health
 
 # ── authenticated account (read) ──
-GET /account
-GET /positions
-GET /fills
-GET /orders
+# Migrated to /api/v1:
+GET /api/v1/account
+GET /api/v1/positions
+GET /api/v1/fills
+GET /api/v1/orders
+GET /api/v1/account/rate-limit
+# No /api/v1 variant — stay on the gateway (v1 exposes no GET /orders/{id}):
 GET /orders/{order_id}
 GET /withdrawals
-GET /account/rate-limit
 GET /keys
 GET /agents
 
 # ── trading & account mutations ──
-POST /orders
-POST /orders/batch
-DELETE /orders/{order_id}
-DELETE /orders
+# Migrated to /api/v1:
+POST /api/v1/orders
+POST /api/v1/orders/batch
+DELETE /api/v1/orders/{order_id}
+DELETE /api/v1/orders
+POST /api/v1/account/credit
+# No /api/v1 variant — stay on the gateway:
 POST /account/deposit
-POST /account/credit
 POST /keys
 DELETE /keys/{key_id}
 DELETE /agents/{address}
 
 # ── websocket ──
+# No /api/v1 variant — the token mint and upgrade stay on the gateway:
 POST /ws/token
 GET /ws

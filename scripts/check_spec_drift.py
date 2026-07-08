@@ -60,41 +60,47 @@ CLI_SOURCES = [
 # Paths use the spec's placeholder names. Add a row when a command starts calling
 # a new SDK method (and add the matching endpoints.txt line, or a CODE_ONLY_OPS
 # entry if the op is ahead of the pinned spec).
+# /api/v1 migration (ENG-4949): the gateway REST proxy is being replaced by the
+# per-service host-root `/api/v1` surface (parent ENG-4740). The move is dual-stack
+# (ENG-4751): ops with an `/api/v1` variant point there; the rest keep the bare
+# gateway path until they gain one. The path each row carries MUST mirror what the
+# regenerated SDK actually calls (nexus-exchange-rs PR #85 / ENG-4947), which picks
+# the base per request off the `/api/v1/` prefix — the CLI issues no path of its own.
 METHOD_OP = {
     # public market data
-    "fetch_markets": ("GET", "/markets"),
-    "fetch_market_summaries": ("GET", "/markets/summary"),
-    "fetch_tickers": ("GET", "/tickers"),
-    "fetch_ticker": ("GET", "/markets/{market_id}/ticker"),
-    "fetch_order_book": ("GET", "/markets/{market_id}/orderbook"),
-    "fetch_trades": ("GET", "/markets/{market_id}/trades"),
-    "fetch_ohlcv": ("GET", "/markets/{market_id}/candles"),
-    "fetch_funding_rate_history": ("GET", "/markets/{market_id}/funding"),
-    "fetch_mark_price": ("GET", "/markets/{market_id}/mark-price"),
-    "fetch_market_status": ("GET", "/markets/{market_id}/status"),
-    "health_check": ("GET", "/health"),
+    "fetch_markets": ("GET", "/markets"),  # list-all: no /api/v1 variant yet
+    "fetch_market_summaries": ("GET", "/api/v1/markets/summary"),
+    "fetch_tickers": ("GET", "/api/v1/tickers"),
+    "fetch_ticker": ("GET", "/api/v1/markets/{market_id}/ticker"),
+    "fetch_order_book": ("GET", "/api/v1/markets/{market_id}/orderbook"),
+    "fetch_trades": ("GET", "/api/v1/markets/{market_id}/trades"),
+    "fetch_ohlcv": ("GET", "/api/v1/markets/{market_id}/candles"),
+    "fetch_funding_rate_history": ("GET", "/api/v1/markets/{market_id}/funding"),
+    "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
+    "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
+    "health_check": ("GET", "/health"),  # no /api/v1 variant yet
     # authenticated account (read)
-    "fetch_balance": ("GET", "/account"),
-    "fetch_positions": ("GET", "/positions"),
-    "fetch_my_trades": ("GET", "/fills"),
-    "fetch_open_orders": ("GET", "/orders"),
-    "fetch_order": ("GET", "/orders/{order_id}"),
-    "fetch_withdrawals": ("GET", "/withdrawals"),
-    "fetch_rate_limit_status": ("GET", "/account/rate-limit"),
-    "fetch_api_keys": ("GET", "/keys"),
-    "fetch_agents": ("GET", "/agents"),
+    "fetch_balance": ("GET", "/api/v1/account"),
+    "fetch_positions": ("GET", "/api/v1/positions"),
+    "fetch_my_trades": ("GET", "/api/v1/fills"),
+    "fetch_open_orders": ("GET", "/api/v1/orders"),
+    "fetch_order": ("GET", "/orders/{order_id}"),  # v1 exposes no GET-by-id
+    "fetch_withdrawals": ("GET", "/withdrawals"),  # no /api/v1 variant yet
+    "fetch_rate_limit_status": ("GET", "/api/v1/account/rate-limit"),
+    "fetch_api_keys": ("GET", "/keys"),  # no /api/v1 variant yet
+    "fetch_agents": ("GET", "/agents"),  # no /api/v1 variant yet
     # trading & account mutations
-    "create_order": ("POST", "/orders"),
-    "create_orders": ("POST", "/orders/batch"),
-    "cancel_order": ("DELETE", "/orders/{order_id}"),
-    "cancel_all_orders": ("DELETE", "/orders"),
-    "deposit": ("POST", "/account/deposit"),
-    "claim_credit": ("POST", "/account/credit"),
-    "create_api_key": ("POST", "/keys"),
-    "delete_api_key": ("DELETE", "/keys/{key_id}"),
-    "revoke_agent": ("DELETE", "/agents/{address}"),
+    "create_order": ("POST", "/api/v1/orders"),
+    "create_orders": ("POST", "/api/v1/orders/batch"),
+    "cancel_order": ("DELETE", "/api/v1/orders/{order_id}"),
+    "cancel_all_orders": ("DELETE", "/api/v1/orders"),
+    "deposit": ("POST", "/account/deposit"),  # no /api/v1 variant yet
+    "claim_credit": ("POST", "/api/v1/account/credit"),
+    "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
+    "delete_api_key": ("DELETE", "/keys/{key_id}"),  # no /api/v1 variant yet
+    "revoke_agent": ("DELETE", "/agents/{address}"),  # no /api/v1 variant yet
     # websocket
-    "mint_web_socket_token": ("POST", "/ws/token"),
+    "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # ── ahead of the pinned spec (see CODE_ONLY_OPS) ──
     "amend_order": ("PUT", "/orders/{order_id}"),
     "set_leverage": ("POST", "/account/leverage"),

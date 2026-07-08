@@ -55,15 +55,15 @@ jobs:
           path: openapi.pinned.json
           key: spec-${{ steps.pin.outputs.tag }}
 
-      - name: Fetch spec (cache miss only)
+      - name: Fetch spec (cache miss)
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           # Passed via env (not interpolated into the script) so the tag is
-          # data, not code; validated to ^v[0-9.]+$ in the pin step above.
-          SPEC_TAG: ${{ steps.pin.outputs.tag }}
+          # data, not code; it is validated to ^v[0-9.]+$ above.
+          SPEC_REF: ${{ steps.pin.outputs.tag }}
         run: |
           curl -fsSL \
-            "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_TAG}/openapi.json" \
+            "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_REF}/openapi.json" \
             -o openapi.pinned.json
 
       - name: Check drift
