@@ -6,10 +6,10 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment,
-    FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus,
-    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult, Position, PriceLevel,
-    RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    AccountSummary, AdlEvent, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill,
+    FundingPayment, FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice,
+    Market, MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
+    Position, PriceLevel, RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -861,6 +861,63 @@ pub fn funding_payments_json(fs: &[FundingPayment]) -> String {
     pretty(&value)
 }
 
+// ───────────────────────── ADL events ─────────────────────────
+
+/// Render ADL settlement events (market or account scope) as an aligned table.
+/// The per-counterparty closures are summarized as a count here; the JSON
+/// renderer carries them in full.
+pub fn adl_events(es: &[AdlEvent]) -> String {
+    if es.is_empty() {
+        return "No ADL events returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<42}  {:>14}  {:>14}  {:>8}  {:>10}  {:<16}\n",
+        "MARKET", "TARGET", "BANKRUPTCY PX", "BAD DEBT", "CLOSURES", "SEQ", "TIME(ms)"
+    );
+    for e in es {
+        out.push_str(&format!(
+            "{:<16}  {:<42}  {:>14}  {:>14}  {:>8}  {:>10}  {:<16}\n",
+            e.market_id,
+            e.target_account,
+            e.bankruptcy_price,
+            e.bad_debt_absorbed_by_fund,
+            e.counterparty_closures.len(),
+            e.sequence,
+            e.timestamp,
+        ));
+    }
+    out.push_str(&format!("\n{} event(s).", es.len()));
+    out
+}
+
+pub fn adl_events_json(es: &[AdlEvent]) -> String {
+    let value: Value = es
+        .iter()
+        .map(|e| {
+            json!({
+                "market_id": e.market_id,
+                "target_account": e.target_account,
+                "bankruptcy_price": e.bankruptcy_price.to_string(),
+                "bad_debt_absorbed_by_fund": e.bad_debt_absorbed_by_fund.to_string(),
+                "counterparty_closures": e
+                    .counterparty_closures
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "account_id": c.account_id,
+                            "position_closed": c.position_closed.to_string(),
+                            "settlement_amount": c.settlement_amount.to_string(),
+                        })
+                    })
+                    .collect::<Value>(),
+                "sequence": e.sequence,
+                "timestamp": e.timestamp,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
 // ───────────────────────── single order (get) ─────────────────────────
 
 /// Single-order detail view, reusing the key/value `order` renderer.
@@ -1265,6 +1322,61 @@ mod tests {
         // Money is a decimal string; leverage stays a JSON number.
         assert_eq!(row["tick_size"], json!("0.5"));
         assert_eq!(row["max_leverage"], json!(20));
+    }
+
+    #[test]
+    fn adl_events_render_table_and_json() {
+        let events: Vec<AdlEvent> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP",
+            "target_account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "bankruptcy_price": "42000.5",
+            "bad_debt_absorbed_by_fund": "1250",
+            "counterparty_closures": [{
+                "account_id": "0x1234567890abcdef1234567890abcdef12345678",
+                "position_closed": "0.25",
+                "settlement_amount": "10500.125"
+            }],
+            "sequence": 991,
+            "timestamp": 1_776_033_900_000i64
+        }]))
+        .unwrap();
+
+        // Human table: header, the row, and the count footer.
+        let human = adl_events(&events);
+        assert!(human.contains("MARKET"), "{human}");
+        assert!(human.contains("BANKRUPTCY PX"), "{human}");
+        assert!(human.contains("BTC-USDX-PERP"), "{human}");
+        assert!(human.contains("42000.5"), "{human}");
+        assert!(human.contains("1 event(s)."), "{human}");
+        // Closures are summarized as a count in the table…
+        assert!(
+            !human.contains("0x1234567890abcdef1234567890abcdef12345678"),
+            "table should summarize closures, not inline them: {human}"
+        );
+
+        // …and carried in full in JSON, with money as decimal strings.
+        let v: Value = serde_json::from_str(&adl_events_json(&events)).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(
+            keys(row),
+            [
+                "bad_debt_absorbed_by_fund",
+                "bankruptcy_price",
+                "counterparty_closures",
+                "market_id",
+                "sequence",
+                "target_account",
+                "timestamp",
+            ]
+        );
+        assert_eq!(row["bankruptcy_price"], json!("42000.5"));
+        assert_eq!(row["sequence"], json!(991));
+        let closure = &row["counterparty_closures"].as_array().unwrap()[0];
+        assert_eq!(closure["position_closed"], json!("0.25"));
+        assert_eq!(closure["settlement_amount"], json!("10500.125"));
+
+        // The empty case renders a note, not an empty table.
+        assert_eq!(adl_events(&[]), "No ADL events returned.");
     }
 
     #[test]

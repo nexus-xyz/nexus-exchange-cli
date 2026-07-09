@@ -227,6 +227,7 @@ nexus health                        # indexer health snapshot
 nexus market summary                       # 24h volume + halt state per market
 nexus market status BTC-USDX-PERP          # lifecycle / halt status
 nexus market mark-price BTC-USDX-PERP      # current mark price
+nexus market adl-events BTC-USDX-PERP --limit 50   # ADL settlements (needs credentials)
 
 # Authenticated account (see Credentials below)
 nexus balance                       # balance, collateral, equity, margin
@@ -242,9 +243,13 @@ nexus withdrawals                   # withdrawal history
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
 nexus order get <ORDER_ID>          # fetch one order
+nexus order get-by-client-id <CLIENT_ORDER_ID>   # …or by your own id
 nexus order amend <ORDER_ID> --price 85000 --quantity 0.02
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID>
+nexus order cancel-by-client-id <CLIENT_ORDER_ID>
+nexus order cancel-batch <ORDER_ID> <ORDER_ID>   # several ids, one request
+nexus order cancel --market BTC-USDX-PERP        # flatten one market
 nexus order cancel --all
 
 # Account management (see Credentials below)
@@ -253,6 +258,7 @@ nexus account credit --amount 500   # claim testnet USDX (omit --amount for the 
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account leverage BTC-USDX-PERP 10
 nexus account margin-mode BTC-USDX-PERP isolated
+nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
 
 # Wallet-signed auth (EVM key; see Credentials below)
 nexus auth login                    # EIP-191 sign-in; prompts for the key,
@@ -454,7 +460,7 @@ verifies — in the `spec-drift` CI workflow — that:
   script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **31 of 85** spec operations (**36.5%**). The denominator jumped with
+exercises **33 of 85** spec operations (**38.8%**). The denominator jumped with
 the `/api/v1` release because the spec now carries both stacks (gateway +
 `/api/v1`) plus the admin/stats surfaces the CLI does not target. Run it locally
 with a fetched spec:

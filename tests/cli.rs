@@ -289,6 +289,22 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
         (&["account", "rate-limit"], "failed to fetch rate-limit"),
         (&["keys", "list"], "failed to fetch API keys"),
         (&["agents", "list"], "failed to fetch agents"),
+        (
+            &["market", "adl-events", "BTC-USDX-PERP"],
+            "failed to fetch ADL events",
+        ),
+        (
+            &[
+                "account",
+                "adl-history",
+                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            ],
+            "failed to fetch ADL history",
+        ),
+        (
+            &["order", "get-by-client-id", "ladder-1"],
+            "failed to fetch order with client id",
+        ),
     ];
     for (args, want) in cases {
         let mut cmd = bin();
@@ -316,6 +332,70 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
         assert!(
             !stderr.contains("authenticated command"),
             "`{args:?}` should pass the auth gate with credentials, got: {stderr}"
+        );
+    }
+}
+
+/// The cancel variants (`--market` flatten, batch by ids, by client id), given
+/// credentials and `--yes`, must route through the SDK to a network attempt —
+/// proving the dispatch and confirmation wiring, without a live server.
+#[test]
+fn cancel_variants_route_to_the_sdk_when_credentialed() {
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["order", "cancel", "--market", "BTC-USDX-PERP", "--yes"],
+            "failed to cancel orders in BTC-USDX-PERP",
+        ),
+        (
+            &["order", "cancel-batch", "o1", "o2", "--yes"],
+            "failed to cancel order batch",
+        ),
+        (
+            &["order", "cancel-by-client-id", "ladder-1", "--yes"],
+            "failed to cancel order with client id",
+        ),
+    ];
+    for (args, want) in cases {
+        let mut cmd = bin();
+        cmd.args([
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ]);
+        cmd.args(*args);
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`{args:?}` should fail (dead port)"
+        );
+        assert!(
+            stderr.contains(want),
+            "`{args:?}` should reach the SDK call ({want:?}), got: {stderr}"
+        );
+    }
+}
+
+/// Without credentials, the new authenticated commands are refused at the auth
+/// gate — before any confirmation prompt or network attempt.
+#[test]
+fn new_authenticated_commands_are_gated_without_credentials() {
+    for args in [
+        ["market", "adl-events", "BTC-USDX-PERP"].as_slice(),
+        ["account", "adl-history", "0xabc"].as_slice(),
+        ["order", "get-by-client-id", "ladder-1"].as_slice(),
+        ["order", "cancel-batch", "o1"].as_slice(),
+    ] {
+        let out = run(args);
+        assert_ne!(out.code, Some(0), "`{args:?}` should be refused");
+        assert!(
+            out.stderr.contains("authenticated command") || out.stderr.contains("credentials"),
+            "`{args:?}` stderr: {}",
+            out.stderr
         );
     }
 }

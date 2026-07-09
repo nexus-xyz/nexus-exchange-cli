@@ -108,6 +108,9 @@ fn ahead_of_spec_ops_are_not_in_endpoints_txt() {
         ("GET", "/funding-payments"),
         ("POST", "/transfers"),
         ("GET", "/sub-accounts"),
+        ("POST", "/orders/batch-cancel"),
+        ("GET", "/orders/by-client-id/{client_order_id}"),
+        ("DELETE", "/orders/by-client-id/{client_order_id}"),
     ] {
         assert!(
             !ops.contains(&(absent.0.to_string(), absent.1.to_string())),

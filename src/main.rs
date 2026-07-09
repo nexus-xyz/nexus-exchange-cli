@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
                 output::markets_json(&markets)
             });
         }
-        Command::Market { action } => handle_market(&client, action, format).await?,
+        Command::Market { action } => handle_market(&client, authenticated, action, format).await?,
         Command::Ticker { market_id } => {
             let ticker = client
                 .fetch_ticker(&market_id)
@@ -280,9 +280,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Handle the read-only `market` subcommands (summary / status / mark-price).
-/// All are public market data and need no credentials.
-async fn handle_market(client: &Client, action: MarketCommand, format: OutputFormat) -> Result<()> {
+/// Handle the read-only `market` subcommands (summary / status / mark-price /
+/// adl-events). All are market-scoped reads; only `adl-events` needs
+/// credentials (the endpoint is HMAC-gated server-side).
+async fn handle_market(
+    client: &Client,
+    authenticated: bool,
+    action: MarketCommand,
+    format: OutputFormat,
+) -> Result<()> {
     match action {
         MarketCommand::Summary => {
             let summaries = client
@@ -309,6 +315,16 @@ async fn handle_market(client: &Client, action: MarketCommand, format: OutputFor
                 .with_context(|| format!("failed to fetch mark price for {market_id}"))?;
             emit(format, output::mark_price(&mark), || {
                 output::mark_price_json(&mark)
+            });
+        }
+        MarketCommand::AdlEvents { market_id, limit } => {
+            require_authenticated(authenticated, "market adl-events")?;
+            let events = client
+                .fetch_market_adl_events(&market_id, limit)
+                .await
+                .with_context(|| format!("failed to fetch ADL events for {market_id}"))?;
+            emit(format, output::adl_events(&events), || {
+                output::adl_events_json(&events)
             });
         }
     }
@@ -384,7 +400,12 @@ async fn handle_order(
             });
         }
 
-        OrderCommand::Cancel { order_id, all, yes } => {
+        OrderCommand::Cancel {
+            order_id,
+            market,
+            all,
+            yes,
+        } => {
             require_authenticated(authenticated, "order cancel")?;
             if all {
                 if !confirm("Cancel ALL open orders", yes)? {
@@ -400,9 +421,28 @@ async fn handle_order(
                     output::cancel(&value, "cancelled all open orders."),
                     || serde_json::to_string_pretty(&value).unwrap_or_default(),
                 );
+            } else if let Some(market) = market {
+                // Per-market flatten: one round-trip instead of fetch → filter
+                // → cancel-by-id. The account-wide cancel stays behind the
+                // explicit `--all` above.
+                if !confirm(&format!("Cancel ALL open orders in {market}"), yes)? {
+                    eprintln!("aborted.");
+                    return Ok(());
+                }
+                let value = client
+                    .cancel_orders_for_market(&market)
+                    .await
+                    .with_context(|| format!("failed to cancel orders in {market}"))?;
+                emit(
+                    format,
+                    output::cancel(&value, &format!("cancelled all open orders in {market}.")),
+                    || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                );
             } else {
-                let id = order_id
-                    .context("provide an order id, or use --all to cancel every open order")?;
+                let id = order_id.context(
+                    "provide an order id, --market to flatten one market, \
+                     or --all to cancel every open order",
+                )?;
                 if !confirm(&format!("Cancel order {id}"), yes)? {
                     eprintln!("aborted.");
                     return Ok(());
@@ -428,6 +468,71 @@ async fn handle_order(
             emit(format, output::order_detail(&order), || {
                 output::order_detail_json(&order)
             });
+        }
+
+        OrderCommand::GetByClientId { client_order_id } => {
+            require_authenticated(authenticated, "order get-by-client-id")?;
+            let order = client
+                .fetch_order_by_client_id(&client_order_id)
+                .await
+                .with_context(|| {
+                    format!("failed to fetch order with client id {client_order_id}")
+                })?;
+            emit(format, output::order_detail(&order), || {
+                output::order_detail_json(&order)
+            });
+        }
+
+        OrderCommand::CancelByClientId {
+            client_order_id,
+            yes,
+        } => {
+            require_authenticated(authenticated, "order cancel-by-client-id")?;
+            if !confirm(
+                &format!("Cancel order with client id {client_order_id}"),
+                yes,
+            )? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let value = client
+                .cancel_order_by_client_id(&client_order_id)
+                .await
+                .with_context(|| {
+                    format!("failed to cancel order with client id {client_order_id}")
+                })?;
+            emit(
+                format,
+                output::cancel(
+                    &value,
+                    &format!("cancelled order with client id {client_order_id}."),
+                ),
+                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+            );
+        }
+
+        OrderCommand::CancelBatch { order_ids, yes } => {
+            require_authenticated(authenticated, "order cancel-batch")?;
+            if !confirm(
+                &format!("Cancel a batch of {} order(s)", order_ids.len()),
+                yes,
+            )? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let ids: Vec<&str> = order_ids.iter().map(String::as_str).collect();
+            let value = client
+                .cancel_orders(&ids)
+                .await
+                .context("failed to cancel order batch")?;
+            emit(
+                format,
+                output::cancel(
+                    &value,
+                    &format!("submitted cancel for {} order(s).", order_ids.len()),
+                ),
+                || serde_json::to_string_pretty(&value).unwrap_or_default(),
+            );
         }
 
         OrderCommand::Amend {
@@ -553,6 +658,16 @@ async fn handle_account(
                 .with_context(|| format!("failed to set margin mode for {market_id}"))?;
             emit(format, output::margin_mode(&result), || {
                 output::margin_mode_json(&result)
+            });
+        }
+        AccountCommand::AdlHistory { address, limit } => {
+            require_authenticated(authenticated, "account adl-history")?;
+            let events = client
+                .fetch_account_adl_history(&address, limit)
+                .await
+                .with_context(|| format!("failed to fetch ADL history for {address}"))?;
+            emit(format, output::adl_events(&events), || {
+                output::adl_events_json(&events)
             });
         }
     }

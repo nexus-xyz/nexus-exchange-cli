@@ -66,6 +66,10 @@ GET /orders/{order_id}
 GET /withdrawals
 GET /keys
 GET /agents
+# ADL reads (HMAC-gated server-side despite the market scope); no /api/v1
+# variant — stay on the gateway:
+GET /markets/{market_id}/adl-events
+GET /account/{address}/adl-history
 
 # ── trading & account mutations ──
 # Migrated to /api/v1:
