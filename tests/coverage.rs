@@ -131,6 +131,7 @@ fn examples_exist_and_reference_the_binary() {
         "examples/trading.sh",
         "examples/keys_and_agents.sh",
         "examples/streaming.sh",
+        "examples/north_star.sh",
     ] {
         let body = read(f);
         assert!(!body.trim().is_empty(), "{f} is empty");

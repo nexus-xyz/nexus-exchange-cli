@@ -17,9 +17,11 @@ nexus order place \
 nexus order place \
   --market "$MARKET" --side sell --type market --quantity 0.01 --reduce-only --yes
 
-# List open orders, then fetch one by id.
-nexus orders                       # GET /orders
-nexus order get <ORDER_ID>         # GET /orders/{id}
+# List open orders, then fetch one — by exchange id, or by the client_order_id
+# you assigned at placement (so scripts never scrape the exchange id).
+nexus orders                                     # GET /orders
+nexus order get <ORDER_ID>                       # GET /orders/{id}
+nexus order get-by-client-id <CLIENT_ORDER_ID>   # GET /orders/by-client-id/{id}
 
 # Amend an open order in place (atomic cancel-replace); set only what changes.
 nexus order amend <ORDER_ID> --price 83500 --yes    # PUT /orders/{id}
@@ -28,9 +30,13 @@ nexus order amend <ORDER_ID> --price 83500 --yes    # PUT /orders/{id}
 nexus order batch examples/batch_orders.json --yes  # POST /orders/batch
 cat examples/batch_orders.json | nexus order batch - --yes   # ...or from stdin
 
-# Cancel one order, or every open order.
-nexus order cancel <ORDER_ID> --yes   # DELETE /orders/{id}
-nexus order cancel --all --yes        # DELETE /orders
+# Cancel: one order (by either id), several ids in one request, every open
+# order in ONE market (a per-market flatten), or everything.
+nexus order cancel <ORDER_ID> --yes                       # DELETE /orders/{id}
+nexus order cancel-by-client-id <CLIENT_ORDER_ID> --yes   # DELETE /orders/by-client-id/{id}
+nexus order cancel-batch <ORDER_ID> <ORDER_ID> --yes      # POST /orders/batch-cancel
+nexus order cancel --market "$MARKET" --yes               # DELETE /orders?market_id=
+nexus order cancel --all --yes                            # DELETE /orders
 
 # ── account settings (ahead of the pinned spec; see endpoints.txt) ──
 nexus account deposit 1000 --yes                 # POST /account/deposit
