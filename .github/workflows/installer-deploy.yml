@@ -1,0 +1,73 @@
+name: Deploy installer Worker
+
+# Deploys the cli.nexus.xyz installer Worker (installer/) to Cloudflare.
+#
+# Ownership split (eng/infra/AGENTS.md): Wrangler owns this script upload —
+# the source lives here and is built from source — while the monorepo Terraform
+# owns the route + DNS (ENG-5017). This job uploads ONLY the script.
+#
+# Deploying is INERT until the monorepo binds the Worker route and flips the
+# cli.nexus.xyz record to proxied (ENG-5017): with no route bound, no traffic
+# on cli.nexus.xyz reaches this script. So it is safe to deploy ahead of cutover.
+
+on:
+  workflow_dispatch: # manual — use this for the controlled first deploy
+  push:
+    branches: [main]
+    paths:
+      - "installer/**" # keep the deployed script in sync with main
+      # (drop this trigger if you want manual-only deploys)
+
+concurrency:
+  group: installer-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # mint the OIDC token for Google Workload Identity Federation
+
+jobs:
+  deploy:
+    name: wrangler deploy
+    runs-on: ubuntu-latest
+    # Gate the deploy on the "production" environment: main-only branch policy
+    # plus a required reviewer, so every Worker upload is an approved action.
+    environment: production
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Same security gate as CI: never deploy a Worker whose tests fail.
+      - run: node --test
+
+      # Reproducible install from the committed lockfile.
+      - run: npm ci
+
+      # Auth to Google Cloud via Workload Identity Federation — no static keys.
+      # The provider + service account are repo variables (set by infra).
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      # Pull the scoped Cloudflare deploy token straight from Secret Manager
+      # into a step output. It is never stored as a GitHub secret; the action
+      # masks it in logs.
+      - name: Fetch Cloudflare token from Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |-
+            CLOUDFLARE_API_TOKEN:infra-nexusxyz/cloudflare_cli_installer_deploy_token
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
