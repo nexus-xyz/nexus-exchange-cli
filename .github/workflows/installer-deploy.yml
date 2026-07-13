@@ -24,11 +24,15 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write # mint the OIDC token for Google Workload Identity Federation
 
 jobs:
   deploy:
     name: wrangler deploy
     runs-on: ubuntu-latest
+    # Gate the deploy on the "production" environment: main-only branch policy
+    # plus a required reviewer, so every Worker upload is an approved action.
+    environment: production
     defaults:
       run:
         working-directory: installer
@@ -44,15 +48,26 @@ jobs:
       # Reproducible install from the committed lockfile.
       - run: npm ci
 
+      # Auth to Google Cloud via Workload Identity Federation — no static keys.
+      # The provider + service account are repo variables (set by infra).
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      # Pull the scoped Cloudflare deploy token straight from Secret Manager
+      # into a step output. It is never stored as a GitHub secret; the action
+      # masks it in logs.
+      - name: Fetch Cloudflare token from Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |-
+            CLOUDFLARE_API_TOKEN:infra-nexusxyz/cloudflare_cli_installer_deploy_token
+
       - name: Deploy
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          # Only needed if the token maps to >1 account; otherwise wrangler
-          # infers it. Set as a repo variable if required.
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN is not set — see ENG-5017 / the infra request." >&2
-            exit 1
-          fi
-          npx wrangler deploy
+        run: npx wrangler deploy
