@@ -473,10 +473,18 @@ pub enum OrderCommand {
         yes: bool,
     },
 
-    /// Cancel a single order by id, or all open orders with `--all`.
+    /// Cancel a single order by id (requires `--market`), or all open orders
+    /// with `--all`.
     Cancel {
-        /// Order id to cancel.
+        /// Order id to cancel. Requires `--market` (by-id cancels are routed
+        /// per market).
+        #[arg(requires = "market")]
         order_id: Option<String>,
+        /// Market the order is on, e.g. `BTC-USDX-PERP`. Required when
+        /// cancelling a single order: the engine routes by-id cancels per
+        /// market. Not used with `--all`.
+        #[arg(long, conflicts_with = "all")]
+        market: Option<String>,
         /// Cancel all open orders.
         #[arg(long, conflicts_with = "order_id")]
         all: bool,
@@ -489,6 +497,10 @@ pub enum OrderCommand {
     Get {
         /// Order id.
         order_id: String,
+        /// Market the order is on, e.g. `BTC-USDX-PERP`. Required: the engine
+        /// routes by-id lookups per market.
+        #[arg(long)]
+        market: String,
     },
 
     /// Amend an open order in place (atomic cancel-replace). Set only the
@@ -496,6 +508,10 @@ pub enum OrderCommand {
     Amend {
         /// Order id to amend.
         order_id: String,
+        /// Market the order is on, e.g. `BTC-USDX-PERP`. Required: the engine
+        /// routes by-id amends per market.
+        #[arg(long)]
+        market: String,
         /// New limit price.
         #[arg(long)]
         price: Option<String>,
@@ -1012,13 +1028,82 @@ mod tests {
 
     #[test]
     fn order_get_parses() {
-        let cli = Cli::try_parse_from(["nexus", "order", "get", "o123"]).unwrap();
-        assert!(matches!(
-            cli.command,
+        // `--market` is required (by-id lookups are routed per market).
+        assert!(Cli::try_parse_from(["nexus", "order", "get", "o123"]).is_err());
+        let cli =
+            Cli::try_parse_from(["nexus", "order", "get", "o123", "--market", "BTC-USDX-PERP"])
+                .unwrap();
+        match cli.command {
             Command::Order {
-                action: OrderCommand::Get { .. }
+                action: OrderCommand::Get { order_id, market },
+            } => {
+                assert_eq!(order_id, "o123");
+                assert_eq!(market, "BTC-USDX-PERP");
             }
-        ));
+            other => panic!("expected order get, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_cancel_by_id_requires_market() {
+        // A single by-id cancel needs `--market`; `--all` does not (and the two
+        // are mutually exclusive).
+        assert!(Cli::try_parse_from(["nexus", "order", "cancel", "o123"]).is_err());
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "cancel",
+            "--all",
+            "--market",
+            "BTC-USDX-PERP"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "order",
+            "cancel",
+            "o123",
+            "--market",
+            "BTC-USDX-PERP",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Order {
+                action:
+                    OrderCommand::Cancel {
+                        order_id, market, ..
+                    },
+            } => {
+                assert_eq!(order_id.as_deref(), Some("o123"));
+                assert_eq!(market.as_deref(), Some("BTC-USDX-PERP"));
+            }
+            other => panic!("expected order cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_amend_requires_market() {
+        // Amends are routed per market, so `--market` is required.
+        assert!(
+            Cli::try_parse_from(["nexus", "order", "amend", "o123", "--price", "100"]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "order",
+            "amend",
+            "o123",
+            "--market",
+            "BTC-USDX-PERP",
+            "--price",
+            "100",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Order {
+                action: OrderCommand::Amend { market, .. },
+            } => assert_eq!(market, "BTC-USDX-PERP"),
+            other => panic!("expected order amend, got {other:?}"),
+        }
     }
 
     #[test]

@@ -384,7 +384,12 @@ async fn handle_order(
             });
         }
 
-        OrderCommand::Cancel { order_id, all, yes } => {
+        OrderCommand::Cancel {
+            order_id,
+            market,
+            all,
+            yes,
+        } => {
             require_authenticated(authenticated, "order cancel")?;
             if all {
                 if !confirm("Cancel ALL open orders", yes)? {
@@ -403,12 +408,15 @@ async fn handle_order(
             } else {
                 let id = order_id
                     .context("provide an order id, or use --all to cancel every open order")?;
+                let market = market.context(
+                    "provide --market for the order being cancelled (by-id cancels are routed per market)",
+                )?;
                 if !confirm(&format!("Cancel order {id}"), yes)? {
                     eprintln!("aborted.");
                     return Ok(());
                 }
                 let value = client
-                    .cancel_order(&id)
+                    .cancel_order(&id, &market)
                     .await
                     .context("failed to cancel order")?;
                 emit(
@@ -419,10 +427,10 @@ async fn handle_order(
             }
         }
 
-        OrderCommand::Get { order_id } => {
+        OrderCommand::Get { order_id, market } => {
             require_authenticated(authenticated, "order get")?;
             let order = client
-                .fetch_order(&order_id)
+                .fetch_order(&order_id, &market)
                 .await
                 .with_context(|| format!("failed to fetch order {order_id}"))?;
             emit(format, output::order_detail(&order), || {
@@ -432,6 +440,7 @@ async fn handle_order(
 
         OrderCommand::Amend {
             order_id,
+            market,
             price,
             quantity,
             tif,
@@ -453,7 +462,7 @@ async fn handle_order(
                 return Ok(());
             }
             let result = client
-                .amend_order(&order_id, &amend)
+                .amend_order(&order_id, &market, &amend)
                 .await
                 .with_context(|| format!("failed to amend order {order_id}"))?;
             emit(format, output::order_result(&result), || {
