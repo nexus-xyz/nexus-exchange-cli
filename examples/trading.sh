@@ -17,20 +17,21 @@ nexus order place \
 nexus order place \
   --market "$MARKET" --side sell --type market --quantity 0.01 --reduce-only --yes
 
-# List open orders, then fetch one by id.
-nexus orders                       # GET /orders
-nexus order get <ORDER_ID>         # GET /orders/{id}
+# List open orders, then fetch one by id. By-id routes are routed per market,
+# so get/amend/cancel-one all require --market.
+nexus orders                                          # GET /orders
+nexus order get <ORDER_ID> --market "$MARKET"         # GET /orders/{id}
 
 # Amend an open order in place (atomic cancel-replace); set only what changes.
-nexus order amend <ORDER_ID> --price 83500 --yes    # PUT /orders/{id}
+nexus order amend <ORDER_ID> --market "$MARKET" --price 83500 --yes    # PUT /orders/{id}
 
 # Submit several orders at once from a JSON array (see batch_orders.json).
 nexus order batch examples/batch_orders.json --yes  # POST /orders/batch
 cat examples/batch_orders.json | nexus order batch - --yes   # ...or from stdin
 
 # Cancel one order, or every open order.
-nexus order cancel <ORDER_ID> --yes   # DELETE /orders/{id}
-nexus order cancel --all --yes        # DELETE /orders
+nexus order cancel <ORDER_ID> --market "$MARKET" --yes   # DELETE /api/v1/orders/{id}
+nexus order cancel --all --yes                           # DELETE /api/v1/orders
 
 # ── account settings (ahead of the pinned spec; see endpoints.txt) ──
 nexus account deposit 1000 --yes                 # POST /account/deposit

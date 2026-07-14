@@ -120,22 +120,28 @@ Terraform owns the `cli.nexus.xyz` record *and* the Worker route binding; Wrangl
 only uploads the script. So `wrangler.toml` declares no `routes` and never sets
 `custom_domain` (that conflicts with the Terraform record — nexus#2270).
 
-Cutover steps (require Cloudflare access to the `nexus.xyz` zone; **not** CI):
+Cutover steps:
 
-1. **Auth:** `wrangler login` (or set `CLOUDFLARE_API_TOKEN`).
-2. **Upload the script:** `cd installer && wrangler deploy` (uploads the Worker;
-   does not touch DNS).
-3. **Bind traffic in Terraform (monorepo):** add a `cloudflare_workers_route`
+1. **Upload the script (CI, preferred):** run the **Deploy installer Worker**
+   workflow (`.github/workflows/installer-deploy.yml`) via *Run workflow* on
+   `main`. It authenticates to Google Cloud through Workload Identity Federation
+   (no personal Cloudflare access needed), reads the scoped deploy token from
+   Secret Manager, and runs `wrangler deploy`. The job is gated on the
+   `production` environment (main-only + required reviewer). Manual fallback,
+   if you have Cloudflare access to the `nexus.xyz` zone: `wrangler login` (or
+   set `CLOUDFLARE_API_TOKEN`), then `cd installer && wrangler deploy`. Either
+   path uploads the Worker only; neither touches DNS.
+2. **Bind traffic in Terraform (monorepo):** add a `cloudflare_workers_route`
    for `cli.nexus.xyz` → this Worker (`nexus-cli-installer`) and repoint the
    `module "cli"` record (`proxied = true`) off the Firebase CNAME. Atlantis
    plan/apply.
-4. **Verify both paths:**
+3. **Verify both paths:**
    ```sh
    curl -fsS https://cli.nexus.xyz | head -5            # exchange installer (#!/bin/sh)
    curl -fsS -A 'PowerShell/7.4' https://cli.nexus.xyz | head -5   # exchange PowerShell variant
    curl -fsS https://cli.nexus.xyz/compute | head -5    # compute installer
    ```
-5. **Comms/docs:** update any public doc that points compute users at the bare
+4. **Comms/docs:** update any public doc that points compute users at the bare
    one-liner to use `/compute` (or the alias) — the default now installs the
    exchange CLI.
 

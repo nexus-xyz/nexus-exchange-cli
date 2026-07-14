@@ -421,6 +421,25 @@ async fn handle_order(
                     output::cancel(&value, "cancelled all open orders."),
                     || serde_json::to_string_pretty(&value).unwrap_or_default(),
                 );
+            } else if let Some(id) = order_id {
+                // By-id cancels are routed per market, so `--market` is
+                // required (clap enforces this via `requires = "market"`).
+                let market = market.context(
+                    "provide --market for the order being cancelled (by-id cancels are routed per market)",
+                )?;
+                if !confirm(&format!("Cancel order {id}"), yes)? {
+                    eprintln!("aborted.");
+                    return Ok(());
+                }
+                let value = client
+                    .cancel_order(&id, &market)
+                    .await
+                    .context("failed to cancel order")?;
+                emit(
+                    format,
+                    output::cancel(&value, &format!("cancelled order {id}.")),
+                    || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                );
             } else if let Some(market) = market {
                 // Per-market flatten: one round-trip instead of fetch → filter
                 // → cancel-by-id. The account-wide cancel stays behind the
@@ -439,30 +458,17 @@ async fn handle_order(
                     || serde_json::to_string_pretty(&value).unwrap_or_default(),
                 );
             } else {
-                let id = order_id.context(
-                    "provide an order id, --market to flatten one market, \
-                     or --all to cancel every open order",
-                )?;
-                if !confirm(&format!("Cancel order {id}"), yes)? {
-                    eprintln!("aborted.");
-                    return Ok(());
-                }
-                let value = client
-                    .cancel_order(&id)
-                    .await
-                    .context("failed to cancel order")?;
-                emit(
-                    format,
-                    output::cancel(&value, &format!("cancelled order {id}.")),
-                    || serde_json::to_string_pretty(&value).unwrap_or_default(),
+                anyhow::bail!(
+                    "provide an order id with --market, --market alone to flatten one market, \
+                     or --all to cancel every open order"
                 );
             }
         }
 
-        OrderCommand::Get { order_id } => {
+        OrderCommand::Get { order_id, market } => {
             require_authenticated(authenticated, "order get")?;
             let order = client
-                .fetch_order(&order_id)
+                .fetch_order(&order_id, &market)
                 .await
                 .with_context(|| format!("failed to fetch order {order_id}"))?;
             emit(format, output::order_detail(&order), || {
@@ -537,6 +543,7 @@ async fn handle_order(
 
         OrderCommand::Amend {
             order_id,
+            market,
             price,
             quantity,
             tif,
@@ -558,7 +565,7 @@ async fn handle_order(
                 return Ok(());
             }
             let result = client
-                .amend_order(&order_id, &amend)
+                .amend_order(&order_id, &market, &amend)
                 .await
                 .with_context(|| format!("failed to amend order {order_id}"))?;
             emit(format, output::order_result(&result), || {
