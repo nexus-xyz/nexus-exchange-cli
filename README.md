@@ -242,11 +242,13 @@ nexus withdrawals                   # withdrawal history
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
-nexus order get <ORDER_ID>          # fetch one order
+# By-id order commands are routed per market, so they require --market.
+# (By-client-id commands are account-scoped and do not.)
+nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
 nexus order get-by-client-id <CLIENT_ORDER_ID>   # …or by your own id
-nexus order amend <ORDER_ID> --price 85000 --quantity 0.02
+nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
-nexus order cancel <ORDER_ID>
+nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
 nexus order cancel-by-client-id <CLIENT_ORDER_ID>
 nexus order cancel-batch <ORDER_ID> <ORDER_ID>   # several ids, one request
 nexus order cancel --market BTC-USDX-PERP        # flatten one market

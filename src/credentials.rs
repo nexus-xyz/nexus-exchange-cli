@@ -7,7 +7,9 @@
 //!
 //! The config file holds an API secret and a wallet session token, so it is
 //! created `0600` (owner read/write only) inside a `0700` directory, and the
-//! secret is never echoed while typing or printed back out.
+//! secret is never echoed while typing or printed back out. Writes are atomic
+//! (temp file + `rename`) so a concurrent reader or a crash mid-write can never
+//! observe — or be left with — a truncated, secret-losing config.
 //!
 //! There are two credential paths, both persisted here:
 //!   - the HMAC API key/secret pair (`api_key` + `api_secret`), used to sign
@@ -97,7 +99,7 @@ pub fn save(cfg: &FileConfig) -> Result<PathBuf> {
     harden_dir(dir)?;
 
     let json = serde_json::to_string_pretty(cfg).expect("FileConfig is always serializable");
-    write_private(&path, json.as_bytes())
+    write_private_atomic(&path, json.as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
@@ -110,6 +112,70 @@ pub fn save_session_token(token: &str) -> Result<PathBuf> {
     let mut cfg = load()?.unwrap_or_default();
     cfg.session_token = Some(token.to_string());
     save(&cfg)
+}
+
+/// Atomically write `bytes` to `path` with owner-only permissions (`0600`).
+///
+/// The bytes are written to a fresh sibling temp file (created `0600`), flushed
+/// to disk, then `rename`d over `path`. Because a same-directory rename is
+/// atomic on POSIX, this closes three hazards on the credential file (which
+/// holds the API secret and the wallet session token):
+///
+///   - **Torn reads.** Another `nexus` process calling [`load`] while `auth
+///     login`/`setup` writes always sees either the complete old file or the
+///     complete new one — never the empty/partial file a plain truncate-then-
+///     write briefly exposes (which would surface as a spurious "not valid
+///     JSON" failure on an authenticated command).
+///   - **Crash corruption.** A crash/interrupt mid-write leaves the untouched
+///     old file in place rather than a truncated one, so a stored secret/token
+///     can't be silently lost.
+///   - **Interleaved writers.** Two concurrent writers each stage their own
+///     uniquely-named temp file, so they resolve to a clean last-writer-wins at
+///     file granularity instead of interleaving into a corrupt file.
+///
+/// The temp file gets a unique name from two parts: the **pid** keeps
+/// concurrent writers in *different* processes apart (the counter resets to 0
+/// each run, so pid is what guarantees cross-process uniqueness), and a
+/// **process-local counter** keeps concurrent writers *within* one process
+/// apart. Either way no two concurrent writers share a temp file, and it is
+/// removed on any failure so a partial temp file is not left behind.
+fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path has no parent directory",
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.json");
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
+
+    // Stage the full contents in the temp file (created 0600, flushed to disk),
+    // cleaning it up if anything fails so no partial temp file lingers.
+    if let Err(e) = write_private(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // Atomically swap it into place; drop the temp file if the rename fails.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // Best-effort durability (Unix only): flush the directory entry so the
+    // rename survives a crash. Non-fatal, and the crash-durability guarantee is
+    // therefore Unix-bound — but the rename is already atomic for concurrent
+    // readers on every platform, so a torn read can't happen anywhere.
+    #[cfg(unix)]
+    if let Ok(dir_handle) = std::fs::File::open(dir) {
+        let _ = dir_handle.sync_all();
+    }
+    Ok(())
 }
 
 /// Write `bytes` to `path`, ensuring the file is owner-read/write only (`0600`).
@@ -455,6 +521,73 @@ mod tests {
         assert_eq!(loaded.session_token.as_deref(), Some("sess_tok_xyz789"));
         assert_eq!(loaded.api_key.as_deref(), Some("nx_key"));
         assert_eq!(loaded.api_secret.as_deref(), Some("secret"));
+    }
+
+    /// An atomic write leaves only the config file behind — no `.tmp` sibling.
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("no-temp");
+        let path = save_session_token("tok").unwrap();
+        let dir = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp file(s) left behind: {leftovers:?}"
+        );
+    }
+
+    /// Concurrent writers and a reader must never see a torn/partial config: the
+    /// temp-file + atomic-rename write path guarantees every `load()` observes a
+    /// complete, parseable file (the old one or a new one), never a truncated
+    /// one. A plain truncate-then-write would intermittently fail the reader
+    /// with "not valid JSON".
+    #[test]
+    fn concurrent_saves_never_produce_a_torn_read() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("concurrent");
+        // Seed a valid file so the reader always has something to parse.
+        save_session_token("seed").unwrap();
+
+        let writers: Vec<_> = (0..4)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    for n in 0..40 {
+                        save_session_token(&format!("tok-{i}-{n}")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let reader = std::thread::spawn(|| {
+            for _ in 0..400 {
+                // A torn/truncated file would make this parse fail.
+                load().expect("config must never be observed torn/partial");
+            }
+        });
+
+        for w in writers {
+            w.join().unwrap();
+        }
+        reader.join().unwrap();
+
+        // A valid config remains and no temp files linger.
+        let cfg = load().unwrap().expect("config should be present");
+        assert!(cfg.session_token.is_some());
+        let dir = config_path().unwrap().parent().unwrap().to_path_buf();
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(
+            leftovers, 0,
+            "temp files left behind after concurrent saves"
+        );
     }
 
     #[test]
