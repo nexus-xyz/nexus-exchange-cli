@@ -108,6 +108,9 @@ fn ahead_of_spec_ops_are_not_in_endpoints_txt() {
         ("GET", "/funding-payments"),
         ("POST", "/transfers"),
         ("GET", "/sub-accounts"),
+        ("POST", "/orders/batch-cancel"),
+        ("GET", "/orders/by-client-id/{client_order_id}"),
+        ("DELETE", "/orders/by-client-id/{client_order_id}"),
     ] {
         assert!(
             !ops.contains(&(absent.0.to_string(), absent.1.to_string())),
@@ -128,6 +131,7 @@ fn examples_exist_and_reference_the_binary() {
         "examples/trading.sh",
         "examples/keys_and_agents.sh",
         "examples/streaming.sh",
+        "examples/north_star.sh",
     ] {
         let body = read(f);
         assert!(!body.trim().is_empty(), "{f} is empty");

@@ -79,6 +79,9 @@ METHOD_OP = {
     "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
     "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
     "health_check": ("GET", "/health"),  # no /api/v1 variant yet
+    # ADL reads (HMAC-gated server-side despite the market scope)
+    "fetch_market_adl_events": ("GET", "/markets/{market_id}/adl-events"),  # no /api/v1 variant yet
+    "fetch_account_adl_history": ("GET", "/account/{address}/adl-history"),  # no /api/v1 variant yet
     # authenticated account (read)
     "fetch_balance": ("GET", "/api/v1/account"),
     "fetch_positions": ("GET", "/api/v1/positions"),
@@ -94,6 +97,9 @@ METHOD_OP = {
     "create_orders": ("POST", "/api/v1/orders/batch"),
     "cancel_order": ("DELETE", "/api/v1/orders/{order_id}"),
     "cancel_all_orders": ("DELETE", "/api/v1/orders"),
+    # Per-market flatten: the same DELETE-orders op as cancel_all_orders, scoped
+    # by a `market_id` query parameter (queries don't change the spec op).
+    "cancel_orders_for_market": ("DELETE", "/api/v1/orders"),
     "deposit": ("POST", "/account/deposit"),  # no /api/v1 variant yet
     "claim_credit": ("POST", "/api/v1/account/credit"),
     "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
@@ -110,6 +116,9 @@ METHOD_OP = {
     "fetch_transfers": ("GET", "/transfers"),
     "create_sub_account": ("POST", "/sub-accounts"),
     "fetch_sub_accounts": ("GET", "/sub-accounts"),
+    "cancel_orders": ("POST", "/orders/batch-cancel"),
+    "fetch_order_by_client_id": ("GET", "/orders/by-client-id/{client_order_id}"),
+    "cancel_order_by_client_id": ("DELETE", "/orders/by-client-id/{client_order_id}"),
 }
 
 # Called by a command but intentionally absent from endpoints.txt: these ops are
@@ -125,6 +134,9 @@ CODE_ONLY_OPS = {
     ("GET", "/transfers"),               # transfers list -> fetch_transfers
     ("POST", "/sub-accounts"),           # sub-accounts create -> create_sub_account
     ("GET", "/sub-accounts"),            # sub-accounts list -> fetch_sub_accounts
+    ("POST", "/orders/batch-cancel"),    # order cancel-batch -> cancel_orders
+    ("GET", "/orders/by-client-id/{}"),  # order get-by-client-id -> fetch_order_by_client_id
+    ("DELETE", "/orders/by-client-id/{}"),  # order cancel-by-client-id -> cancel_order_by_client_id
 }
 
 # Listed in endpoints.txt but reached WITHOUT a named SDK REST method call, so the
@@ -139,8 +151,6 @@ NON_REST_TARGETS = {
 # here so the exclusion is intentional, not an oversight:
 #   POST /auth/login, POST /agents/register — wallet-signed auth flows owned by a
 #     separate in-flight PR (ENG-4046); their endpoints.txt lines land with it.
-#   GET  /account/{address}/adl-history, GET /markets/{market_id}/adl-events —
-#     ADL history/events; no CLI command yet.
 #   PUT/GET/DELETE /admin/tiers* — admin-only tier management; out of CLI scope.
 #   POST /ws-tokens — deprecated; superseded by POST /ws/token (which we use).
 #   GET  /stream — deprecated SSE stream; superseded by the /ws upgrade.

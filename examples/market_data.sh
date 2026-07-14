@@ -28,8 +28,17 @@ nexus funding-rates "$MARKET" --limit 24   # GET /markets/{id}/funding
 nexus mark-price "$MARKET"                 # GET /markets/{id}/mark-price
 nexus market-status "$MARKET"              # GET /markets/{id}/status
 
+# The same per-market reads also live under the `market` group:
+nexus market summary               # GET /markets/summary
+nexus market status "$MARKET"      # GET /markets/{id}/status
+nexus market mark-price "$MARKET"  # GET /markets/{id}/mark-price
+
 # Indexer health snapshot. Useful as a connectivity check.   GET /health
 nexus health
+
+# ADL settlement events for a market (auto-deleveraging history). The one
+# market-scoped read that needs credentials — the endpoint is HMAC-gated.
+nexus market adl-events "$MARKET" --limit 20   # GET /markets/{id}/adl-events
 
 # Everything above also speaks JSON:
 nexus --output json ticker "$MARKET"

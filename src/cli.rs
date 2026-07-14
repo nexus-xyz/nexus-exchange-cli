@@ -441,6 +441,17 @@ pub enum MarketCommand {
         /// Market identifier, e.g. `BTC-USDX-PERP`.
         market_id: String,
     },
+
+    /// ADL settlement events for a market, most recent first. Unlike the other
+    /// `market` reads, this endpoint is HMAC-gated server-side, so it requires
+    /// credentials.
+    AdlEvents {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Maximum number of events to return (server default 100, max 1000).
+        #[arg(long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -473,21 +484,32 @@ pub enum OrderCommand {
         yes: bool,
     },
 
-    /// Cancel a single order by id (requires `--market`), or all open orders
-    /// with `--all`.
+    /// Cancel a single order by id (requires `--market`), every open order in
+    /// one market with `--market` alone, or all open orders with `--all`.
     Cancel {
         /// Order id to cancel. Requires `--market` (by-id cancels are routed
         /// per market).
         #[arg(requires = "market")]
         order_id: Option<String>,
-        /// Market the order is on, e.g. `BTC-USDX-PERP`. Required when
-        /// cancelling a single order: the engine routes by-id cancels per
-        /// market. Not used with `--all`.
+        /// Market to target, e.g. `BTC-USDX-PERP`. With an order id: the
+        /// market the order is on (required — the engine routes by-id cancels
+        /// per market). Alone: cancel every open order in this market (a
+        /// per-market flatten). Not used with `--all`.
         #[arg(long, conflicts_with = "all")]
         market: Option<String>,
         /// Cancel all open orders.
         #[arg(long, conflicts_with = "order_id")]
         all: bool,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Cancel a batch of orders by id in a single request.
+    CancelBatch {
+        /// Order ids to cancel (at least one).
+        #[arg(required = true, num_args = 1..)]
+        order_ids: Vec<String>,
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
@@ -501,6 +523,21 @@ pub enum OrderCommand {
         /// routes by-id lookups per market.
         #[arg(long)]
         market: String,
+    },
+
+    /// Fetch a single order by its caller-assigned client order id.
+    GetByClientId {
+        /// Client order id assigned at placement (`client_order_id`).
+        client_order_id: String,
+    },
+
+    /// Cancel a single order by its caller-assigned client order id.
+    CancelByClientId {
+        /// Client order id assigned at placement (`client_order_id`).
+        client_order_id: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Amend an open order in place (atomic cancel-replace). Set only the
@@ -575,6 +612,16 @@ pub enum AccountCommand {
         /// Margin mode.
         #[arg(value_enum)]
         mode: MarginModeArg,
+    },
+
+    /// ADL settlement events touching an account, where the address was the
+    /// bankrupt target or a closed counterparty. Most recent first.
+    AdlHistory {
+        /// Account address (`0x`-prefixed).
+        address: String,
+        /// Maximum number of events to return (server default 100, max 1000).
+        #[arg(long)]
+        limit: Option<u32>,
     },
 }
 
@@ -959,6 +1006,124 @@ mod tests {
     }
 
     #[test]
+    fn order_cancel_market_flatten_parses() {
+        // `--market` alone is a per-market flatten. It cannot combine with
+        // `--all` (with a positional id it is a by-id cancel — see
+        // `order_cancel_by_id_requires_market`).
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "cancel",
+            "--all",
+            "--market",
+            "BTC-USDX-PERP"
+        ])
+        .is_err());
+        let cli =
+            Cli::try_parse_from(["nexus", "order", "cancel", "--market", "BTC-USDX-PERP"]).unwrap();
+        match cli.command {
+            Command::Order {
+                action:
+                    OrderCommand::Cancel {
+                        order_id,
+                        market,
+                        all,
+                        ..
+                    },
+            } => {
+                assert_eq!(order_id, None);
+                assert_eq!(market.as_deref(), Some("BTC-USDX-PERP"));
+                assert!(!all);
+            }
+            _ => panic!("expected order cancel --market"),
+        }
+    }
+
+    #[test]
+    fn order_cancel_batch_requires_at_least_one_id() {
+        assert!(Cli::try_parse_from(["nexus", "order", "cancel-batch"]).is_err());
+        let cli = Cli::try_parse_from(["nexus", "order", "cancel-batch", "o1", "o2"]).unwrap();
+        match cli.command {
+            Command::Order {
+                action: OrderCommand::CancelBatch { order_ids, yes },
+            } => {
+                assert_eq!(order_ids, vec!["o1".to_string(), "o2".to_string()]);
+                assert!(!yes);
+            }
+            _ => panic!("expected order cancel-batch"),
+        }
+    }
+
+    #[test]
+    fn order_by_client_id_commands_parse() {
+        let cli = Cli::try_parse_from(["nexus", "order", "get-by-client-id", "ladder-1"]).unwrap();
+        match cli.command {
+            Command::Order {
+                action: OrderCommand::GetByClientId { client_order_id },
+            } => assert_eq!(client_order_id, "ladder-1"),
+            _ => panic!("expected order get-by-client-id"),
+        }
+        let cli =
+            Cli::try_parse_from(["nexus", "order", "cancel-by-client-id", "ladder-1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Order {
+                action: OrderCommand::CancelByClientId { .. }
+            }
+        ));
+        // The client order id is required for both.
+        assert!(Cli::try_parse_from(["nexus", "order", "get-by-client-id"]).is_err());
+        assert!(Cli::try_parse_from(["nexus", "order", "cancel-by-client-id"]).is_err());
+    }
+
+    #[test]
+    fn market_adl_events_parses_with_optional_limit() {
+        let cli = Cli::try_parse_from(["nexus", "market", "adl-events", "BTC-USDX-PERP"]).unwrap();
+        match cli.command {
+            Command::Market {
+                action: MarketCommand::AdlEvents { market_id, limit },
+            } => {
+                assert_eq!(market_id, "BTC-USDX-PERP");
+                assert_eq!(limit, None, "limit defaults to the server default");
+            }
+            _ => panic!("expected market adl-events"),
+        }
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "market",
+            "adl-events",
+            "BTC-USDX-PERP",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Market {
+                action: MarketCommand::AdlEvents { limit, .. },
+            } => assert_eq!(limit, Some(50)),
+            _ => panic!("expected market adl-events"),
+        }
+        // The market id is required.
+        assert!(Cli::try_parse_from(["nexus", "market", "adl-events"]).is_err());
+    }
+
+    #[test]
+    fn account_adl_history_parses() {
+        let cli = Cli::try_parse_from(["nexus", "account", "adl-history", "0xabc"]).unwrap();
+        match cli.command {
+            Command::Account {
+                action: AccountCommand::AdlHistory { address, limit },
+            } => {
+                assert_eq!(address, "0xabc");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("expected account adl-history"),
+        }
+        // The address is required.
+        assert!(Cli::try_parse_from(["nexus", "account", "adl-history"]).is_err());
+    }
+
+    #[test]
     fn ws_requires_at_least_one_channel() {
         assert!(Cli::try_parse_from(["nexus", "ws"]).is_err());
         let cli =
@@ -1283,5 +1448,8 @@ mod tests {
         let help = order.render_long_help().to_string();
         assert!(help.contains("place"));
         assert!(help.contains("cancel"));
+        assert!(help.contains("cancel-batch"));
+        assert!(help.contains("get-by-client-id"));
+        assert!(help.contains("cancel-by-client-id"));
     }
 }
