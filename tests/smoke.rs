@@ -51,11 +51,14 @@ fn ticker_body() -> Value {
     })
 }
 
-/// Spec-shaped `GET /health` body (`HealthStatus`).
+/// Spec-shaped `GET /status` body (`HealthStatus`, v0.7.1): a worst-of
+/// `status`, the snapshot `timestamp_ms`, and an opaque, evolving `services`
+/// object of per-component detail.
 fn health_body() -> Value {
     json!({
-        "health": "ok", "connected": true,
-        "events_received": 7, "fills_total": 3, "uptime_seconds": 42
+        "status": "ok",
+        "timestamp_ms": 1776033900000i64,
+        "services": {"indexer": "ok", "engine": "ok"}
     })
 }
 
@@ -69,15 +72,17 @@ async fn mock_server() -> MockServer {
         .await;
     // The per-market ticker migrated to the direct-indexer `/api/v1` surface
     // (ENG-5190): the SDK now routes it to the host root under `/api/v1`, so the
-    // mock must serve the prefixed path. `markets` (list-all) and `health` have
-    // no `/api/v1` variant yet and stay on the bare gateway paths below.
+    // mock must serve the prefixed path. `markets` (list-all) and the `/status`
+    // health snapshot have no `/api/v1` variant and stay on the bare gateway
+    // paths below.
     Mock::given(method("GET"))
         .and(path("/api/v1/markets/BTC-USDX-PERP/ticker"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ticker_body()))
         .mount(&server)
         .await;
+    // v0.7.1 removed the old `/health` probe; `health_check` now reads `/status`.
     Mock::given(method("GET"))
-        .and(path("/health"))
+        .and(path("/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(health_body()))
         .mount(&server)
         .await;
@@ -175,15 +180,15 @@ async fn ticker_json_output() {
 async fn health_human_output() {
     let server = mock_server().await;
     let out = stdout_of(nexus(&server.uri(), &["health"])).await;
-    assert!(out.contains("health"), "missing health label:\n{out}");
-    assert!(out.contains("ok"), "missing health value:\n{out}");
-    assert!(out.contains("connected"), "missing connected label:\n{out}");
-    assert!(out.contains("true"), "missing connected value:\n{out}");
+    assert!(out.contains("status"), "missing status label:\n{out}");
+    assert!(out.contains("ok"), "missing status value:\n{out}");
     assert!(
-        out.contains("events received"),
-        "missing events label:\n{out}"
+        out.contains("timestamp (ms)"),
+        "missing timestamp label:\n{out}"
     );
-    assert!(out.contains('7'), "missing events value:\n{out}");
+    assert!(out.contains("1776033900000"), "missing timestamp:\n{out}");
+    assert!(out.contains("services"), "missing services label:\n{out}");
+    assert!(out.contains("indexer"), "missing services detail:\n{out}");
 }
 
 #[tokio::test]
@@ -191,11 +196,10 @@ async fn health_json_output() {
     let server = mock_server().await;
     let out = stdout_of(nexus(&server.uri(), &["--output", "json", "health"])).await;
     let v: Value = serde_json::from_str(&out).expect("stdout is valid JSON");
-    assert_eq!(v["health"], json!("ok"));
-    assert_eq!(v["connected"], json!(true));
-    assert_eq!(v["events_received"], json!(7));
-    assert_eq!(v["fills_total"], json!(3));
-    assert_eq!(v["uptime_seconds"], json!(42));
+    assert_eq!(v["status"], json!("ok"));
+    assert_eq!(v["timestamp_ms"], json!(1776033900000i64));
+    assert_eq!(v["services"]["indexer"], json!("ok"));
+    assert_eq!(v["services"]["engine"], json!("ok"));
 }
 
 /// The output mode also resolves from `NEXUS_OUTPUT`, not just the flag — the
@@ -214,5 +218,77 @@ async fn output_mode_resolves_from_env() {
         .arg("health");
     let out = stdout_of(cmd).await;
     let v: Value = serde_json::from_str(&out).expect("NEXUS_OUTPUT=json yields JSON");
-    assert_eq!(v["health"], json!("ok"));
+    assert_eq!(v["status"], json!("ok"));
+}
+
+/// ENG-6039 / ENG-5958: the CLI carries no transport of its own — every request
+/// rides the rs SDK's `Client`, which sends `X-Nexus-Api-Version` (the pinned
+/// spec tag) on every request plus a normalized `User-Agent`. The CLI overrides
+/// the UA to identify itself as `nexus-cli/<version>` (so edge metering can
+/// segment CLI traffic) and must NOT strip or clobber the inherited spec-version
+/// header. Capture a real request off the wire and assert both headers, rather
+/// than trusting inheritance.
+#[tokio::test]
+async fn emits_api_version_and_user_agent_headers() {
+    let server = mock_server().await;
+    // Any request exercises the shared transport; `markets` is public and needs
+    // no credentials, so this stays offline and deterministic.
+    let _ = stdout_of(nexus(&server.uri(), &["markets"])).await;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock records requests by default");
+    let req = requests.first().expect("the CLI issued a request");
+
+    // Spec tag: inherited from the SDK, which pins the same spec the CLI is
+    // compiled against. Assert it equals our own `.api-version` so a future SDK
+    // whose pinned tag drifts from the CLI's would trip this test.
+    let spec_tag = include_str!("../.api-version").trim();
+    let sent_tag = req
+        .headers
+        .get("x-nexus-api-version")
+        .expect("X-Nexus-Api-Version present (inherited from the SDK)")
+        .to_str()
+        .expect("header value is valid UTF-8");
+    assert_eq!(
+        sent_tag, spec_tag,
+        "emitted spec tag must match the compiled `.api-version` pin"
+    );
+
+    // User-Agent: the CLI's own identifier, neither dropped nor left as the SDK
+    // default. Mirrors the crate version baked into `nexus --version`.
+    let expected_ua = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
+    let sent_ua = req
+        .headers
+        .get("user-agent")
+        .expect("User-Agent present")
+        .to_str()
+        .expect("header value is valid UTF-8");
+    assert_eq!(
+        sent_ua, expected_ua,
+        "the CLI must identify itself in the User-Agent"
+    );
+}
+
+/// ENG-6039 acceptance: `nexus --version` surfaces the compiled-against spec tag
+/// (the same tag emitted as `X-Nexus-Api-Version`) alongside the crate and SDK
+/// versions. `--version` short-circuits before any request, so no server needed.
+#[test]
+fn version_reports_spec_tag_and_sdk() {
+    let output = Command::cargo_bin("nexus")
+        .expect("`nexus` binary builds")
+        .arg("--version")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).expect("stdout is utf-8");
+    let spec_tag = include_str!("../.api-version").trim();
+    assert!(
+        stdout.contains(spec_tag),
+        "version output missing spec tag {spec_tag}:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("nexus-exchange"),
+        "version output missing SDK version:\n{stdout}"
+    );
 }

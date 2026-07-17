@@ -19,9 +19,25 @@ pub use clap_complete::Shell;
 /// bytes illegal in a header.
 const USER_AGENT: &str = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
 
+/// Version string for `nexus --version` / `-V`: the CLI crate version, the spec
+/// tag the CLI is compiled against, and the resolved `nexus-exchange` SDK
+/// version it links. The CLI carries no transport of its own — it speaks the
+/// API through the SDK — so surfacing all three makes it clear which spec the
+/// CLI targets (the same tag the SDK sends as `X-Nexus-Api-Version`) and which
+/// SDK build backs it. The spec tag and SDK version are injected at build time
+/// by `build.rs` (from `.api-version` and `Cargo.lock`), so they can't drift.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (spec ",
+    env!("NEXUS_SPEC_TAG"),
+    ", nexus-exchange ",
+    env!("NEXUS_SDK_VERSION"),
+    ")"
+);
+
 /// Command-line interface for the Nexus Exchange API.
 #[derive(Debug, Parser)]
-#[command(name = "nexus", version, about, long_about = None)]
+#[command(name = "nexus", version = LONG_VERSION, about, long_about = None)]
 pub struct Cli {
     /// Which network to target (default: stable, or the `nexus setup` value).
     #[arg(long, value_enum, global = true, env = "NEXUS_NETWORK")]
@@ -325,7 +341,7 @@ pub enum Command {
         limit: u32,
     },
 
-    /// Show the indexer health/status snapshot.
+    /// Show the aggregate service health snapshot (`GET /status`).
     Health,
 
     /// Show your account summary (balance, collateral, equity, margin).
