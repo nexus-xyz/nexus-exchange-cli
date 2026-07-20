@@ -188,6 +188,9 @@ pub fn ticker_json(t: &Ticker) -> String {
 /// timestamp, and append the raw `services` payload (compact JSON) when the
 /// server includes it, without assuming its shape.
 pub fn health(h: &HealthStatus) -> String {
+    // Friendly substitution for the human view only: an empty/slim payload reads
+    // as "unknown" here, while `health_json` deliberately passes the raw value
+    // through verbatim so scripts see exactly what the server sent.
     let status = if h.status.is_empty() {
         "unknown"
     } else {
@@ -207,7 +210,9 @@ pub fn health(h: &HealthStatus) -> String {
 }
 
 /// Render the health snapshot as pretty JSON, passing the `GET /status` shape
-/// through verbatim (`status`, `timestamp_ms`, and the opaque `services`).
+/// through verbatim (`status`, `timestamp_ms`, and the opaque `services`) — no
+/// `""`→`"unknown"` substitution, unlike the human [`health`] renderer, so the
+/// machine-readable view stays faithful to the wire.
 pub fn health_json(h: &HealthStatus) -> String {
     let value = json!({
         "status": h.status,

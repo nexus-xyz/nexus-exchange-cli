@@ -42,18 +42,27 @@ fn main() {
 /// precedes `version`. We match the name exactly so neither our own
 /// `nexus-exchange-cli` crate nor any `nexus-exchange-*` sibling is mistaken
 /// for the SDK, and return the first matching table's version.
+///
+/// Keys are parsed as `key = value` split on the first `=` and trimmed, rather
+/// than by a fixed `"name = "` prefix, so the scan tolerates any spacing Cargo
+/// might write. Lines without `=` (table headers, `dependencies` entries) are
+/// skipped, and only `name`/`version` are acted on.
 fn sdk_version_from_lock(lock: &str) -> Option<String> {
     let mut in_target = false;
     for line in lock.lines() {
         let line = line.trim();
         if line == "[[package]]" {
             in_target = false;
-        } else if let Some(name) = line.strip_prefix("name = ") {
-            in_target = name.trim_matches('"') == "nexus-exchange";
-        } else if in_target {
-            if let Some(version) = line.strip_prefix("version = ") {
-                return Some(version.trim_matches('"').to_string());
-            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        match key.trim() {
+            "name" => in_target = value == "nexus-exchange",
+            "version" if in_target => return Some(value.to_string()),
+            _ => {}
         }
     }
     None
