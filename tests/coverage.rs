@@ -82,7 +82,7 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
         ("DELETE", "/api/v1/orders/{order_id}"),
         // No /api/v1 variant yet — still on the gateway root:
         ("GET", "/markets"),
-        ("GET", "/health"),
+        ("GET", "/status"),
         ("GET", "/keys"),
         ("GET", "/ws"),
         ("POST", "/ws/token"),

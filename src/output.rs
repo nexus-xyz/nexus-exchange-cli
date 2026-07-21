@@ -180,31 +180,44 @@ pub fn ticker_json(t: &Ticker) -> String {
 // ───────────────────────── health ─────────────────────────
 
 /// Render the health snapshot as aligned key/value lines.
+///
+/// The v0.7.1 spec replaced the old `/health` liveness probe with the aggregate
+/// `GET /status` snapshot: a worst-of `status` (`ok`/`degraded`/`down`/
+/// `starting`), the `timestamp_ms` it was taken, and a free-form, evolving
+/// `services` object of per-component detail. We surface the status and
+/// timestamp, and append the raw `services` payload (compact JSON) when the
+/// server includes it, without assuming its shape.
 pub fn health(h: &HealthStatus) -> String {
-    let rows = [
-        (
-            "health",
-            h.health.clone().unwrap_or_else(|| "unknown".into()),
-        ),
-        ("connected", h.connected.to_string()),
-        ("events received", h.events_received.to_string()),
-        ("fills total", h.fills_total.to_string()),
-        ("uptime (s)", h.uptime_seconds.to_string()),
+    // Friendly substitution for the human view only: an empty/slim payload reads
+    // as "unknown" here, while `health_json` deliberately passes the raw value
+    // through verbatim so scripts see exactly what the server sent.
+    let status = if h.status.is_empty() {
+        "unknown"
+    } else {
+        h.status.as_str()
+    };
+    let mut rows = vec![
+        ("status", status.to_string()),
+        ("timestamp (ms)", h.timestamp_ms.to_string()),
     ];
+    if !h.services.is_null() {
+        rows.push(("services", h.services.to_string()));
+    }
     rows.iter()
         .map(|(k, v)| format!("{k:<18}{v}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Render the health snapshot as pretty JSON.
+/// Render the health snapshot as pretty JSON, passing the `GET /status` shape
+/// through verbatim (`status`, `timestamp_ms`, and the opaque `services`) — no
+/// `""`→`"unknown"` substitution, unlike the human [`health`] renderer, so the
+/// machine-readable view stays faithful to the wire.
 pub fn health_json(h: &HealthStatus) -> String {
     let value = json!({
-        "health": h.health.clone().unwrap_or_else(|| "unknown".into()),
-        "connected": h.connected,
-        "events_received": h.events_received,
-        "fills_total": h.fills_total,
-        "uptime_seconds": h.uptime_seconds,
+        "status": h.status,
+        "timestamp_ms": h.timestamp_ms,
+        "services": h.services,
     });
     pretty(&value)
 }
@@ -1308,29 +1321,28 @@ mod tests {
     }
 
     #[test]
-    fn health_json_shape_and_unknown_default() {
+    fn health_json_shape_and_defaults() {
+        // A full `GET /status` snapshot round-trips its three fields verbatim.
         let health: HealthStatus = serde_json::from_value(json!({
-            "events_received": 7,
-            "fills_total": 3,
-            "uptime_seconds": 42,
-            "connected": true
+            "status": "degraded",
+            "timestamp_ms": 1776033900000i64,
+            "services": {"indexer": "ok", "engine": "degraded"}
         }))
         .unwrap();
 
         let v: Value = serde_json::from_str(&health_json(&health)).unwrap();
-        assert_eq!(
-            keys(&v),
-            [
-                "connected",
-                "events_received",
-                "fills_total",
-                "health",
-                "uptime_seconds",
-            ]
-        );
-        assert_eq!(v["health"], json!("unknown"));
-        assert_eq!(v["connected"], json!(true));
-        assert_eq!(v["events_received"], json!(7));
+        assert_eq!(keys(&v), ["services", "status", "timestamp_ms"]);
+        assert_eq!(v["status"], json!("degraded"));
+        assert_eq!(v["timestamp_ms"], json!(1776033900000i64));
+        assert_eq!(v["services"]["engine"], json!("degraded"));
+
+        // Every field defaults (serde `default`) when the server omits it, so a
+        // slim payload still decodes and renders rather than erroring.
+        let empty: HealthStatus = serde_json::from_value(json!({})).unwrap();
+        let v: Value = serde_json::from_str(&health_json(&empty)).unwrap();
+        assert_eq!(v["status"], json!(""));
+        assert_eq!(v["timestamp_ms"], json!(0));
+        assert_eq!(v["services"], Value::Null);
     }
 
     #[test]
@@ -1563,14 +1575,21 @@ mod tests {
         assert!(t.contains("bid           -"));
 
         let health_v: HealthStatus = serde_json::from_value(json!({
-            "events_received": 7, "fills_total": 3, "uptime_seconds": 42,
-            "connected": true
+            "status": "ok", "timestamp_ms": 1776033900000i64,
+            "services": {"indexer": "ok"}
         }))
         .unwrap();
         let h = health(&health_v);
-        assert!(h.contains("connected") && h.contains("true"));
-        // Missing `health` field defaults to "unknown".
+        assert!(h.contains("status") && h.contains("ok"));
+        assert!(h.contains("timestamp (ms)") && h.contains("1776033900000"));
+        // The opaque `services` payload rides through as compact JSON.
+        assert!(h.contains("services") && h.contains("indexer"));
+
+        // Missing `status` renders as "unknown"; absent `services` is omitted.
+        let empty: HealthStatus = serde_json::from_value(json!({})).unwrap();
+        let h = health(&empty);
         assert!(h.contains("unknown"));
+        assert!(!h.contains("services"));
     }
 
     // ───────────────────────── remaining JSON renderers ─────────────────────────

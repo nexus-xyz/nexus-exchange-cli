@@ -20,7 +20,7 @@ credentials from `nexus setup`, from `--api-key`/`--api-secret`, or from the
 
 | Example | Flow | Spec ops exercised |
 | --- | --- | --- |
-| [`market_data.sh`](./market_data.sh) | Browse markets, tickers, book, trades, candles, funding, mark price, status, health | `GET /markets`, `/tickers`, `/markets/{id}/{ticker,orderbook,trades,candles,funding,mark-price,status}`, `/markets/summary`, `/health` |
+| [`market_data.sh`](./market_data.sh) | Browse markets, tickers, book, trades, candles, funding, mark price, status, health | `GET /markets`, `/tickers`, `/markets/{id}/{ticker,orderbook,trades,candles,funding,mark-price,status}`, `/markets/summary`, `/status` |
 | [`account.sh`](./account.sh) | Inspect a funded account: balance, positions, fills, open orders, withdrawals, rate limit | `GET /account`, `/positions`, `/fills`, `/orders`, `/withdrawals`, `/account/rate-limit` |
 | [`trading.sh`](./trading.sh) | Place, fetch, amend, batch, and cancel orders | `POST /orders`, `/orders/batch`, `GET /orders/{id}`, `PUT /orders/{id}`, `DELETE /orders/{id}`, `DELETE /orders` |
 | [`keys_and_agents.sh`](./keys_and_agents.sh) | Manage HMAC API keys and registered agent keys | `GET/POST /keys`, `DELETE /keys/{id}`, `GET /agents`, `DELETE /agents/{address}` |

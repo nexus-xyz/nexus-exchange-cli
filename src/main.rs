@@ -461,12 +461,15 @@ async fn handle_order(
                 eprintln!("aborted.");
                 return Ok(());
             }
+            // v0.7.1 decodes the amend response as a bare `Order` (the updated
+            // order state), not an `OrderResponse` with fills (ENG-5947), so we
+            // render it with the single-order view rather than `order_result`.
             let result = client
                 .amend_order(&order_id, &market, &amend)
                 .await
                 .with_context(|| format!("failed to amend order {order_id}"))?;
-            emit(format, output::order_result(&result), || {
-                output::order_result_json(&result)
+            emit(format, output::order_detail(&result), || {
+                output::order_detail_json(&result)
             });
         }
 

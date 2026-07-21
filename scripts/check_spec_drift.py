@@ -78,7 +78,7 @@ METHOD_OP = {
     "fetch_funding_rate_history": ("GET", "/api/v1/markets/{market_id}/funding"),
     "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
     "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
-    "health_check": ("GET", "/health"),  # no /api/v1 variant yet
+    "health_check": ("GET", "/status"),  # v0.7.1 replaced /health with /status
     # authenticated account (read)
     "fetch_balance": ("GET", "/api/v1/account"),
     "fetch_positions": ("GET", "/api/v1/positions"),

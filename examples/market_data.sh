@@ -28,7 +28,7 @@ nexus funding-rates "$MARKET" --limit 24   # GET /markets/{id}/funding
 nexus mark-price "$MARKET"                 # GET /markets/{id}/mark-price
 nexus market-status "$MARKET"              # GET /markets/{id}/status
 
-# Indexer health snapshot. Useful as a connectivity check.   GET /health
+# Service health snapshot. Useful as a connectivity check.   GET /status
 nexus health
 
 # Everything above also speaks JSON:
