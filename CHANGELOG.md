@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.3.0...v1.0.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** `nexus order get`, `nexus order cancel <ORDER_ID>`, and `nexus order amend` now require `--market <MARKET>`, because the exchange routes single-order-by-id requests per market. `nexus order cancel --all` is unchanged.
+
+### Features
+
+* **cli:** bump spec to v0.7.1 via nexus-exchange 0.6.0; surface spec tag in `nexus --version` (ENG-6039) ([#43](https://github.com/nexus-xyz/nexus-exchange-cli/issues/43)) ([7b3a6ad](https://github.com/nexus-xyz/nexus-exchange-cli/commit/7b3a6ad7e71dcc3c924f8b65d6675b8de5300fa1))
+* **cli:** flip runtime routing to /api/v1 via nexus-exchange 0.5.1 (ENG-5190) ([#37](https://github.com/nexus-xyz/nexus-exchange-cli/issues/37)) ([2c78e3b](https://github.com/nexus-xyz/nexus-exchange-cli/commit/2c78e3bf0498c0adb73c5ab8949d5cbbfb9b8dc8))
+* **cli:** target the /api/v1 direct-indexer surface (ENG-4949) ([#34](https://github.com/nexus-xyz/nexus-exchange-cli/issues/34)) ([4dd59c6](https://github.com/nexus-xyz/nexus-exchange-cli/commit/4dd59c6899ebfc63048debc3293fd3ed0c043ad5))
+
+
+### Bug Fixes
+
+* **cli:** atomic credential-file writes for safe auth persistence (ENG-3816) ([#40](https://github.com/nexus-xyz/nexus-exchange-cli/issues/40)) ([43a2455](https://github.com/nexus-xyz/nexus-exchange-cli/commit/43a24556e1da20a2d73b81a5b1b6d5221dfd4cf3))
+
 ## [0.3.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.2.0...v0.3.0) (2026-07-06)
 
 
