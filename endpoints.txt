@@ -52,7 +52,7 @@ GET /api/v1/markets/{market_id}/mark-price
 GET /api/v1/markets/{market_id}/status
 # No /api/v1 variant yet — stay on the /api/exchange gateway (dual-stack):
 GET /markets
-GET /health
+GET /status
 
 # ── authenticated account (read) ──
 # Migrated to /api/v1:

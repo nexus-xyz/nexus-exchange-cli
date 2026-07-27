@@ -20,7 +20,7 @@ credentials from `nexus setup`, from `--api-key`/`--api-secret`, or from the
 
 | Example | Flow | Spec ops exercised |
 | --- | --- | --- |
-| [`market_data.sh`](./market_data.sh) | Browse markets, tickers, book, trades, candles, funding, mark price, status, ADL events, health | `GET /markets`, `/tickers`, `/markets/{id}/{ticker,orderbook,trades,candles,funding,mark-price,status,adl-events}`, `/markets/summary`, `/health` |
+| [`market_data.sh`](./market_data.sh) | Browse markets, tickers, book, trades, candles, funding, mark price, status, ADL events, service status | `GET /markets`, `/tickers`, `/markets/{id}/{ticker,orderbook,trades,candles,funding,mark-price,status,adl-events}`, `/markets/summary`, `/status` |
 | [`account.sh`](./account.sh) | Inspect a funded account: balance, positions, fills, open orders, withdrawals, funding payments, transfers, sub-accounts, ADL history, rate limit | `GET /account`, `/positions`, `/fills`, `/orders`, `/withdrawals`, `/funding-payments`, `/transfers`, `/sub-accounts`, `/account/{address}/adl-history`, `/account/rate-limit` |
 | [`trading.sh`](./trading.sh) | Full order lifecycle: place, fetch (by id / client id), amend, batch, and every cancel variant (one, by client id, batch, per-market, all) | `POST /orders`, `/orders/batch`, `/orders/batch-cancel`, `GET /orders/{id}`, `/orders/by-client-id/{id}`, `PUT /orders/{id}`, `DELETE /orders/{id}`, `/orders/by-client-id/{id}`, `DELETE /orders` |
 | [`keys_and_agents.sh`](./keys_and_agents.sh) | Onboarding: wallet sign-in → HMAC API-key management → agent registration and revocation | `POST /auth/login`, `GET/POST /keys`, `DELETE /keys/{id}`, `POST /agents/register`, `GET /agents`, `DELETE /agents/{address}` |

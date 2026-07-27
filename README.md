@@ -448,9 +448,9 @@ surface so the two move together.
 ### API coverage
 
 The CLI targets a specific released version of the Exchange API spec, pinned in
-[`.api-version`](./.api-version) (`v0.6.2`, the release that adds the `/api/v1`
-surface, matching the wrapped
-[`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK).
+[`.api-version`](./.api-version) (`v0.7.1`, matching the wrapped
+[`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK, which
+pins and sends the same tag as `X-Nexus-Api-Version` on every request).
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
 verifies — in the `spec-drift` CI workflow — that:
@@ -462,10 +462,13 @@ verifies — in the `spec-drift` CI workflow — that:
   script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **33 of 85** spec operations (**38.8%**). The denominator jumped with
-the `/api/v1` release because the spec now carries both stacks (gateway +
-`/api/v1`) plus the admin/stats surfaces the CLI does not target. Run it locally
-with a fetched spec:
+exercises **33 of 92** spec operations (**35.9%**) — measured by running the
+check against the pinned `v0.7.1` spec after merging `main`, not carried over
+from either side. The numerator is 33 because this branch adds command surface;
+the denominator is 92 because the spec carries both stacks (gateway + `/api/v1`)
+plus the admin/stats surfaces the CLI does not target, and grew again in `v0.7.1`
+with the bridge, cancel-on-disconnect, and stats endpoints the CLI does not yet
+expose. Run it locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json

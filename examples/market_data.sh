@@ -33,7 +33,7 @@ nexus market summary               # GET /markets/summary
 nexus market status "$MARKET"      # GET /markets/{id}/status
 nexus market mark-price "$MARKET"  # GET /markets/{id}/mark-price
 
-# Indexer health snapshot. Useful as a connectivity check.   GET /health
+# Service health snapshot. Useful as a connectivity check.   GET /status
 nexus health
 
 # ADL settlement events for a market (auto-deleveraging history). The one
