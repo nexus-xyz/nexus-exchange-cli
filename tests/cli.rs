@@ -470,3 +470,86 @@ fn batch_orders_example_parses_and_routes() {
         "example should parse and route to the batch submit, got: {stderr}"
     );
 }
+
+/// `--tif post-only` must be accepted.
+///
+/// Post-only is a *time-in-force* on this API (`TimeInForce::PostOnly`), not a
+/// boolean flag, and the SDK has carried it for a while — but `TifArg` listed
+/// only gtc/ioc/fok, so the CLI was the one client that could not express it.
+/// That reads as "the venue has no post-only" from the command line, which is
+/// wrong: the spec's `OrderRequest.time_in_force` enum and the engine's
+/// `TimeInForce` both include it.
+///
+/// Asserted through argument parsing rather than a live order: reaching the
+/// credentials gate proves clap accepted the value and dispatch routed on it.
+#[test]
+fn tif_accepts_post_only() {
+    let out = bin()
+        .args([
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "sell",
+            "--type",
+            "limit",
+            "--price",
+            "84000",
+            "--quantity",
+            "0.01",
+            "--tif",
+            "post-only",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("invalid value"),
+        "`--tif post-only` must parse; got: {stderr}"
+    );
+    // Hermetic env means no credentials, so the authenticated-command gate is
+    // the expected stopping point — it proves parsing succeeded.
+    assert!(
+        stderr.contains("no credentials are configured"),
+        "expected the credentials gate after successful parse; got: {stderr}"
+    );
+}
+
+/// The full accepted set, so dropping a variant is a test failure rather than a
+/// silently narrower CLI.
+#[test]
+fn tif_rejects_an_unknown_value_and_lists_every_supported_one() {
+    let out = bin()
+        .args([
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "sell",
+            "--type",
+            "limit",
+            "--price",
+            "84000",
+            "--quantity",
+            "0.01",
+            "--tif",
+            "not-a-tif",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value 'not-a-tif'"),
+        "got: {stderr}"
+    );
+    for expected in ["gtc", "ioc", "fok", "post-only"] {
+        assert!(
+            stderr.contains(expected),
+            "the error should list `{expected}` as supported; got: {stderr}"
+        );
+    }
+}
