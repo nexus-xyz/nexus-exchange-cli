@@ -7,9 +7,9 @@
 
 use nexus_exchange::types::{
     AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment,
-    FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus,
-    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult, Position, PriceLevel,
-    RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    FundingSample, HealthStatus, LeverageUpdate, MarkPrice, Market, MarketStatus, MarketSummary,
+    Ohlcv, Order, OrderBook, OrderResponse, OrderResult, Position, PriceLevel, RateLimitStatus,
+    Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -1064,7 +1064,7 @@ pub fn rate_limit_json(r: &RateLimitStatus) -> String {
     }))
 }
 
-// ───────────────────────── leverage / margin mode ─────────────────────────
+// ───────────────────────── leverage ─────────────────────────
 
 pub fn leverage(l: &LeverageUpdate) -> String {
     format!(
@@ -1077,19 +1077,9 @@ pub fn leverage_json(l: &LeverageUpdate) -> String {
     pretty(&json!({ "market_id": l.market_id, "leverage": l.leverage }))
 }
 
-pub fn margin_mode(m: &MarginModeUpdate) -> String {
-    format!(
-        "{:<14}{}\n{:<14}{:?}",
-        "market", m.market_id, "margin mode", m.margin_mode
-    )
-}
-
-pub fn margin_mode_json(m: &MarginModeUpdate) -> String {
-    pretty(&json!({
-        "market_id": m.market_id,
-        "margin_mode": format!("{:?}", m.margin_mode),
-    }))
-}
+// The `margin_mode` / `margin_mode_json` renderers were removed with the
+// `account margin-mode` subcommand in ENG-7740 — nothing rendered
+// `MarginModeUpdate` once the command went away. ENG-7614 gates its return.
 
 // ───────────────────────── withdrawals / transfers / sub-accounts ─────────────────────────
 

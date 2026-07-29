@@ -501,6 +501,12 @@ async fn handle_order(
 }
 
 /// Handle the `nexus account` subcommands.
+///
+/// There is deliberately no `margin-mode` arm. The SDK still exposes
+/// `set_margin_mode`, but it targets `POST /account/margin-mode` — a path no spec
+/// version defines and no service routes — so the command could only ever fail.
+/// It was withdrawn in ENG-7740; ENG-7614 tracks the engine work that has to land
+/// before it can return.
 async fn handle_account(
     client: &Client,
     authenticated: bool,
@@ -555,16 +561,6 @@ async fn handle_account(
                 .with_context(|| format!("failed to set leverage for {market_id}"))?;
             emit(format, output::leverage(&result), || {
                 output::leverage_json(&result)
-            });
-        }
-        AccountCommand::MarginMode { market_id, mode } => {
-            require_authenticated(authenticated, "account margin-mode")?;
-            let result = client
-                .set_margin_mode(&market_id, mode.into())
-                .await
-                .with_context(|| format!("failed to set margin mode for {market_id}"))?;
-            emit(format, output::margin_mode(&result), || {
-                output::margin_mode_json(&result)
             });
         }
     }

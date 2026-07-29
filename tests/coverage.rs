@@ -104,7 +104,6 @@ fn ahead_of_spec_ops_are_not_in_endpoints_txt() {
     for absent in [
         ("PUT", "/orders/{order_id}"), // amend
         ("POST", "/account/leverage"),
-        ("POST", "/account/margin-mode"),
         ("GET", "/funding-payments"),
         ("POST", "/transfers"),
         ("GET", "/sub-accounts"),
@@ -115,6 +114,55 @@ fn ahead_of_spec_ops_are_not_in_endpoints_txt() {
              (it lives in CODE_ONLY_OPS in the drift script)",
             absent.0,
             absent.1
+        );
+    }
+}
+
+/// `POST /account/margin-mode` is not "ahead of the pinned spec" — it has never
+/// existed in any spec version and no service routes it. The `account
+/// margin-mode` command that targeted it was withdrawn in ENG-7740, so the op
+/// must not reappear in *any* of the drift artifacts: not endpoints.txt (it isn't
+/// in the spec), and not the drift script's METHOD_OP / CODE_ONLY_OPS tables
+/// (nothing calls `set_margin_mode` any more, and listing it there would let the
+/// command be re-added silently).
+///
+/// This is the artifact half of the withdrawal; `src/cli.rs` holds the
+/// command-surface half. ENG-7614 must land before either is reversed.
+#[test]
+fn margin_mode_is_absent_from_every_drift_artifact() {
+    let ops = endpoints();
+    assert!(
+        !ops.contains(&("POST".to_string(), "/account/margin-mode".to_string())),
+        "endpoints.txt must not list POST /account/margin-mode — it is in no spec version"
+    );
+
+    let drift = read("scripts/check_spec_drift.py");
+    // Strip comment lines: the tables must be clean, but the prose explaining
+    // *why* the op is absent is expected to name it.
+    let code: String = drift
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for needle in ["set_margin_mode", "/account/margin-mode"] {
+        assert!(
+            !code.contains(needle),
+            "scripts/check_spec_drift.py still maps {needle:?} outside a comment; \
+             the withdrawn margin-mode op must not be in METHOD_OP or CODE_ONLY_OPS"
+        );
+    }
+
+    // And no command handler may call the SDK method again.
+    for src in ["src/main.rs", "src/cli.rs"] {
+        let body = read(src);
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("set_margin_mode"),
+            "{src} calls set_margin_mode outside a comment; the command is withdrawn (ENG-7740)"
         );
     }
 }

@@ -380,7 +380,7 @@ pub enum Command {
         action: OrderCommand,
     },
 
-    /// Manage account settings (deposit, credit, leverage, margin, rate-limit).
+    /// Manage account settings (deposit, credit, leverage, rate-limit).
     Account {
         #[command(subcommand)]
         action: AccountCommand,
@@ -583,15 +583,12 @@ pub enum AccountCommand {
         /// Leverage multiplier (e.g. 10 for 10x). Must be at least 1.
         leverage: u32,
     },
-
-    /// Set the margin mode (cross/isolated) for a market.
-    MarginMode {
-        /// Market identifier, e.g. `BTC-USDX-PERP`.
-        market_id: String,
-        /// Margin mode.
-        #[arg(value_enum)]
-        mode: MarginModeArg,
-    },
+    // There is deliberately no `margin-mode` subcommand: no endpoint backs one.
+    // `margin_mode` appears nowhere in the pinned spec, and the only isolated-
+    // margin route (`POST /account/margin`) requires a position that is already
+    // isolated. It was withdrawn in ENG-7740; ENG-7614 tracks the engine work
+    // that has to land before it can come back. Don't re-add it against a guessed
+    // request shape — add it when the spec defines one.
 }
 
 #[derive(Debug, Subcommand)]
@@ -711,22 +708,6 @@ pub enum SubAccountsCommand {
         #[arg(long)]
         yes: bool,
     },
-}
-
-/// Margin mode. Maps onto the SDK's [`MarginMode`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum MarginModeArg {
-    Cross,
-    Isolated,
-}
-
-impl From<MarginModeArg> for nexus_exchange::types::MarginMode {
-    fn from(m: MarginModeArg) -> Self {
-        match m {
-            MarginModeArg::Cross => nexus_exchange::types::MarginMode::Cross,
-            MarginModeArg::Isolated => nexus_exchange::types::MarginMode::Isolated,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1141,22 +1122,73 @@ mod tests {
         }
     }
 
+    /// `account margin-mode` is withdrawn (ENG-7740): no endpoint backs it, so
+    /// offering it was a correctness claim the CLI could not honour. Parsing must
+    /// fail rather than accept the arguments and dispatch a request that cannot
+    /// succeed. Re-adding the subcommand fails this test on purpose — it may only
+    /// come back once ENG-7614 lands and the spec defines the request shape.
     #[test]
-    fn account_margin_mode_parses_enum() {
-        let cli = Cli::try_parse_from([
-            "nexus",
-            "account",
-            "margin-mode",
-            "BTC-USDX-PERP",
-            "isolated",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Account {
-                action: AccountCommand::MarginMode { mode, .. },
-            } => assert_eq!(mode, MarginModeArg::Isolated),
-            _ => panic!("expected account margin-mode"),
+    fn account_margin_mode_is_withdrawn() {
+        for args in [
+            vec![
+                "nexus",
+                "account",
+                "margin-mode",
+                "BTC-USDX-PERP",
+                "isolated",
+            ],
+            vec!["nexus", "account", "margin-mode", "BTC-USDX-PERP", "cross"],
+            vec!["nexus", "account", "margin-mode"],
+        ] {
+            let err = Cli::try_parse_from(&args)
+                .expect_err(&format!("{args:?} must be rejected, not parsed"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?} should be an unrecognized-subcommand error, got: {err}"
+            );
         }
+    }
+
+    /// The withdrawal must also be invisible in help, so `--help` can't keep
+    /// advertising a command that cannot work.
+    #[test]
+    fn account_help_does_not_offer_margin_mode() {
+        let mut cli = Cli::command();
+        let account = cli
+            .get_subcommands_mut()
+            .find(|c| c.get_name() == "account")
+            .expect("account subcommand");
+        let help = account.render_long_help().to_string();
+        assert!(
+            help.contains("leverage"),
+            "sanity: account help should still list leverage: {help}"
+        );
+        assert!(
+            !help.contains("margin-mode"),
+            "account help must not offer the withdrawn margin-mode command: {help}"
+        );
+    }
+
+    /// The top-level `account` summary line must not advertise a margin surface
+    /// either. It read "(deposit, credit, leverage, margin, rate-limit)" while the
+    /// subcommand existed; leaving "margin" there would keep promising a
+    /// capability the CLI does not have, which is the same claim in shorter form.
+    #[test]
+    fn account_summary_does_not_advertise_margin() {
+        let help = Cli::command().render_long_help().to_string();
+        let line = help
+            .lines()
+            .find(|l| l.contains("Manage account settings"))
+            .expect("top-level help should summarize `account`");
+        assert!(
+            !line.contains("margin"),
+            "the account summary must not advertise a margin surface: {line:?}"
+        );
+        assert!(
+            line.contains("leverage") && line.contains("rate-limit"),
+            "sanity: the summary should still name the settings that do work: {line:?}"
+        );
     }
 
     #[test]
