@@ -11,9 +11,26 @@
 //! job, need no network, and fail the moment an edit re-arms either bug. They
 //! assert *policy*, not the current version — bumping `0.3.0` keeps them green.
 //!
-//! The policy itself is `AGENTS.md`'s: "Pre-1.0 versioning: bump minor on
-//! breaking changes, patch on features/fixes", the same rule configured in
-//! nexus-exchange-ts and nexus-exchange-mcp.
+//! They cover two concerns with different lifetimes, which matters when someone
+//! eventually takes the CLI to 1.0:
+//!
+//! 1. **Pre-1.0 versioning** — `pre_1_0_bump_policy_stays_configured` and
+//!    `versioning_strategy_stays_default`. This is `AGENTS.md`'s policy: "Pre-1.0
+//!    versioning: bump minor on breaking changes, patch on features/fixes", the
+//!    same rule configured in nexus-exchange-ts and nexus-exchange-mcp. Going 1.0
+//!    means deleting the two flags *and* the first of these tests — deliberate,
+//!    which is the point.
+//! 2. **Distribution invariants** — `tag_shape_stays_binstall_compatible`,
+//!    `release_starts_as_draft_for_the_dist_handoff`,
+//!    `release_as_is_never_committed`, and `cargo_toml_and_release_manifest_agree`.
+//!    These have nothing to do with being pre-1.0 and stay correct at every
+//!    version. Do not delete them along with the pre-1.0 pair.
+//!
+//! A note on the assertion style: some guards reject a specific wrong value while
+//! others require a specific right one. That tracks the upstream default in each
+//! case — where the default is itself the broken setting (`include-component-in-tag`
+//! is `true`, `draft` is `false`), an *omitted* key is as harmful as a wrong one,
+//! so those assert the exact value rather than merely "not the wrong one".
 
 use serde_json::Value;
 
