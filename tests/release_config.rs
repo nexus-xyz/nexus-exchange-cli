@@ -162,15 +162,23 @@ fn versioning_strategy_stays_default() {
     }
 }
 
-/// The `v` in the tag is load-bearing for distribution, not cosmetic:
-/// `[package.metadata.binstall]` in Cargo.toml reconstructs the artifact URL as
-/// `releases/download/v{version}/...`, so a tag cut without the `v` uploads
-/// artifacts where `cargo binstall` will not look.
+/// The tag must be exactly `vX.Y.Z`, which is load-bearing for distribution
+/// rather than cosmetic: `[package.metadata.binstall]` in Cargo.toml
+/// reconstructs the artifact URL as `releases/download/v{version}/...`, so any
+/// other tag shape uploads artifacts where `cargo binstall` will not look.
 ///
-/// `include-v-in-tag` defaults to `true`; this guards against someone setting it
-/// to `false` at either level.
+/// Two keys control that shape, and they need *opposite* assertions because
+/// their upstream defaults differ:
+///
+/// - `include-v-in-tag` defaults to `true`, so it is enough to reject an
+///   explicit `false` — dropping the key keeps the `v`.
+/// - `include-component-in-tag` defaults to **`true`**, which would tag
+///   `nexus-exchange-cli-v0.4.0`. The `false` in this config is what suppresses
+///   that, so *deleting* the key breaks binstall exactly as thoroughly as
+///   dropping the `v` does. It must therefore be present and explicitly `false`,
+///   not merely "not true".
 #[test]
-fn tags_keep_their_v_prefix() {
+fn tag_shape_stays_binstall_compatible() {
     let cfg = config();
     for package in package_names(&cfg) {
         assert_ne!(
@@ -179,6 +187,42 @@ fn tags_keep_their_v_prefix() {
             "package {package:?} sets `include-v-in-tag: false`; tags must stay \
              `vX.Y.Z` because binstall builds artifact URLs from `download/v{{version}}` \
              (see [package.metadata.binstall] in Cargo.toml)"
+        );
+        assert_eq!(
+            effective(&cfg, &package, "include-component-in-tag"),
+            Some(&Value::Bool(false)),
+            "package {package:?} must set `include-component-in-tag: false` \
+             (upstream defaults it to true, so an omitted key counts as broken). \
+             Otherwise tags become `<component>-vX.Y.Z` and binstall, which \
+             builds artifact URLs from `download/v{{version}}`, will not find them \
+             (see [package.metadata.binstall] in Cargo.toml)"
+        );
+    }
+}
+
+/// The draft handoff between release-please and cargo-dist.
+///
+/// `release.yml` does not create its own GitHub Release — dist runs with
+/// `create-release = false` and its header states the Release "is assumed to
+/// exist as a draft", which it uploads signed artifacts into and then undrafts
+/// (`gh release edit "$tag" ... --draft=false`). The `draft: true` here is what
+/// creates it in that state.
+///
+/// `draft` defaults to `false` upstream, so an omitted key is as broken as an
+/// explicit `false`: the tag would publish a Release immediately, announcing it
+/// before any artifact is signed and uploaded — and the undraft step would have
+/// nothing left to hand off.
+#[test]
+fn release_starts_as_draft_for_the_dist_handoff() {
+    let cfg = config();
+    for package in package_names(&cfg) {
+        assert_eq!(
+            effective(&cfg, &package, "draft"),
+            Some(&Value::Bool(true)),
+            "package {package:?} must set `draft: true` (upstream defaults it to \
+             false, so an omitted key counts as broken). release.yml assumes the \
+             Release already exists as a draft, uploads signed artifacts into it, \
+             and only then undrafts it"
         );
     }
 }
