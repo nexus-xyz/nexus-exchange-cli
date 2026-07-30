@@ -17,6 +17,13 @@ nexus order place \
 nexus order place \
   --market "$MARKET" --side sell --type market --quantity 0.01 --reduce-only --yes
 
+# Dry-run the same order first: projected fill, margin impact, and resulting
+# liquidation price/leverage, with nothing submitted and no confirmation
+# prompt (there is nothing to confirm). Same flags as `place`, minus --yes.
+nexus order preview \
+  --market "$MARKET" --side sell --type limit \
+  --price 84000 --quantity 0.01 --reduce-only   # POST /orders/preview
+
 # List open orders, then fetch one by id. By-id routes are routed per market,
 # so get/amend/cancel-one all require --market.
 nexus orders                                          # GET /orders

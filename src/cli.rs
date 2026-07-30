@@ -489,6 +489,34 @@ pub enum OrderCommand {
         yes: bool,
     },
 
+    /// Dry-run an order: project its fill, margin impact, and resulting
+    /// liquidation price without submitting it. Takes the same flags as
+    /// `place` (minus `--yes` — nothing is submitted, so there is nothing to
+    /// confirm) so a preview can be promoted to a real `place` call unchanged.
+    Preview {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        #[arg(long)]
+        market: String,
+        /// Order side.
+        #[arg(long, value_enum)]
+        side: SideArg,
+        /// Order type.
+        #[arg(long = "type", value_enum)]
+        order_type: OrderTypeArg,
+        /// Limit price (required for `--type limit`).
+        #[arg(long)]
+        price: Option<String>,
+        /// Order quantity (base units).
+        #[arg(long)]
+        quantity: String,
+        /// Time in force.
+        #[arg(long, value_enum, default_value_t = TifArg::Gtc)]
+        tif: TifArg,
+        /// Only reduce an existing position; never open or flip one.
+        #[arg(long)]
+        reduce_only: bool,
+    },
+
     /// Cancel a single order by id (requires `--market`), or all open orders
     /// with `--all`.
     Cancel {
@@ -923,6 +951,68 @@ mod tests {
     }
 
     #[test]
+    fn order_preview_parses() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "ETH-USDX-PERP",
+            "--side",
+            "sell",
+            "--type",
+            "limit",
+            "--price",
+            "3531.0",
+            "--quantity",
+            "4.2",
+            "--reduce-only",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Order {
+                action:
+                    OrderCommand::Preview {
+                        market,
+                        side,
+                        order_type,
+                        tif,
+                        reduce_only,
+                        ..
+                    },
+            } => {
+                assert_eq!(market, "ETH-USDX-PERP");
+                assert_eq!(side, SideArg::Sell);
+                assert_eq!(order_type, OrderTypeArg::Limit);
+                assert_eq!(tif, TifArg::Gtc);
+                assert!(reduce_only);
+            }
+            other => panic!("expected order preview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_preview_has_no_yes_flag() {
+        // Preview submits nothing, so `--yes` (place/cancel/amend/batch's
+        // confirmation bypass) is not part of its surface.
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "1",
+            "--yes",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn market_summary_parses() {
         let cli = Cli::try_parse_from(["nexus", "market", "summary"]).unwrap();
         assert!(matches!(
@@ -1298,6 +1388,7 @@ mod tests {
             .expect("order subcommand");
         let help = order.render_long_help().to_string();
         assert!(help.contains("place"));
+        assert!(help.contains("preview"));
         assert!(help.contains("cancel"));
     }
 }

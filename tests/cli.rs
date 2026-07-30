@@ -108,6 +108,27 @@ fn order_place_without_credentials_is_refused_before_network() {
 }
 
 #[test]
+fn order_preview_without_credentials_is_refused_before_network() {
+    // Preview is authenticated (it needs the caller's account to project
+    // margin/equity impact), so it must fail the same credentials gate as
+    // `place` — before attempting any request.
+    let out = run(&[
+        "order",
+        "preview",
+        "--market",
+        "BTC-USDX-PERP",
+        "--side",
+        "buy",
+        "--type",
+        "market",
+        "--quantity",
+        "0.01",
+    ]);
+    assert_ne!(out.code, Some(0));
+    assert!(out.stderr.contains("credentials") || out.stderr.contains("authenticated"));
+}
+
+#[test]
 fn limit_order_requires_a_price() {
     // Provide credentials so we pass the auth gate and reach the price check.
     let out = bin()

@@ -70,6 +70,7 @@ GET /agents
 # ── trading & account mutations ──
 # Migrated to /api/v1:
 POST /api/v1/orders
+POST /api/v1/orders/preview
 POST /api/v1/orders/batch
 DELETE /api/v1/orders/{order_id}
 DELETE /api/v1/orders

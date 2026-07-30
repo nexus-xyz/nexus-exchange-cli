@@ -6,10 +6,11 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment,
-    FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus,
-    MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult, Position, PriceLevel,
-    RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    AccountSummary, AgentInfo, ApiKeyInfo, CreditResult, Decimal, DepositResult, Fill,
+    FundingPayment, FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice,
+    Market, MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderPreview, OrderResponse,
+    OrderResult, Position, PriceLevel, RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer,
+    Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -565,6 +566,83 @@ pub fn order_result_json(r: &OrderResponse) -> String {
     let value = json!({
         "order": order_value(&r.order),
         "fills": r.fills,
+    });
+    pretty(&value)
+}
+
+/// `maker`/`taker` label for a preview, plus slippage vs. the reference price
+/// when the fill is a taker. The spec's `PreviewResponse` reports no
+/// maker/taker flag directly, so we derive it from `expected_fill_vwap`: a
+/// `None` vwap means the order rests untouched (pure maker, no slippage); a
+/// `Some` vwap means it crossed the book on entry (taker). `reference_price`
+/// is the limit price for a limit order — `None` for a market order, which has
+/// no price to measure slippage against.
+fn liquidity_label(vwap: Option<Decimal>, reference_price: Option<Decimal>) -> String {
+    let Some(vwap) = vwap else {
+        return "maker (0 slippage)".to_string();
+    };
+    match reference_price {
+        Some(reference) if reference != Decimal::ZERO => {
+            let slippage_bps = (vwap - reference) / reference * Decimal::from(10_000);
+            format!("taker ({slippage_bps:+.0} bps slippage)")
+        }
+        _ => "taker".to_string(),
+    }
+}
+
+/// Render a `POST /orders/preview` (dry run) result: the projected fill,
+/// margin/equity impact, and resulting liquidation price and leverage. Nothing
+/// here was submitted — this is `OrderPreview`, not an `Order`.
+///
+/// `reference_price` is the request's limit price (`None` for a market order),
+/// used only to label the projected fill maker/taker and, for a taker fill,
+/// its slippage — see [`liquidity_label`].
+pub fn order_preview(p: &OrderPreview, reference_price: Option<Decimal>) -> String {
+    if !p.is_accepted() {
+        let reason = p.reject_reason.as_deref().unwrap_or("no reason given");
+        return format!("REJECTED  {reason}");
+    }
+
+    let rows = [
+        ("avg fill price", opt(&p.expected_fill_vwap)),
+        (
+            "liquidity",
+            liquidity_label(p.expected_fill_vwap, reference_price),
+        ),
+        ("required margin", opt(&p.required_initial_margin)),
+        ("projected fees", opt(&p.projected_fees)),
+        ("new equity", opt(&p.projected_post_trade_equity)),
+        (
+            "new liquidation price",
+            opt(&p.projected_post_trade_liquidation_price),
+        ),
+        (
+            "new leverage",
+            p.projected_post_trade_leverage
+                .map(|l| format!("{l}x"))
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<22}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render a `POST /orders/preview` result as JSON: the raw `OrderPreview`
+/// fields, verbatim (decimal fields as strings, matching the wire — see the
+/// module doc). No maker/taker label is added here; that derivation is a
+/// human-output convenience, not part of the API's response shape.
+pub fn order_preview_json(p: &OrderPreview) -> String {
+    let value = json!({
+        "accepted": p.accepted,
+        "reject_reason": p.reject_reason,
+        "required_initial_margin": opt_json(&p.required_initial_margin),
+        "projected_post_trade_equity": opt_json(&p.projected_post_trade_equity),
+        "projected_post_trade_liquidation_price": opt_json(&p.projected_post_trade_liquidation_price),
+        "projected_post_trade_leverage": opt_json(&p.projected_post_trade_leverage),
+        "expected_fill_vwap": opt_json(&p.expected_fill_vwap),
+        "projected_fees": opt_json(&p.projected_fees),
     });
     pretty(&value)
 }
@@ -1236,6 +1314,7 @@ pub fn sub_account_json(s: &SubAccount) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     // Sorted so the assertion is independent of serde_json's key ordering
     // (which depends on the `preserve_order` feature).
@@ -1680,6 +1759,92 @@ mod tests {
         let v: Value = serde_json::from_str(&order_result_json(&resp)).unwrap();
         assert_eq!(v["order"]["status"], json!("Filled"));
         assert_eq!(v["fills"].as_array().unwrap().len(), 2);
+    }
+
+    fn preview_fixture(extra: serde_json::Value) -> OrderPreview {
+        let mut base = json!({
+            "accepted": true,
+            "reject_reason": null,
+            "required_initial_margin": "252.36",
+            "projected_post_trade_equity": "1801.2",
+            "projected_post_trade_liquidation_price": "2402",
+            "projected_post_trade_leverage": "1.4",
+            "expected_fill_vwap": "3531.0",
+            "projected_fees": "1.06"
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn order_preview_renders_accepted_projection() {
+        let p = preview_fixture(json!({}));
+        let human = order_preview(&p, Some(Decimal::from_str("3530.0").unwrap()));
+        assert!(human.contains("3531.0"));
+        assert!(human.contains("taker"));
+        assert!(human.contains("2402"));
+        assert!(human.contains("1.4x"));
+
+        let v: Value = serde_json::from_str(&order_preview_json(&p)).unwrap();
+        assert_eq!(v["expected_fill_vwap"], json!("3531.0"));
+        assert_eq!(v["projected_post_trade_liquidation_price"], json!("2402"));
+        assert_eq!(v["projected_post_trade_leverage"], json!("1.4"));
+    }
+
+    #[test]
+    fn order_preview_labels_a_resting_order_as_maker_with_no_slippage() {
+        // No projected fill (a limit order that would rest, not cross) ->
+        // maker, regardless of the reference price.
+        let p = preview_fixture(json!({ "expected_fill_vwap": null }));
+        let human = order_preview(&p, Some(Decimal::from_str("3530.0").unwrap()));
+        assert!(human.contains("maker (0 slippage)"));
+        assert!(!human.contains("taker"));
+    }
+
+    #[test]
+    fn order_preview_reports_taker_slippage_against_the_limit_price() {
+        let p = preview_fixture(json!({ "expected_fill_vwap": "101" }));
+        let human = order_preview(&p, Some(Decimal::from_str("100").unwrap()));
+        // (101 - 100) / 100 * 10_000 = 100 bps.
+        assert!(
+            human.contains("+100 bps slippage"),
+            "expected +100 bps slippage in: {human}"
+        );
+    }
+
+    #[test]
+    fn order_preview_market_order_has_no_reference_price_for_slippage() {
+        let p = preview_fixture(json!({ "expected_fill_vwap": "101" }));
+        let human = order_preview(&p, None);
+        assert!(human.contains("taker"));
+        assert!(!human.contains("bps slippage"));
+    }
+
+    #[test]
+    fn order_preview_renders_a_rejected_projection() {
+        let p = preview_fixture(json!({
+            "accepted": false,
+            "reject_reason": "insufficient margin",
+            "expected_fill_vwap": null
+        }));
+        let human = order_preview(&p, None);
+        assert!(human.contains("REJECTED"));
+        assert!(human.contains("insufficient margin"));
+
+        let v: Value = serde_json::from_str(&order_preview_json(&p)).unwrap();
+        assert_eq!(v["accepted"], json!(false));
+        assert_eq!(v["reject_reason"], json!("insufficient margin"));
+    }
+
+    #[test]
+    fn order_preview_json_nulls_absent_fields() {
+        let p: OrderPreview = serde_json::from_value(json!({})).unwrap();
+        let v: Value = serde_json::from_str(&order_preview_json(&p)).unwrap();
+        assert_eq!(v["accepted"], json!(null));
+        assert_eq!(v["expected_fill_vwap"], json!(null));
+        assert_eq!(v["projected_post_trade_liquidation_price"], json!(null));
     }
 
     #[test]

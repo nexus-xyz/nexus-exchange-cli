@@ -252,6 +252,11 @@ nexus withdrawals                   # withdrawal history
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
+# Dry-run the same order first: projected fill, margin impact, and resulting
+# liquidation price/leverage — nothing submitted, so no confirmation prompt.
+# Same flags as `place`, minus --yes.
+nexus order preview --market BTC-USDX-PERP --side buy --type limit \
+  --price 84000 --quantity 0.01 --tif GTC
 # By-id order commands are routed per market, so they require --market.
 nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
 nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
