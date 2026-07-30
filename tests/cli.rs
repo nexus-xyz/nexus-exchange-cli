@@ -88,6 +88,53 @@ fn authenticated_command_without_credentials_is_refused() {
     );
 }
 
+/// Every portfolio-parity read (ENG-6460) is account-scoped, so each must refuse
+/// without credentials rather than send an unsigned request that comes back as an
+/// opaque 401.
+#[test]
+fn portfolio_commands_without_credentials_are_refused() {
+    for args in [
+        &["account", "summary"][..],
+        &["account", "state"],
+        &["account", "fees"],
+        &["account", "portfolio-history"],
+    ] {
+        let out = run(args);
+        assert_ne!(out.code, Some(0), "`{args:?}` should be refused");
+        assert!(
+            out.stderr.contains("authenticated command"),
+            "`{args:?}` stderr: {}",
+            out.stderr
+        );
+    }
+}
+
+/// `--limit` is bounded before anything is signed: clap rejects an out-of-range
+/// value as a usage error (exit 2), so it never reaches the network.
+#[test]
+fn portfolio_history_limit_out_of_range_is_a_usage_error() {
+    for bad in ["0", "367"] {
+        let out = bin()
+            .args([
+                "--api-key",
+                "k",
+                "--api-secret",
+                "s",
+                "account",
+                "portfolio-history",
+                "--limit",
+                bad,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "--limit {bad} should be a usage error"
+        );
+    }
+}
+
 #[test]
 fn order_place_without_credentials_is_refused_before_network() {
     let out = run(&[
@@ -287,6 +334,17 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
         (&["orders"], "failed to fetch open orders"),
         (&["withdrawals"], "failed to fetch withdrawals"),
         (&["account", "rate-limit"], "failed to fetch rate-limit"),
+        (&["account", "summary"], "failed to fetch account summary"),
+        (&["account", "state"], "failed to fetch account state"),
+        (&["account", "fees"], "failed to fetch account fees"),
+        (
+            &["account", "portfolio-history"],
+            "failed to fetch portfolio history",
+        ),
+        (
+            &["account", "portfolio-history", "--window", "week"],
+            "failed to fetch portfolio history",
+        ),
         (&["keys", "list"], "failed to fetch API keys"),
         (&["agents", "list"], "failed to fetch agents"),
     ];

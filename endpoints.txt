@@ -57,6 +57,10 @@ GET /status
 # ── authenticated account (read) ──
 # Migrated to /api/v1:
 GET /api/v1/account
+GET /api/v1/account/summary
+GET /api/v1/account/state
+GET /api/v1/account/fees
+GET /api/v1/account/portfolio-history
 GET /api/v1/positions
 GET /api/v1/fills
 GET /api/v1/orders
