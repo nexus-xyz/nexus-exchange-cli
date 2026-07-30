@@ -91,6 +91,7 @@ METHOD_OP = {
     "fetch_agents": ("GET", "/agents"),  # no /api/v1 variant yet
     # trading & account mutations
     "create_order": ("POST", "/api/v1/orders"),
+    "preview_order": ("POST", "/api/v1/orders/preview"),
     "create_orders": ("POST", "/api/v1/orders/batch"),
     "cancel_order": ("DELETE", "/api/v1/orders/{order_id}"),
     "cancel_all_orders": ("DELETE", "/api/v1/orders"),

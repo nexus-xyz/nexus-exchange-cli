@@ -193,12 +193,10 @@ async fn main() -> Result<()> {
         }
         Command::Fills { limit } => {
             require_authenticated(authenticated, "fills")?;
-            let mut fills = client
-                .fetch_my_trades()
+            let fills = client
+                .fetch_my_trades(Some(limit))
                 .await
                 .context("failed to fetch fills")?;
-            // The SDK returns the full set; honor the CLI's `--limit` client-side.
-            fills.truncate(limit as usize);
             emit(format, output::fills(&fills), || output::fills_json(&fills));
         }
         Command::Orders => {
@@ -382,6 +380,52 @@ async fn handle_order(
             emit(format, output::order_result(&result), || {
                 output::order_result_json(&result)
             });
+        }
+
+        OrderCommand::Preview {
+            market,
+            side,
+            order_type,
+            price,
+            quantity,
+            tif,
+            reduce_only,
+        } => {
+            require_authenticated(authenticated, "order preview")?;
+            let quantity = parse_amount("quantity", &quantity)?;
+
+            use cli::OrderTypeArg;
+            let mut request = match order_type {
+                OrderTypeArg::Limit => {
+                    let p = price
+                        .as_deref()
+                        .context("--price is required for a limit order")?;
+                    let price = parse_amount("price", p)?;
+                    OrderRequest::limit(market.clone(), side.into(), price, quantity, tif.into())
+                }
+                OrderTypeArg::Market => {
+                    if price.is_some() {
+                        eprintln!("note: --price is ignored for a market order");
+                    }
+                    OrderRequest::market(market.clone(), side.into(), quantity)
+                }
+            };
+            if reduce_only {
+                request.reduce_only = Some(true);
+            }
+
+            // Dry run — no confirmation prompt, nothing is submitted or
+            // reserved.
+            let reference_price = request.price;
+            let preview = client
+                .preview_order(&request)
+                .await
+                .context("failed to preview order")?;
+            emit(
+                format,
+                output::order_preview(&preview, reference_price),
+                || output::order_preview_json(&preview),
+            );
         }
 
         OrderCommand::Cancel {
