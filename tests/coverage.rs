@@ -54,7 +54,7 @@ fn endpoints() -> BTreeSet<(String, String)> {
 }
 
 /// `.api-version` feeds a raw.githubusercontent URL and a cache key in
-/// `spec-drift.yml`, and a git branch name in `spec-autobump.yml`. All three
+/// `spec-drift.yml`, and `sdk-autobump.yml` derives it from the SDK crate. Both
 /// validate it, but failing here names the problem sooner.
 #[test]
 fn api_version_is_a_pinned_semver_tag() {
@@ -74,7 +74,7 @@ const MARK_START: &str = "<!-- api-version-sync:start -->";
 const MARK_END: &str = "<!-- api-version-sync:end -->";
 
 /// The text between the sync markers, or a panic naming what's missing. Mirrors
-/// `MANAGED_BLOCK_RE` in `scripts/sync_api_version.py`.
+/// `MANAGED_BLOCK_RE` in `scripts/sync_sdk_version.py`.
 fn managed_block(readme: &str) -> &str {
     let start = readme
         .find(MARK_START)
@@ -90,7 +90,7 @@ fn managed_block(readme: &str) -> &str {
     &readme[start..end]
 }
 
-/// `scripts/sync_api_version.py --write` owns the marked README block, and fails
+/// `scripts/sync_sdk_version.py --write` owns the marked README block, and fails
 /// loudly if the markers are gone — which would kill an autobump run mid-flight.
 /// Cheaper to notice here.
 #[test]
@@ -110,7 +110,7 @@ fn readme_has_exactly_one_managed_api_version_block() {
     assert!(
         managed_block(&readme).contains("Currently targets Exchange API spec"),
         "the managed block no longer states the targeted spec version; \
-         sync_api_version.py::render_managed_block defines its shape"
+         sync_sdk_version.py::render_managed_block defines its shape"
     );
 }
 
@@ -125,8 +125,9 @@ fn readme_managed_line_matches_the_pinned_api_version() {
     let block = managed_block(&readme);
     assert!(
         block.contains(&format!("**`{tag}`**")),
-        "README managed block says {block:?} but .api-version pins {tag}. Run \
-         `python3 scripts/sync_api_version.py --write --latest {tag}`, or fix the pin."
+        "README managed block says {block:?} but .api-version pins {tag}. Both are \
+         derived from the `nexus-exchange` crate, so the fix is \
+         `python3 scripts/sync_sdk_version.py --write` — not a hand-edit of either."
     );
 }
 

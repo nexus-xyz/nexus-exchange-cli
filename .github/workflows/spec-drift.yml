@@ -78,6 +78,23 @@ jobs:
       - name: Check drift
         run: python3 scripts/check_spec_drift.py openapi.pinned.json
 
+      # Invariants 5-6 (ENG-7962): the pin is only correct if it equals the pin of
+      # the `nexus-exchange` crate we actually compile against — that crate is what
+      # sends `X-Nexus-Api-Version`, so a pin ahead of it is a false claim about
+      # runtime. And every endpoints.txt line must be an operation the crate really
+      # wraps, since the CLI reaches the API only through named SDK methods.
+      #
+      # This is the check whose absence let `amend_order` sit mapped to
+      # `PUT /orders/{order_id}` while the SDK issues `PATCH`: the SDK's own manifest
+      # lists no PUT on that path, so invariant 6 fails it immediately, where the
+      # spec-only check could not.
+      #
+      # Reads both files out of the published .crate tarball (the exact artifact
+      # cargo builds), so it needs no token and makes no assumption about how rs
+      # names its tags.
+      - name: Check SDK parity
+        run: python3 scripts/check_sdk_parity.py
+
       - name: Publish coverage to the step summary
         if: always()
         run: |

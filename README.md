@@ -491,9 +491,15 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.7.2`**.
+Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as
+`X-Nexus-Api-Version` by `nexus-exchange` **`0.7.0`**.
 
 <!-- api-version-sync:end -->
+
+That pin is a **derived value, not a choice**. The CLI issues no HTTP of its own, so
+the crate decides which spec version is actually spoken; a pin that disagrees with
+the crate's is simply a false statement about what the binary sends.
+[`scripts/check_sdk_parity.py`](./scripts/check_sdk_parity.py) enforces that in CI.
 
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
@@ -514,10 +520,27 @@ invariants:
 4. no source file outside the two scanned ones reaches the SDK, so moving a
    command handler into a new module can't silently under-count coverage.
 
-[`scripts/test_check_spec_drift.py`](./scripts/test_check_spec_drift.py) is the
-checker's own self-test: it defeats each invariant in turn and asserts the check
-goes red. It runs in the same workflow, ahead of the check, because a green run
-only means something if a green run *can* fail.
+Two more run in the same workflow, checking the CLI against the **crate** rather
+than the spec — read straight out of the published `.crate` tarball, so no token is
+needed and no assumption is made about how `nexus-exchange-rs` names its tags:
+
+5. `.api-version` **equals** the pinned crate's own `.api-version`;
+6. every `endpoints.txt` line is an operation the crate actually **wraps** — the
+   CLI reaches the API only through named SDK methods, so the SDK's manifest is the
+   ceiling. A subset, deliberately: the SDK wraps considerably more than the CLI
+   exposes, and those are coverage gaps to report, not failures.
+
+Invariant 6 is what makes the original ENG-7962 bug structurally impossible.
+`amend_order` was mapped to `PUT /orders/{order_id}` while the SDK issues `PATCH`;
+the spec defines a PATCH there and PUT operations elsewhere, so no spec-level check
+could settle it — but the SDK's manifest lists no PUT on that path, which fails
+immediately and names the real verb.
+
+Both checkers have their own self-tests —
+[`test_check_spec_drift.py`](./scripts/test_check_spec_drift.py) and
+[`test_sdk_parity.py`](./scripts/test_sdk_parity.py) — which defeat each invariant
+in turn and assert the check goes red. They run ahead of the checks they cover,
+because a green run only means something if a green run *can* fail.
 
 The check also prints the coverage number the dashboard reads: the CLI currently
 exercises **36 of 98** spec operations (**36.7%**). The denominator carries both
@@ -549,31 +572,49 @@ spec bump that needs new operations can't be satisfied here until
 
 ### Keeping the pin current
 
-Two mechanisms, answering different questions:
+The CLI follows the **crate**, not the spec — `api → rs → cli`, never `api → cli`.
+This is the one place the CLI diverges from the rest of the client fleet, and it
+follows from wrapping an SDK instead of implementing the spec: `nexus-exchange-py`,
+`-ts` and `-mcp` generate against the spec directly, so a spec release is
+immediately actionable for them. Here it is not. New operations are unreachable
+until the crate wraps them, and advancing `.api-version` without a crate release
+would make the pin claim a version the binary never sends. So this repo is
+deliberately **not** a target of the api repo's `spec-released` fan-out
+([ENG-8464](https://linear.app/nexus-labs/issue/ENG-8464)).
 
 | | question | mechanism |
 | -- | -- | -- |
-| **Verification** | does the pin we have still match the code? | `spec-drift.yml` → `check_spec_drift.py` |
-| **Detection** | has a newer spec released than we pin? | `spec-autobump.yml` → `sync_api_version.py` |
+| **Verification** | does the pin still match the code? | `spec-drift.yml` → `check_spec_drift.py` |
+| **Verification** | is the pin even the right one? | `spec-drift.yml` → `check_sdk_parity.py` |
+| **Detection** | has a newer crate been published? | `sdk-autobump.yml` → `sync_sdk_version.py` |
 
-`spec-autobump.yml` runs daily (and on a `repository_dispatch` from the api repo,
-and on demand), and when a newer release exists it classifies the delta with
-[oasdiff](https://github.com/oasdiff/oasdiff) and opens a PR touching only
-`.api-version` and the managed README line above. Non-breaking deltas are labelled
-`spec-autobump`; breaking ones `breaking · needs-SDK-update`, with review
-requested. Everything else — `endpoints.txt`, `METHOD_OP`, the coverage numbers,
-the `nexus-exchange` dependency — stays human-owned, and green `spec-drift` on
-that PR is the merge signal. Check the lag by hand with:
+`sdk-autobump.yml` polls crates.io daily (and on demand). When a newer
+`nexus-exchange` exists it bumps `Cargo.toml`/`Cargo.lock`, copies the crate's own
+pin into `.api-version`, updates the managed README block, classifies any spec delta
+with [oasdiff](https://github.com/oasdiff/oasdiff), and opens a labelled PR. The
+poll needs no secret and no cross-repo permission: crates.io wants only a
+User-Agent, and the crate's `.api-version` and `endpoints.txt` come from the
+published tarball.
+
+Everything else — `endpoints.txt`, `METHOD_OP`, the coverage numbers — stays
+human-owned. Note that a crate bump can change the SDK's **Rust API**, not just its
+paths (0.7.0 added a `limit` parameter to `fetch_my_trades`), which no spec-level
+check would notice; the workflow therefore runs `cargo check` itself and reports the
+result in the PR. Check the lag by hand with:
 
 ```sh
-python3 scripts/sync_api_version.py --check
+python3 scripts/sync_sdk_version.py --check   # newer crate available?
+python3 scripts/check_sdk_parity.py           # pin + manifest vs the crate
 ```
 
-Two things gate that PR actually landing on its own, neither of them in this
-repo's gift: `allow_auto_merge` is disabled here (the workflow probes it and says
-so in the PR body rather than silently no-opping), and
+Three things gate such a PR landing unattended, none in this repo's gift:
+`allow_auto_merge` is disabled here (the workflow probes it and says so in the PR
+body rather than silently no-opping); a PR opened with the default `GITHUB_TOKEN`
+does not trigger `spec-drift`/CI, so a `SDK_DISPATCH_TOKEN` secret is needed for the
+checks to run at all; and
 [ENG-4149](https://linear.app/nexus-labs/issue/ENG-4149) provisions the ruleset
-bypass. Until both are resolved a human merges the PR.
+bypass. Until those are resolved a human merges the PR — which the body says
+plainly rather than implying otherwise.
 
 See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
 
