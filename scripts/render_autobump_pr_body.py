@@ -16,14 +16,16 @@ which has a way of silently reading as "fine" when it isn't:
     haven't finished, so say which it is.
   * **Was auto-merge armed?** `allow_auto_merge` is a repo setting and it is off
     here, so claiming "armed" when the call was refused would be the ENG-7688
-    failure shape.
+    failure shape. Arming needs the PR to already exist, so the caller renders the
+    intended state, opens the PR, arms, and re-renders with `arm-failed` if the
+    call does not take — three distinct states, not one hopeful one.
   * **Did the spec pin actually move?** A crate bump does not always move it
     (0.6.0 -> 0.6.1 both pin v0.7.1), and there is no delta to classify then.
 
 Usage:
   render_autobump_pr_body.py --new-version X.Y.Z --old-tag vA.B.C --new-tag vD.E.F \
       --verdict {non-breaking|breaking|no-spec-change} --oasdiff-file PATH \
-      --auto-merge {armed|unavailable|skipped} --compiles {clean|broken} \
+      --auto-merge {armed|unavailable|arm-failed|skipped} --compiles {clean|broken} \
       --pr-checks {will-run|will-not-run}
 """
 import argparse
@@ -42,7 +44,9 @@ def main():
     )
     ap.add_argument("--oasdiff-file", required=True)
     ap.add_argument(
-        "--auto-merge", required=True, choices=["armed", "unavailable", "skipped"]
+        "--auto-merge",
+        required=True,
+        choices=["armed", "unavailable", "arm-failed", "skipped"],
     )
     ap.add_argument("--compiles", required=True, choices=["clean", "broken"])
     ap.add_argument("--pr-checks", required=True, choices=["will-run", "will-not-run"])
@@ -175,6 +179,15 @@ def main():
             "ENG-4149 bypass are the two independent things that would change that; "
             "neither is in scope here.\n"
         )
+    elif args.auto_merge == "arm-failed":
+        out.append(
+            "Auto-merge could **NOT** be armed: `allow_auto_merge` is enabled on "
+            "this repository, but the arming call itself failed — see the workflow "
+            "log for the error. Kept distinct from the disabled case on purpose: "
+            "this one is not a settings gap, so enabling the setting is not the "
+            "fix.\n"
+        )
+        out.append("**A human merges this PR.**\n")
     else:
         reason = (
             "the spec delta is breaking"

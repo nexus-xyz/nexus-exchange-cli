@@ -259,36 +259,42 @@ jobs:
           git commit -m "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})"
           git push --set-upstream origin "$branch"
 
-          # Decide auto-merge BEFORE rendering the body, so the body states what
-          # actually happened rather than what we hoped would. Nothing from here on
-          # may be fatal — the branch is pushed, and losing this step would leave it
-          # with no PR.
+          # `gh pr merge --auto` needs a PR to arm, so arming can only happen AFTER
+          # `gh pr create` below — on a brand-new branch there is nothing to arm yet.
+          # What is decidable here is whether we will even attempt it, which is what
+          # the body needs to state:
+          #
+          #   skipped     — breaking delta or broken build; a human owns the merge.
+          #   unavailable — `allow_auto_merge` is off, so the request would be refused.
+          #   armed       — we will attempt it below, and correct the body if it fails.
+          #
+          # Nothing from here on may be fatal — the branch is pushed, and losing this
+          # step would leave it with no PR.
           auto_merge="skipped"
           if [ "$VERDICT" != "breaking" ] && [ "$COMPILES" = "clean" ]; then
             allowed="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.allow_auto_merge' || echo false)"
             if [ "$allowed" = "true" ]; then
-              if gh pr merge "$branch" --auto --squash; then
-                auto_merge="armed"
-              else
-                auto_merge="unavailable"
-                echo "::warning::auto-merge is enabled on this repo but arming it failed; a human must merge."
-              fi
+              auto_merge="armed"
             else
               auto_merge="unavailable"
               echo "::warning::allow_auto_merge is disabled on ${GITHUB_REPOSITORY}, so auto-merge was NOT armed. A human must merge this PR."
             fi
           fi
 
-          python3 scripts/render_autobump_pr_body.py \
-            --new-version "$NEW_VERSION" \
-            --old-tag "$OLD_TAG" \
-            --new-tag "$NEW_TAG" \
-            --verdict "$VERDICT" \
-            --oasdiff-file /tmp/oasdiff-breaking.txt \
-            --auto-merge "$auto_merge" \
-            --compiles "$COMPILES" \
-            --pr-checks "$CHECKS" \
-            > "$RUNNER_TEMP/pr-body.md"
+          render_body() {
+            python3 scripts/render_autobump_pr_body.py \
+              --new-version "$NEW_VERSION" \
+              --old-tag "$OLD_TAG" \
+              --new-tag "$NEW_TAG" \
+              --verdict "$VERDICT" \
+              --oasdiff-file /tmp/oasdiff-breaking.txt \
+              --auto-merge "$1" \
+              --compiles "$COMPILES" \
+              --pr-checks "$CHECKS" \
+              > "$RUNNER_TEMP/pr-body.md"
+          }
+
+          render_body "$auto_merge"
 
           if [ "$VERDICT" = "breaking" ]; then
             label="breaking · needs-SDK-update"
@@ -308,4 +314,18 @@ jobs:
           if [ "$VERDICT" = "breaking" ] || [ "$COMPILES" != "clean" ]; then
             gh pr edit "$branch" --add-reviewer nexus-xyz/eng \
               || echo "::warning::could not request review (team handle may differ); add a reviewer manually."
+          fi
+
+          # Now that the PR exists, actually arm it. A failure here is reported as
+          # its own state: reusing `unavailable` would blame the repo setting for
+          # something else, which is the same class of lie as claiming "armed".
+          if [ "$auto_merge" = "armed" ]; then
+            if gh pr merge "$branch" --auto --squash; then
+              echo "Auto-merge armed (squash)."
+            else
+              echo "::warning::allow_auto_merge is enabled on ${GITHUB_REPOSITORY} but arming auto-merge failed; a human must merge this PR."
+              render_body "arm-failed"
+              gh pr edit "$branch" --body-file "$RUNNER_TEMP/pr-body.md" \
+                || echo "::error::auto-merge is NOT armed and the PR body could not be corrected — it still says armed. Merge this PR by hand."
+            fi
           fi
