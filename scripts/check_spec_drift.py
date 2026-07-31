@@ -81,6 +81,11 @@ METHOD_OP = {
     "health_check": ("GET", "/status"),  # v0.7.1 replaced /health with /status
     # authenticated account (read)
     "fetch_balance": ("GET", "/api/v1/account"),
+    # portfolio-parity reads (ENG-6460), added to the spec in v0.7.2
+    "fetch_account_summary": ("GET", "/api/v1/account/summary"),
+    "fetch_account_state": ("GET", "/api/v1/account/state"),
+    "fetch_account_fees": ("GET", "/api/v1/account/fees"),
+    "fetch_portfolio_history": ("GET", "/api/v1/account/portfolio-history"),
     "fetch_positions": ("GET", "/api/v1/positions"),
     "fetch_my_trades": ("GET", "/api/v1/fills"),
     "fetch_open_orders": ("GET", "/api/v1/orders"),

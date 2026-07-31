@@ -241,9 +241,13 @@ nexus market mark-price BTC-USDX-PERP      # current mark price
 
 # Authenticated account (see Credentials below)
 nexus balance                       # balance, collateral, equity, margin
+nexus account summary               # portfolio totals + withdrawable balance
+nexus account state                 # summary + positions from ONE coherent read
+nexus account fees                  # effective maker/taker bps, tier, 30d volume
+nexus account portfolio-history --window week --limit 100   # equity/PnL/volume series
 nexus account rate-limit            # current rate-limit tier / remaining / reset
-nexus positions                     # open positions
-nexus fills --limit 50              # recent executions
+nexus positions                     # open positions, with per-position risk detail
+nexus fills --limit 50              # recent executions (server-side page, max 1000)
 nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
 nexus funding-payments --limit 50   # funding booked against the account
@@ -260,6 +264,10 @@ nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
 nexus order cancel --all
 
 # Account management (see Credentials below)
+nexus account summary               # equity, PnL, 24h volume, open counts, withdrawable
+nexus account state                 # the summary above + every open position, one read
+nexus account fees                  # fee schedule (a negative maker fee is a rebate)
+nexus account portfolio-history --window day     # day | week | month | all
 nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
@@ -302,6 +310,31 @@ The `order batch` file is a JSON array of order objects mirroring the
 ```
 
 Every subcommand supports `--help`.
+
+### Reading portfolio data
+
+Three rules apply to `account summary` / `account state` / `positions`, and they
+matter before you act on a number:
+
+- **`-` (JSON `null`) is not zero.** The server nulls a figure it cannot derive
+  rather than fabricating one; for a position's risk fields it puts the reason in
+  a companion `*_error`, which `nexus positions` lists under the table. An
+  unreported aggregate rendered as `0` would make an underwater account look
+  flat, so the CLI never substitutes one.
+- **A failed read is not an empty account.** `account summary` and `account
+  state` derive `withdrawable` from the exchange's authoritative margin view and
+  fail closed (`502 authoritative_margin_unavailable`) instead of reporting an
+  estimate. The CLI exits non-zero and says the balance is *unknown*; retry
+  rather than treating it as a zero balance.
+- **Prefer `account state` over `account summary` + `positions`.** Those are two
+  independent requests, and a fill landing between them returns an aggregate that
+  disagrees with the position list. `account state` gets both halves from one
+  server-side read, so they cannot tear.
+
+`withdrawable` is engine-authoritative free margin floored at zero — it already
+nets initial margin and order reservations out of equity, so it is what can
+actually leave the account. Prefer it over `available margin` when deciding how
+much to withdraw.
 
 ### Network selection
 
@@ -452,7 +485,7 @@ surface so the two move together.
 ### API coverage
 
 The CLI targets a specific released version of the Exchange API spec, pinned in
-[`.api-version`](./.api-version) (`v0.7.1`, matching the wrapped
+[`.api-version`](./.api-version) (`v0.7.2`, matching the wrapped
 [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK, which
 pins and sends the same tag as `X-Nexus-Api-Version` on every request).
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
@@ -466,11 +499,13 @@ verifies — in the `spec-drift` CI workflow — that:
   script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **31 of 92** spec operations (**33.7%**). The denominator carries both
+exercises **35 of 98** spec operations (**35.7%**). The denominator carries both
 stacks (gateway + `/api/v1`) plus the admin/stats surfaces the CLI does not
-target; it grew again in `v0.7.1` with the new bridge, cancel-on-disconnect, and
-stats endpoints, which the CLI does not yet expose. Run it locally with a
-fetched spec:
+target; it grew again in `v0.7.2` with the portfolio-parity, order-preview, and
+history endpoints. Four of those — the portfolio summary, consolidated state,
+fee schedule, and portfolio history — are what the `nexus account` commands added
+in [ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover. Run it
+locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
