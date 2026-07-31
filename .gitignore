@@ -5,3 +5,10 @@ node_modules/
 .wrangler/
 
 coverage.json
+
+# scripts/ — bytecode from running the drift checker / its self-test locally
+__pycache__/
+
+# scripts/check_spec_drift.py reads a fetched spec; the README documents pulling
+# it to this name for a local run.
+openapi.pinned.json

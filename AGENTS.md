@@ -31,9 +31,23 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
 
 - `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` all pass — CI
   enforces these.
+- `python3 scripts/test_check_spec_drift.py` passes (no network). CI runs it on
+  every PR, ahead of the drift check itself.
+- If you touched `endpoints.txt`, `METHOD_OP`, either allowlist, or a file that
+  calls the SDK, run the drift check too — it needs the pinned spec:
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
+  python3 scripts/check_spec_drift.py openapi.pinned.json
+  ```
 
 ## Notes
 
 - Capabilities are inherited from the `nexus-exchange-rs` dependency — bump it to
   pick up new endpoints rather than reimplementing.
+- The spec pin (`.api-version`) is bot-owned: `spec-autobump.yml` opens the bump
+  PR, and the marked block in the README restates the pin. Don't hand-edit one
+  without the other — `cargo test` fails if they disagree.
+- A CLI command can only reach what the SDK wraps, so `endpoints.txt` is capped by
+  `nexus-exchange`. The drift check catches a manifest that *mismatches* the code;
+  it cannot see a wrapper the CLI never grew a command for.
 - Pre-1.0 versioning: bump minor on breaking changes, patch on features/fixes.

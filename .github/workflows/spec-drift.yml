@@ -3,29 +3,31 @@ name: Spec drift
 # Verifies the spec operations the CLI's commands exercise (endpoints.txt) all
 # still exist in the pinned OpenAPI spec (.api-version), that the commands and
 # endpoints.txt stay in sync (every entry is backed by a real `client.<method>()`
-# call, and vice versa, modulo the documented allowlists), and reports the CLI's
-# API coverage % — the number the dashboard's CLI panel reads. Mirrors the same
-# workflow in the Rust SDK (nexus-exchange-rs). Fetches the spec from the
-# raw-at-tag URL and caches it by the pinned version so a normal run does no
-# network.
+# call, and vice versa, modulo the documented allowlists), that neither allowlist
+# is holding a stale exemption, and reports the CLI's API coverage % — the number
+# the dashboard's CLI panel reads. Mirrors the same workflow in the Rust SDK
+# (nexus-exchange-rs). Fetches the spec from the raw-at-tag URL and caches it by
+# the pinned version so a normal run does no network.
+#
+# Runs on EVERY pull request, deliberately (ENG-7962). It used to be filtered to
+# `.api-version`, `endpoints.txt`, the script, and the two files in CLI_SOURCES.
+# That did trigger on a pin-only bump — the pin is in the list, and the pin *is*
+# the change — but it left two holes:
+#
+#   1. a `paths`-filtered workflow is skipped, not run, on unrelated PRs, so it
+#      cannot serve as a required status check without wedging every such PR;
+#   2. moving a command handler into a NEW module dodged the filter entirely —
+#      the file wasn't listed, so drift never ran on the PR that introduced it.
+#      (Invariant 4 in the checker now also fails such a module outright, so the
+#      two defences are independent.)
+#
+# The pinned spec is cached by tag, so the added runs are a checkout plus a few
+# seconds of Python.
 
 on:
   pull_request:
-    paths:
-      - '.api-version'
-      - 'endpoints.txt'
-      - 'scripts/check_spec_drift.py'
-      - 'src/main.rs'
-      - 'src/wsclient.rs'
-      - '.github/workflows/spec-drift.yml'
   push:
     branches: [main]
-    paths:
-      - '.api-version'
-      - 'endpoints.txt'
-      - 'scripts/check_spec_drift.py'
-      - 'src/main.rs'
-      - 'src/wsclient.rs'
 
 permissions:
   contents: read
@@ -65,6 +67,13 @@ jobs:
           curl -fsSL \
             "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_REF}/openapi.json" \
             -o openapi.pinned.json
+
+      # Self-test the checker before trusting a green run from it: proves each of
+      # the four invariants goes RED when defeated (ENG-7962). Hermetic — no
+      # network, no pinned spec. Runs first so a broken checker fails with a clear
+      # message rather than a misleading "OK".
+      - name: Self-test the drift checker
+        run: python3 scripts/test_check_spec_drift.py
 
       - name: Check drift
         run: python3 scripts/check_spec_drift.py openapi.pinned.json

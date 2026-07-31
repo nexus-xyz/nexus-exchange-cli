@@ -485,32 +485,95 @@ surface so the two move together.
 ### API coverage
 
 The CLI targets a specific released version of the Exchange API spec, pinned in
-[`.api-version`](./.api-version) (`v0.7.2`, matching the wrapped
+[`.api-version`](./.api-version) — matching the wrapped
 [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK, which
-pins and sends the same tag as `X-Nexus-Api-Version` on every request).
+pins and sends the same tag as `X-Nexus-Api-Version` on every request.
+
+<!-- api-version-sync:start -->
+
+Currently targets Exchange API spec **`v0.7.2`**.
+
+<!-- api-version-sync:end -->
+
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
-verifies — in the `spec-drift` CI workflow — that:
+verifies — in the `spec-drift` CI workflow, on **every** pull request — four
+invariants:
 
-- every endpoint in `endpoints.txt` exists in the pinned spec (no rename/typo/
-  removal slips through), and
-- the set stays in sync with the SDK methods the CLI actually calls (parsed from
-  `src/main.rs` / `src/wsclient.rs`), modulo two documented allowlists in the
-  script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
+1. every endpoint in `endpoints.txt` exists in the pinned spec (no rename/typo/
+   removal slips through);
+2. that set **equals** the SDK methods the CLI actually calls (parsed from
+   `src/main.rs` / `src/wsclient.rs` and mapped through `METHOD_OP`) — real
+   equality in both directions, so an unlisted call and an uncalled listing both
+   fail — modulo two documented allowlists: `CODE_ONLY_OPS` (implemented but ahead
+   of the pinned spec) and `NON_REST_TARGETS` (reached without a named REST call,
+   i.e. the WebSocket upgrade);
+3. neither allowlist holds a stale exemption — an entry nothing calls, an entry
+   the pinned spec has since caught up with, or one whose `METHOD_OP` verb doesn't
+   match a path the spec does define;
+4. no source file outside the two scanned ones reaches the SDK, so moving a
+   command handler into a new module can't silently under-count coverage.
+
+[`scripts/test_check_spec_drift.py`](./scripts/test_check_spec_drift.py) is the
+checker's own self-test: it defeats each invariant in turn and asserts the check
+goes red. It runs in the same workflow, ahead of the check, because a green run
+only means something if a green run *can* fail.
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **35 of 98** spec operations (**35.7%**). The denominator carries both
+exercises **36 of 98** spec operations (**36.7%**). The denominator carries both
 stacks (gateway + `/api/v1`) plus the admin/stats surfaces the CLI does not
 target; it grew again in `v0.7.2` with the portfolio-parity, order-preview, and
 history endpoints. Four of those — the portfolio summary, consolidated state,
 fee schedule, and portfolio history — are what the `nexus account` commands added
-in [ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover. Run it
-locally with a fetched spec:
+in [ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover. The
+thirty-sixth is a **correction**, not new delivery: `order amend` was exempted as
+ahead-of-spec while mapped to the wrong verb (`PUT`, where the SDK issues
+`PATCH`), so it went covered but uncounted until invariant 3 rejected the stale
+exemption. Run it locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
 python3 scripts/check_spec_drift.py openapi.pinned.json
+python3 scripts/test_check_spec_drift.py   # no network needed
 ```
+
+Coverage is **structurally capped by the SDK**: the CLI is a thin layer over
+`nexus_exchange::Client` and issues no path of its own, so its 36 is a subset of
+what that crate wraps, not an independent number. Two consequences worth knowing
+before reading the figure as a CLI decision: the CLI cannot reach an operation the
+crate has no wrapper for (bridge deposits, for instance, are wrapped by the SDK
+but have no CLI command yet — a real gap, and one the drift check cannot see,
+since it can only flag a *mismatched* manifest, never a *missing* one), and a
+spec bump that needs new operations can't be satisfied here until
+`nexus-exchange-rs` ships them.
+
+### Keeping the pin current
+
+Two mechanisms, answering different questions:
+
+| | question | mechanism |
+| -- | -- | -- |
+| **Verification** | does the pin we have still match the code? | `spec-drift.yml` → `check_spec_drift.py` |
+| **Detection** | has a newer spec released than we pin? | `spec-autobump.yml` → `sync_api_version.py` |
+
+`spec-autobump.yml` runs daily (and on a `repository_dispatch` from the api repo,
+and on demand), and when a newer release exists it classifies the delta with
+[oasdiff](https://github.com/oasdiff/oasdiff) and opens a PR touching only
+`.api-version` and the managed README line above. Non-breaking deltas are labelled
+`spec-autobump`; breaking ones `breaking · needs-SDK-update`, with review
+requested. Everything else — `endpoints.txt`, `METHOD_OP`, the coverage numbers,
+the `nexus-exchange` dependency — stays human-owned, and green `spec-drift` on
+that PR is the merge signal. Check the lag by hand with:
+
+```sh
+python3 scripts/sync_api_version.py --check
+```
+
+Two things gate that PR actually landing on its own, neither of them in this
+repo's gift: `allow_auto_merge` is disabled here (the workflow probes it and says
+so in the PR body rather than silently no-opping), and
+[ENG-4149](https://linear.app/nexus-labs/issue/ENG-4149) provisions the ruleset
+bypass. Until both are resolved a human merges the PR.
 
 See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
 
