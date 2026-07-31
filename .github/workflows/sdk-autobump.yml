@@ -241,14 +241,21 @@ jobs:
 
           branch="chore/sdk-autobump-${NEW_VERSION}"
 
-          # Idempotent: if the branch or an open PR already exists, leave it rather
-          # than churning a duplicate on every poll.
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            echo "Branch $branch already exists upstream; nothing to do."
+          # Idempotent: don't churn a duplicate on every poll. The branch carries the
+          # version, so anything found here is about *this* bump.
+          #
+          # Order matters. Checking the branch first would make the PR check below
+          # unreachable, and would turn one bad outcome permanent: if `gh pr create`
+          # ever fails, the branch is already pushed, so every later run would find it
+          # and skip — the bump would never get a PR, and the workflow would stay green
+          # while doing nothing. `--state all` so a PR a human deliberately closed
+          # stays closed instead of being reopened daily.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            echo "A PR for $branch already exists (any state); nothing to do."
             exit 0
           fi
-          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
-            echo "An open PR for $branch already exists; nothing to do."
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "::warning::branch $branch exists upstream but has no PR — a previous run pushed it and then failed to open one. Open a PR from that branch, or delete it and let the next poll retry."
             exit 0
           fi
 

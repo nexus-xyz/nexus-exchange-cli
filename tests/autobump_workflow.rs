@@ -140,6 +140,38 @@ fn a_failed_arming_call_corrects_the_pr_body() {
     );
 }
 
+/// The other ordering that bites: the two idempotency guards. Checking the branch
+/// before the PR makes the PR check unreachable and turns a one-off `gh pr create`
+/// failure permanent — the branch is already pushed, so every later poll finds it,
+/// skips, and reports success while the bump never gets a PR.
+#[test]
+fn the_pr_check_precedes_the_branch_check() {
+    let wf = read(WORKFLOW);
+
+    let pr_check = *offsets_in_code(&wf, "gh pr list")
+        .first()
+        .expect("the idempotency check no longer looks for an existing PR");
+    let branch_check = *offsets_in_code(&wf, "git ls-remote")
+        .first()
+        .expect("the idempotency check no longer looks for an existing branch");
+
+    assert!(
+        pr_check < branch_check,
+        "the `git ls-remote` branch check runs before the `gh pr list` PR check in \
+         {WORKFLOW}, which makes the PR check unreachable: a branch pushed by a run \
+         whose `gh pr create` failed would make every later run skip silently, green, \
+         forever. Check for the PR first."
+    );
+
+    assert!(
+        wf.contains("--state all"),
+        "the PR idempotency check in {WORKFLOW} no longer uses `--state all`. Scoped \
+         to open PRs it cannot tell 'a human closed this bump' from 'no PR was ever \
+         opened', so it would either reopen a rejected bump daily or stay silent on a \
+         failed create."
+    );
+}
+
 /// Cross-file: the workflow passes these states to the renderer as `--auto-merge`,
 /// and argparse `choices` rejects anything it does not know. A state added on one
 /// side only would fail the whole step at the moment it is first needed — which is
