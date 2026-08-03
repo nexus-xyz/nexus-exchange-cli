@@ -56,10 +56,10 @@ red.
        that isn't there.
 
 4. CLI_SOURCES completeness
-   No .rs file OUTSIDE CLI_SOURCES may contain a mapped SDK method call. The
-   parser only reads the listed files, so moving a command handler into a new
-   module would otherwise silently under-count the CLI's targeted ops and read as
-   green. Fail instead, and name the file to add.
+   No .rs file OUTSIDE CLI_SOURCES may contain a mapped SDK method call — anywhere
+   under src/, at any depth. The parser only reads the listed files, so moving a
+   command handler into a new module would otherwise silently under-count the CLI's
+   targeted ops and read as green. Fail instead, and name the file to add.
 
 Usage: check_spec_drift.py <openapi.json>
 """
@@ -79,9 +79,10 @@ CLI_SOURCES = [
     os.path.join(REPO, "src", "wsclient.rs"),
 ]
 
-# Every .rs file the CLI builds from. Invariant 4 scans the ones NOT in
-# CLI_SOURCES for mapped SDK calls, so "the handler moved to a new module" is a
-# red check rather than a silent under-count.
+# Every .rs file the CLI builds from. Invariant 4 walks this tree and scans the
+# files NOT in CLI_SOURCES for mapped SDK calls, so "the handler moved to a new
+# module" is a red check rather than a silent under-count — including a nested one
+# (`src/commands/orders.rs`), which is the likeliest way such a module appears.
 SRC_DIR = os.path.join(REPO, "src")
 
 # Map each SDK `Client` method the CLI calls to the (METHOD, path) spec operation
@@ -262,27 +263,38 @@ def called_ops(sources=CLI_SOURCES):
     return ops, seen_methods
 
 
+def _walk_error(err):
+    """os.walk swallows errors by default; this invariant must fail closed instead —
+    a directory it cannot read is a directory it cannot clear."""
+    where = getattr(err, "filename", None) or "the src tree"
+    sys.exit(f"ERROR: cannot scan {where!r} for unscanned SDK calls: {err}")
+
+
 def unscanned_sources(src_dir=SRC_DIR, sources=CLI_SOURCES):
     """Invariant 4: .rs files under src/ that the parser does NOT read but which
-    contain a mapped SDK method call. Returns [(path, sorted(methods))]."""
+    contain a mapped SDK method call. Returns [(path, sorted(methods))].
+
+    Walks the whole tree rather than listing one level. `src/` is flat today, but
+    "the handler moved into a new module" is precisely what this invariant exists to
+    catch, and the natural way to add a module is `src/commands/orders.rs` — which a
+    single-level listing would not see, leaving the check green on the one change it
+    was written for."""
     scanned = {os.path.abspath(p) for p in sources}
     offenders = []
-    try:
-        names = sorted(os.listdir(src_dir))
-    except OSError as e:
-        sys.exit(f"ERROR: cannot list {src_dir!r}: {e}")
-    for name in names:
-        path = os.path.join(src_dir, name)
-        if not name.endswith(".rs") or os.path.abspath(path) in scanned:
-            continue
-        try:
-            with open(path) as f:
-                src = f.read()
-        except OSError as e:
-            sys.exit(f"ERROR: cannot read CLI source {path!r}: {e}")
-        found = sorted({m.group(1) for m in _CALL_RE.finditer(src)})
-        if found:
-            offenders.append((os.path.relpath(path, REPO), found))
+    for root, dirs, names in os.walk(src_dir, onerror=_walk_error):
+        dirs.sort()  # deterministic report order
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            if not name.endswith(".rs") or os.path.abspath(path) in scanned:
+                continue
+            try:
+                with open(path) as f:
+                    src = f.read()
+            except OSError as e:
+                sys.exit(f"ERROR: cannot read CLI source {path!r}: {e}")
+            found = sorted({m.group(1) for m in _CALL_RE.finditer(src)})
+            if found:
+                offenders.append((os.path.relpath(path, REPO), found))
     return offenders
 
 

@@ -68,12 +68,20 @@ jobs:
             "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_REF}/openapi.json" \
             -o openapi.pinned.json
 
-      # Self-test the checker before trusting a green run from it: proves each of
-      # the four invariants goes RED when defeated (ENG-7962). Hermetic — no
-      # network, no pinned spec. Runs first so a broken checker fails with a clear
-      # message rather than a misleading "OK".
-      - name: Self-test the drift checker
-        run: python3 scripts/test_check_spec_drift.py
+      # Self-test BOTH checkers before trusting a green run from either: proves each
+      # of the six invariants goes RED when defeated (ENG-7962). Hermetic — no
+      # network, no pinned spec, no crates.io (the parity checks take the crate's
+      # data as arguments; the tarball plumbing is covered with temp files). Runs
+      # first so a broken checker fails with a clear message rather than a
+      # misleading "OK".
+      #
+      # Both, not just the drift one: a self-test that nothing runs is the same
+      # unearned reassurance as a check that cannot fail, and README/AGENTS.md both
+      # state these run ahead of the checks they cover.
+      - name: Self-test the checkers
+        run: |
+          python3 scripts/test_check_spec_drift.py
+          python3 scripts/test_sdk_parity.py
 
       - name: Check drift
         run: python3 scripts/check_spec_drift.py openapi.pinned.json

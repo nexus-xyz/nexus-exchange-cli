@@ -66,7 +66,10 @@ class SyntheticRepo:
         os.mkdir(self.src_dir)
         self.sources = []
         for name, body in files.items():
+            # `name` may be nested ("commands/orders.rs") so a submodule can be
+            # placed the way a real one would be — invariant 4 has to walk into it.
             path = os.path.join(self.src_dir, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 f.write(body)
             self.sources.append(path)
@@ -76,8 +79,14 @@ class SyntheticRepo:
 
     def unscan(self, name):
         """Drop `name` from the scanned set while leaving it on disk — the
-        invariant-4 setup (a handler module the parser does not read)."""
-        self.sources = [p for p in self.sources if os.path.basename(p) != name]
+        invariant-4 setup (a handler module the parser does not read). Accepts a
+        bare filename or a nested one ("commands/orders.rs")."""
+        self.sources = [
+            p
+            for p in self.sources
+            if os.path.basename(p) != name
+            and os.path.relpath(p, self.src_dir) != name
+        ]
 
     def targeted(self):
         return csd.load_targeted(self.endpoints)
@@ -313,6 +322,50 @@ class TestInvariant4SourcesCompleteness(unittest.TestCase):
             ["GET /markets"],
         )
         repo.unscan("notes.md")
+        self.assertEqual(repo.check(spec_of(MARKETS)), 0)
+
+    def test_handler_in_a_nested_module_fails(self):
+        """`src/` is flat today, so a one-level listing passed the test above while
+        missing the likeliest shape of the very change this invariant guards: a
+        handler moved to `src/commands/orders.rs`. The scan has to walk."""
+        repo = SyntheticRepo(
+            self,
+            {
+                "main.rs": RUST_CALLING_MARKETS,
+                "commands/positions.rs": "client.fetch_positions().await?;\n",
+            },
+            ["GET /markets"],
+        )
+        repo.unscan("commands/positions.rs")
+        self.assertGreater(repo.check(spec_of(MARKETS, POSITIONS)), 0)
+
+    def test_nested_module_is_named_in_the_error(self):
+        """The fix is "add this file to CLI_SOURCES", so the path has to appear —
+        including its directory, or the reader looks in the wrong place."""
+        repo = SyntheticRepo(
+            self,
+            {
+                "main.rs": RUST_CALLING_MARKETS,
+                "commands/positions.rs": "client.fetch_positions().await?;\n",
+            },
+            ["GET /markets"],
+        )
+        repo.unscan("commands/positions.rs")
+        offenders = csd.unscanned_sources(repo.src_dir, repo.sources)
+        self.assertEqual(len(offenders), 1)
+        self.assertTrue(
+            offenders[0][0].endswith(os.path.join("commands", "positions.rs")),
+            f"expected the nested path in the report, got {offenders[0][0]!r}",
+        )
+        self.assertEqual(offenders[0][1], ["fetch_positions"])
+
+    def test_nested_module_without_sdk_calls_passes(self):
+        repo = SyntheticRepo(
+            self,
+            {"main.rs": RUST_CALLING_MARKETS, "commands/render.rs": "fn go() {}\n"},
+            ["GET /markets"],
+        )
+        repo.unscan("commands/render.rs")
         self.assertEqual(repo.check(spec_of(MARKETS)), 0)
 
 

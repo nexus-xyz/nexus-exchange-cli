@@ -93,12 +93,29 @@ def check_manifest_subset(locked, sdk_ops, our_ops):
     ]
 
     if not unreachable:
-        covered = len(our_ops)
-        print(
-            f"OK: all {covered} endpoints.txt operation(s) are wrapped by "
-            f"{sdk_crate.SDK_CRATE} {locked} (which wraps {len(sdk_norm)} in total)."
+        # Count the exemptions actually present rather than the size of the
+        # allowlist. They coincide today only because invariant 3 rejects an unused
+        # NON_REST_TARGETS entry; deriving the number from the manifest keeps this
+        # line correct on its own, and keeps it from claiming the WebSocket upgrade
+        # is "wrapped by the crate" when the whole point is that it isn't.
+        exempt = sum(
+            1
+            for m, p in our_ops
+            if (m, csd.normalize_path(p)) in csd.NON_REST_TARGETS
         )
-        gap = len(sdk_norm) - covered + len(csd.NON_REST_TARGETS)
+        covered = len(our_ops) - exempt
+        note = (
+            f" ({exempt} non-REST target(s) exempt — reached by the streaming "
+            f"client, not a REST wrapper)"
+            if exempt
+            else ""
+        )
+        print(
+            f"OK: all {covered} REST endpoints.txt operation(s) are wrapped by "
+            f"{sdk_crate.SDK_CRATE} {locked} (which wraps {len(sdk_norm)} in "
+            f"total){note}."
+        )
+        gap = len(sdk_norm) - covered
         if gap > 0:
             print(
                 f"    Informational: {gap} operation(s) the SDK wraps have no CLI "

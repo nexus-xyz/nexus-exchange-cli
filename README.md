@@ -517,8 +517,9 @@ invariants:
 3. neither allowlist holds a stale exemption — an entry nothing calls, an entry
    the pinned spec has since caught up with, or one whose `METHOD_OP` verb doesn't
    match a path the spec does define;
-4. no source file outside the two scanned ones reaches the SDK, so moving a
-   command handler into a new module can't silently under-count coverage.
+4. no source file outside the two scanned ones reaches the SDK — anywhere under
+   `src/`, at any depth — so moving a command handler into a new module (including
+   a nested `src/commands/…`) can't silently under-count coverage.
 
 Two more run in the same workflow, checking the CLI against the **crate** rather
 than the spec — read straight out of the published `.crate` tarball, so no token is
@@ -558,6 +559,7 @@ exemption. Run it locally with a fetched spec:
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
 python3 scripts/check_spec_drift.py openapi.pinned.json
 python3 scripts/test_check_spec_drift.py   # no network needed
+python3 scripts/test_sdk_parity.py         # no network needed
 ```
 
 Coverage is **structurally capped by the SDK**: the CLI is a thin layer over
