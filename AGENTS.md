@@ -31,9 +31,32 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
 
 - `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` all pass — CI
   enforces these.
+- `python3 scripts/test_check_spec_drift.py` and
+  `python3 scripts/test_sdk_parity.py` pass (no network). CI runs both on every PR,
+  ahead of the checks they cover.
+- If you touched `endpoints.txt`, `METHOD_OP`, either allowlist, the
+  `nexus-exchange` dependency, or a file that calls the SDK:
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
+  python3 scripts/check_spec_drift.py openapi.pinned.json   # vs the spec
+  python3 scripts/check_sdk_parity.py                       # vs the SDK crate
+  ```
 
 ## Notes
 
 - Capabilities are inherited from the `nexus-exchange-rs` dependency — bump it to
   pick up new endpoints rather than reimplementing.
+- The spec pin (`.api-version`) is **derived from the `nexus-exchange` crate**, not
+  chosen here — the crate is what sends `X-Nexus-Api-Version`. Don't hand-edit it or
+  the marked README block; run `scripts/sync_sdk_version.py --write`. CI fails if
+  the pin, the README line, and the crate disagree.
+- Follow the crate, not the spec. A spec release is not actionable here until
+  `nexus-exchange-rs` ships wrappers and publishes; that is why this repo has
+  `sdk-autobump.yml` rather than the fleet's `spec-autobump.yml` and is not a target
+  of the api repo's dispatch fan-out.
+- A crate bump can change the SDK's Rust API, not just its paths — no spec-level
+  check sees that, so always `cargo check` after one.
+- A CLI command can only reach what the SDK wraps, so `endpoints.txt` is capped by
+  `nexus-exchange`. The checks catch a manifest that *mismatches* the SDK; they
+  cannot see a wrapper the CLI never grew a command for (bridge deposits, today).
 - Pre-1.0 versioning: bump minor on breaking changes, patch on features/fixes.

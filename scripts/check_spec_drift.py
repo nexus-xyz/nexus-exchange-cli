@@ -10,7 +10,11 @@ over the SDK's `Client`, so it instead calls *named* SDK methods
 the CLI's targeted op set from those `client.<method>(` calls and map each method
 to its spec operation via the METHOD_OP table below.
 
-Two independent invariants are enforced:
+Four invariants are enforced. 1 and 2 are the contract; 3 and 4 exist because both
+of them can be silently defeated — an allowlist entry that stops being earned, or a
+command handler in a file the parser never reads — and a defeated check still
+prints OK. `scripts/test_check_spec_drift.py` defeats each one and asserts it goes
+red.
 
 1. endpoints.txt <-> spec
    Every endpoint the CLI targets (endpoints.txt) must exist in the pinned
@@ -21,8 +25,9 @@ Two independent invariants are enforced:
 
 2. CLI code <-> endpoints.txt
    The set of SDK methods the CLI actually calls (parsed from the source files in
-   CLI_SOURCES and mapped through METHOD_OP) must equal the endpoints.txt set,
-   modulo two explicit, documented allowlists:
+   CLI_SOURCES and mapped through METHOD_OP) must EQUAL the endpoints.txt set —
+   real set equality in both directions, not a subset check — modulo two
+   explicit, documented allowlists:
 
      * CODE_ONLY_OPS    — a command calls an SDK method, but the op is AHEAD OF
                           the pinned spec, so it is intentionally NOT in
@@ -35,6 +40,26 @@ Two independent invariants are enforced:
    The check fails if (a) the CLI calls a mapped method whose op is neither in
    endpoints.txt nor CODE_ONLY_OPS, or (b) endpoints.txt lists an op that no
    called method maps to and that is not in NON_REST_TARGETS.
+
+3. Allowlist hygiene — an exemption must stay earned (ENG-7962)
+   Both allowlists suppress a real invariant, so a stale entry is a silent hole
+   rather than a visible one. Three ways an entry stops being earned, all fatal:
+
+     * a CODE_ONLY_OPS op no command calls any more — nothing to exempt;
+     * a CODE_ONLY_OPS op the PINNED SPEC now defines — either the spec caught up
+       (move the line into endpoints.txt) or the METHOD_OP row names the wrong
+       verb for a path the spec does model. The second case is what ENG-7962
+       actually found: `amend_order` was mapped to `PUT /orders/{order_id}` while
+       the SDK issues `PATCH`, and `PATCH /orders/{order_id}` has been in the spec
+       since v0.7.1 — so a covered operation sat exempted and uncounted;
+     * a NON_REST_TARGETS op that endpoints.txt does not list — exempting a line
+       that isn't there.
+
+4. CLI_SOURCES completeness
+   No .rs file OUTSIDE CLI_SOURCES may contain a mapped SDK method call — anywhere
+   under src/, at any depth. The parser only reads the listed files, so moving a
+   command handler into a new module would otherwise silently under-count the CLI's
+   targeted ops and read as green. Fail instead, and name the file to add.
 
 Usage: check_spec_drift.py <openapi.json>
 """
@@ -53,6 +78,12 @@ CLI_SOURCES = [
     os.path.join(REPO, "src", "main.rs"),
     os.path.join(REPO, "src", "wsclient.rs"),
 ]
+
+# Every .rs file the CLI builds from. Invariant 4 walks this tree and scans the
+# files NOT in CLI_SOURCES for mapped SDK calls, so "the handler moved to a new
+# module" is a red check rather than a silent under-count — including a nested one
+# (`src/commands/orders.rs`), which is the likeliest way such a module appears.
+SRC_DIR = os.path.join(REPO, "src")
 
 # Map each SDK `Client` method the CLI calls to the (METHOD, path) spec operation
 # it issues. This is the CLI's equivalent of the SDK's HELPER_METHOD+path-literal
@@ -104,10 +135,14 @@ METHOD_OP = {
     "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
     "delete_api_key": ("DELETE", "/keys/{key_id}"),  # no /api/v1 variant yet
     "revoke_agent": ("DELETE", "/agents/{address}"),  # no /api/v1 variant yet
+    # v1 exposes no amend; the SDK issues signed_patch_with_query on the gateway
+    # path (nexus-exchange 0.6.0 src/rest.rs::amend_order). It was mapped to PUT
+    # here, which hid a covered operation behind CODE_ONLY_OPS — see ENG-7962 and
+    # invariant 3.
+    "amend_order": ("PATCH", "/orders/{order_id}"),
     # websocket
     "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # ── ahead of the pinned spec (see CODE_ONLY_OPS) ──
-    "amend_order": ("PUT", "/orders/{order_id}"),
     "set_leverage": ("POST", "/account/leverage"),
     "set_margin_mode": ("POST", "/account/margin-mode"),
     "fetch_funding_payments": ("GET", "/funding-payments"),
@@ -121,8 +156,13 @@ METHOD_OP = {
 # AHEAD OF the pinned spec, so adding them to endpoints.txt would (correctly)
 # fail the endpoints.txt<->spec invariant until the spec ships them. Move a row
 # out of here into endpoints.txt once the pinned spec gains the operation.
+#
+# Invariant 3 keeps this list honest: an entry the pinned spec defines (at the
+# same path, under ANY method) fails the check, so "ahead of spec" cannot quietly
+# become "covered but uncounted". `PUT /orders/{}` used to sit here on exactly
+# that mistake (ENG-7962) — the operation is `PATCH /orders/{order_id}` and the
+# spec has had it since v0.7.1, so it now lives in endpoints.txt.
 CODE_ONLY_OPS = {
-    ("PUT", "/orders/{}"),               # order amend  -> amend_order
     ("POST", "/account/leverage"),       # account leverage -> set_leverage
     ("POST", "/account/margin-mode"),    # account margin-mode -> set_margin_mode
     ("GET", "/funding-payments"),        # funding-payments -> fetch_funding_payments
@@ -206,7 +246,8 @@ def called_ops(sources=CLI_SOURCES):
     seen_methods = set()
     for path in sources:
         try:
-            src = open(path).read()
+            with open(path) as f:
+                src = f.read()
         except OSError as e:
             sys.exit(f"ERROR: cannot read CLI source {path!r}: {e}")
         for m in _CALL_RE.finditer(src):
@@ -222,18 +263,77 @@ def called_ops(sources=CLI_SOURCES):
     return ops, seen_methods
 
 
-def check_code_vs_targets(targeted):
-    """Invariant 2: called SDK-method ops == endpoints.txt, modulo the two
-    documented allowlists. Returns the number of errors printed."""
-    called, _ = called_ops()
+def _walk_error(err):
+    """os.walk swallows errors by default; this invariant must fail closed instead —
+    a directory it cannot read is a directory it cannot clear."""
+    where = getattr(err, "filename", None) or "the src tree"
+    sys.exit(f"ERROR: cannot scan {where!r} for unscanned SDK calls: {err}")
+
+
+def unscanned_sources(src_dir=SRC_DIR, sources=CLI_SOURCES):
+    """Invariant 4: .rs files under src/ that the parser does NOT read but which
+    contain a mapped SDK method call. Returns [(path, sorted(methods))].
+
+    Walks the whole tree rather than listing one level. `src/` is flat today, but
+    "the handler moved into a new module" is precisely what this invariant exists to
+    catch, and the natural way to add a module is `src/commands/orders.rs` — which a
+    single-level listing would not see, leaving the check green on the one change it
+    was written for."""
+    scanned = {os.path.abspath(p) for p in sources}
+    offenders = []
+    for root, dirs, names in os.walk(src_dir, onerror=_walk_error):
+        dirs.sort()  # deterministic report order
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            if not name.endswith(".rs") or os.path.abspath(path) in scanned:
+                continue
+            try:
+                with open(path) as f:
+                    src = f.read()
+            except OSError as e:
+                sys.exit(f"ERROR: cannot read CLI source {path!r}: {e}")
+            found = sorted({m.group(1) for m in _CALL_RE.finditer(src)})
+            if found:
+                offenders.append((os.path.relpath(path, REPO), found))
+    return offenders
+
+
+def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
+    """Invariants 2-4: called SDK-method ops == endpoints.txt (modulo the two
+    documented allowlists), the allowlists are still earned, and no unscanned
+    source file reaches the API. Returns the number of errors printed.
+
+    `sources` / `src_dir` default to the real CLI_SOURCES / SRC_DIR; the self-test
+    overrides them with synthetic Rust so each invariant can be defeated in
+    isolation."""
+    sources = CLI_SOURCES if sources is None else sources
+    src_dir = SRC_DIR if src_dir is None else src_dir
+    called, _ = called_ops(sources)
     targeted_norm = {(m, normalize_path(p)) for m, p in targeted}
 
     # (a) called but not listed (and not an intentional code-only op).
     called_missing_from_targets = sorted(called - targeted_norm - CODE_ONLY_OPS)
     # (b) listed but not called (and not an intentional non-REST target).
     targets_without_call = sorted(targeted_norm - called - NON_REST_TARGETS)
-    # Bonus: a CODE_ONLY_OPS entry no command calls is stale — catch it.
+    # Invariant 3: a CODE_ONLY_OPS entry no command calls is stale.
     stale_code_only = sorted(CODE_ONLY_OPS - called)
+    # Invariant 3: a CODE_ONLY_OPS entry the pinned spec already defines is not
+    # "ahead of spec". Compare by PATH (any method) so a wrong verb in METHOD_OP
+    # is caught too — that is the failure mode ENG-7962 found. Report the spec's
+    # own methods for the path so the fix is obvious from the log.
+    spec_methods_by_path = {}
+    for m, p in available:
+        spec_methods_by_path.setdefault(normalize_path(p), set()).add(m)
+    caught_up_code_only = sorted(
+        (m, p, sorted(spec_methods_by_path[p]))
+        for m, p in CODE_ONLY_OPS
+        if p in spec_methods_by_path
+    )
+    # Invariant 3: a NON_REST_TARGETS entry endpoints.txt does not list exempts
+    # nothing.
+    stale_non_rest = sorted(NON_REST_TARGETS - targeted_norm)
+    # Invariant 4.
+    unscanned = unscanned_sources(src_dir, sources)
 
     errors = 0
     if called_missing_from_targets:
@@ -265,28 +365,68 @@ def check_code_vs_targets(targeted):
         for m, p in stale_code_only:
             print(f"  - {m} {p}")
 
+    if caught_up_code_only:
+        errors += len(caught_up_code_only)
+        print(
+            f"\nERROR: {len(caught_up_code_only)} CODE_ONLY_OPS entr(ies) are NOT "
+            f"ahead of the pinned spec — the spec defines that path, so the "
+            f"exemption is hiding a covered operation:"
+        )
+        for m, p, spec_methods in caught_up_code_only:
+            if m in spec_methods:
+                print(
+                    f"  - {m} {p}: the pinned spec has it. Move the line into "
+                    f"endpoints.txt and drop it from CODE_ONLY_OPS."
+                )
+            else:
+                print(
+                    f"  - {m} {p}: the pinned spec models this path as "
+                    f"{'/'.join(spec_methods)}, not {m}. Fix the METHOD_OP verb to "
+                    f"match what the SDK issues, then move the line into "
+                    f"endpoints.txt."
+                )
+
+    if stale_non_rest:
+        errors += len(stale_non_rest)
+        print(
+            f"\nERROR: {len(stale_non_rest)} NON_REST_TARGETS entr(ies) are not "
+            f"listed in endpoints.txt, so they exempt nothing (remove them from the "
+            f"allowlist, or add the endpoints.txt line they were meant to cover):"
+        )
+        for m, p in stale_non_rest:
+            print(f"  - {m} {p}")
+
+    if unscanned:
+        errors += len(unscanned)
+        print(
+            f"\nERROR: {len(unscanned)} CLI source file(s) outside CLI_SOURCES call "
+            f"mapped SDK methods, so their ops are invisible to this check (add "
+            f"them to CLI_SOURCES):"
+        )
+        for path, methods in unscanned:
+            print(f"  - {path}: {', '.join(methods)}")
+
     if not errors:
         print(
             f"\nOK: the CLI calls {len(called)} mapped SDK op(s); all are in "
             f"endpoints.txt or CODE_ONLY_OPS, and every endpoints.txt entry has a "
             f"calling command or is in NON_REST_TARGETS."
         )
+        print(
+            f"OK: both allowlists are still earned "
+            f"({len(CODE_ONLY_OPS)} ahead-of-spec, {len(NON_REST_TARGETS)} non-REST), "
+            f"and no source file outside CLI_SOURCES reaches the API."
+        )
     return errors
 
 
-def main():
-    if len(sys.argv) != 2:
-        sys.exit(f"usage: {sys.argv[0]} <openapi.json>")
-    with open(sys.argv[1]) as f:
-        spec = json.load(f)
-    version = spec.get("info", {}).get("version", "?")
-    targeted = load_targeted()
-    available = spec_ops(spec)
-
+def check_targets_vs_spec(targeted, available):
+    """Invariant 1: every endpoints.txt op exists in the pinned spec. Also prints
+    the coverage line the dashboard scrapes and the informational uncovered list.
+    Returns the number of errors printed."""
     missing = [op for op in targeted if op not in available]
     uncovered = sorted(available - set(targeted))
 
-    print(f"Spec version: {version}")
     pct = 100.0 * len(targeted) / len(available) if available else 0.0
     print(
         f"CLI targets {len(targeted)} of {len(available)} spec endpoints "
@@ -298,20 +438,35 @@ def main():
         for m, p in uncovered:
             print(f"  - {m} {p}")
 
-    failures = 0
-    if missing:
-        failures += len(missing)
-        print(
-            f"\nERROR: {len(missing)} targeted endpoint(s) are NOT in the spec "
-            f"(removed/renamed/typo):"
-        )
-        for m, p in missing:
-            print(f"  - {m} {p}")
-    else:
+    if not missing:
         print("\nOK: every targeted endpoint exists in the pinned spec.")
+        return 0
 
-    # Invariant 2: CLI code <-> endpoints.txt.
-    failures += check_code_vs_targets(targeted)
+    print(
+        f"\nERROR: {len(missing)} targeted endpoint(s) are NOT in the spec "
+        f"(removed/renamed/typo):"
+    )
+    for m, p in missing:
+        print(f"  - {m} {p}")
+    return len(missing)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(f"usage: {sys.argv[0]} <openapi.json>")
+    with open(sys.argv[1]) as f:
+        spec = json.load(f)
+    version = spec.get("info", {}).get("version", "?")
+    targeted = load_targeted()
+    available = spec_ops(spec)
+
+    print(f"Spec version: {version}")
+
+    # Invariant 1: endpoints.txt <-> spec.
+    failures = check_targets_vs_spec(targeted, available)
+    # Invariants 2-4: CLI code <-> endpoints.txt, allowlist hygiene, and
+    # CLI_SOURCES completeness.
+    failures += check_code_vs_targets(targeted, available)
 
     if failures:
         sys.exit(1)
