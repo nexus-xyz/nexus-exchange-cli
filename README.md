@@ -338,18 +338,37 @@ much to withdraw.
 
 ### Network selection
 
-By default the CLI targets the **stable** network. Override per-invocation:
+The CLI targets a **network**, not a release channel. By default that is
+**testnet** — play funds credited by the faucet — because the default must never
+be a network that moves real money.
 
 ```sh
-nexus --network beta markets
+nexus markets                                    # testnet (the default)
 nexus --network local markets
 nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 ```
 
 | Flag | Env | Default |
 |---|---|---|
-| `--network <stable\|beta\|local>` | `NEXUS_NETWORK` | `stable` |
+| `--network <mainnet\|testnet\|local>` | `NEXUS_NETWORK` | `testnet` |
 | `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
+
+| Network | Funds | Notes |
+|---|---|---|
+| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet, and its base uses a different path layout than the one the SDK signs. Use `--base-url` to target a host you control. |
+| `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
+| `local` | play | A locally run indexer. A developer convenience, never a fallback. |
+
+> **`stable` and `beta` were retired** in `nexus-exchange` 0.8.0 and are no
+> longer accepted. They named *release channels*, which is how a play-funds host
+> came to be labelled "production" — so `stable`'s replacement is **`testnet`**,
+> not `mainnet`. That mapping is the correction, not a rename: reading `stable`
+> as `mainnet` has it backwards. A config file still naming one keeps working
+> (the default is the same host it pointed at) and prints a warning telling you
+> what to change.
+
+Credentials are minted **per network** and are invalid on any other, so an API
+key configured for one network will not authenticate against another.
 
 ### Output format
 
@@ -491,8 +510,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as
-`X-Nexus-Api-Version` by `nexus-exchange` **`0.7.0`**.
+Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.8.0`**.
 
 <!-- api-version-sync:end -->
 
