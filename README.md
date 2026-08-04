@@ -491,8 +491,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as
-`X-Nexus-Api-Version` by `nexus-exchange` **`0.7.0`**.
+Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.8.0`**.
 
 <!-- api-version-sync:end -->
 
