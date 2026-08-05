@@ -1,0 +1,338 @@
+name: SDK autobump
+
+# Detect a newer published `nexus-exchange` crate and open a PR that bumps the
+# dependency, letting the spec pin follow (ENG-7962).
+#
+# WHY THE CRATE AND NOT THE SPEC. Every other surface in the fleet (py, ts, mcp)
+# implements the spec directly, so `api -> surface` is the right edge for them and
+# the api repo fans a `spec-released` dispatch out to them. The CLI is the only one
+# that wraps another SDK: it issues no HTTP of its own, reaching the API solely
+# through `nexus_exchange::Client`, which pins the spec tag and sends it as
+# `X-Nexus-Api-Version`. So for this repo:
+#
+#   * a spec release alone is NOT actionable — new operations are unreachable until
+#     the crate wraps them, and advancing `.api-version` without a crate release
+#     makes the pin and the README claim a version the binary never sends;
+#   * a crate release IS actionable, and it carries the correct pin with it.
+#
+# The chain is `api -> rs -> cli`. This repo is therefore deliberately NOT a target
+# of the api repo's spec-dispatch fan-out (ENG-8464) — a `spec-released` event here
+# would have nothing to act on. `check_sdk_parity.py` enforces pin == crate pin in
+# CI, so a hand-advanced pin fails rather than shipping a false claim.
+#
+# HOW IT RUNS. A daily poll of the crates.io API. That is the whole mechanism, and
+# it needs no secret and no cross-repo permission — crates.io wants only a
+# User-Agent, and the crate's own `.api-version` and `endpoints.txt` are read from
+# the published `.crate` tarball, which is the exact artifact cargo compiles. No
+# dispatch from nexus-exchange-rs is required; one would only cut detection latency
+# from a day to a minute, which is worth nothing here and would add a token
+# dependency on ENG-4149.
+#
+# ONE THING WORTH CONFIGURING. A PR opened with the default GITHUB_TOKEN does not
+# trigger other workflows, so `spec-drift` and CI would not run on it. Set
+# `SDK_DISPATCH_TOKEN` (any PAT/app token with repo scope) and they do. Without it
+# this workflow still opens the PR, runs `cargo check` itself so the "does it even
+# compile" question is answered either way, and says plainly in the PR body that
+# the checks did not run.
+
+on:
+  schedule:
+    # Daily poll. Offset from the SDK's own 08:23 spec poll so the two don't
+    # contend, and late enough that a crate published overnight is indexed.
+    - cron: "47 8 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "nexus-exchange version to evaluate (e.g. 0.7.0). Defaults to crates.io latest."
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Labels are an Issues-scoped resource, so creating them and attaching them to
+  # the PR needs this even though the target is a pull request.
+  issues: write
+
+concurrency:
+  # Serialize on the workflow, not the version: two near-simultaneous releases must
+  # not race to bump the same dependency.
+  group: sdk-autobump
+  cancel-in-progress: false
+
+env:
+  SPEC_REPO: nexus-xyz/nexus-exchange-api
+
+jobs:
+  autobump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The bump token, when present, is what makes the opened PR trigger
+          # spec-drift and CI. Falls back to the default token, which cannot.
+          token: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+
+      - name: Note whether PR checks will be able to run
+        id: token
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.SDK_DISPATCH_TOKEN }}" ]; then
+            echo "checks=will-run" >> "$GITHUB_OUTPUT"
+          else
+            echo "checks=will-not-run" >> "$GITHUB_OUTPUT"
+            echo "::warning::SDK_DISPATCH_TOKEN is unset, so the PR is opened with the default GITHUB_TOKEN and spec-drift/CI will NOT trigger on it. This job runs cargo check itself; a human must still kick the full checks."
+          fi
+
+      - name: Is a newer crate published?
+        id: gate
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--check)
+          [ -n "${INPUT_VERSION:-}" ] && args+=(--latest "$INPUT_VERSION")
+          # exit 3 == behind (a newer crate exists), 0 == current/ahead.
+          if python3 scripts/sync_sdk_version.py "${args[@]}"; then
+            echo "Dependency is current; nothing to bump."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            if [ "$rc" -eq 3 ]; then
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::sync_sdk_version.py --check failed (exit $rc)"
+              exit "$rc"
+            fi
+          fi
+          # Record the pin BEFORE the bump, for the oasdiff comparison below.
+          echo "old_tag=$(cat .api-version)" >> "$GITHUB_OUTPUT"
+
+      # Reported even when there is nothing to bump: if the api repo has released a
+      # spec the crate has not picked up yet, that lag is rs's to close, not ours.
+      # Surfacing it as a log line beats manufacturing a PR we could not merge.
+      - name: Report spec lag behind the SDK (informational)
+        if: always() && steps.gate.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          spec_latest="$(gh api "repos/${SPEC_REPO}/releases/latest" --jq .tag_name)"
+          pinned="$(cat .api-version)"
+          if [ "$spec_latest" != "$pinned" ]; then
+            echo "::notice::api spec latest is ${spec_latest}; the crate this repo uses pins ${pinned}. If the crate has not caught up, that is a nexus-exchange-rs release away — nothing for this repo to do."
+          else
+            echo "Spec pin ${pinned} is the latest released spec."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.proceed == 'true'
+
+      - name: Apply the bump
+        if: steps.gate.outputs.proceed == 'true'
+        id: bump
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--write)
+          [ -n "${INPUT_VERSION:-}" ] && args+=(--latest "$INPUT_VERSION")
+          python3 scripts/sync_sdk_version.py "${args[@]}"
+          # Only cargo can resolve the lockfile; the script deliberately does not.
+          cargo update -p nexus-exchange
+          echo "new_version=$(python3 -c 'import sys; sys.path.insert(0,"scripts"); import sdk_crate; print(sdk_crate.locked_version())')" >> "$GITHUB_OUTPUT"
+          echo "new_tag=$(cat .api-version)" >> "$GITHUB_OUTPUT"
+
+      # The parity gate, run here too: it is the invariant that the pin equals the
+      # crate's, so a bump that got it wrong must not reach a PR at all.
+      - name: Verify pin parity with the new crate
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/check_sdk_parity.py
+
+      # A crate bump can change the SDK's Rust API, not just its paths — 0.7.0 added
+      # a `limit` parameter to `fetch_my_trades`, which does not compile against the
+      # old call site. That is invisible to every spec-level check. Run it here so
+      # the answer is in the PR even when PR-triggered CI cannot run.
+      - name: Does it still compile?
+        if: steps.gate.outputs.proceed == 'true'
+        id: compile
+        run: |
+          set -euo pipefail
+          if cargo check --all-targets --all-features 2>&1 | tee /tmp/cargo-check.log; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=broken" >> "$GITHUB_OUTPUT"
+            echo "::warning::the new crate does not compile against the current call sites; the PR needs a code change."
+          fi
+
+      - name: Fetch pinned + target specs
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.old_tag != steps.bump.outputs.new_tag
+        env:
+          OLD_TAG: ${{ steps.gate.outputs.old_tag }}
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/${SPEC_REPO}/${OLD_TAG}/openapi.json" -o /tmp/spec-old.json
+          curl -fsSL "https://raw.githubusercontent.com/${SPEC_REPO}/${NEW_TAG}/openapi.json" -o /tmp/spec-new.json
+
+      - name: Classify the spec delta with oasdiff
+        if: steps.gate.outputs.proceed == 'true'
+        id: oasdiff
+        env:
+          OLD_TAG: ${{ steps.gate.outputs.old_tag }}
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          # A crate bump does not always move the spec pin (0.6.0 -> 0.6.1 both pin
+          # v0.7.1). No spec delta to classify then, and no oasdiff to run.
+          if [ "$OLD_TAG" = "$NEW_TAG" ]; then
+            echo "verdict=no-spec-change" >> "$GITHUB_OUTPUT"
+            echo "Crate bump only; spec pin stays at ${NEW_TAG}."
+            : > /tmp/oasdiff-breaking.txt
+            exit 0
+          fi
+          curl -fsSL https://raw.githubusercontent.com/oasdiff/oasdiff/main/install.sh | sh
+          # Informational changelog in the log for the PR reviewer.
+          oasdiff changelog /tmp/spec-old.json /tmp/spec-new.json || true
+          oasdiff breaking /tmp/spec-old.json /tmp/spec-new.json --format text \
+            > /tmp/oasdiff-breaking.txt 2>&1 || true
+          # Same gate the api repo runs as "Classify API changes": `--fail-on ERR`
+          # exits non-zero iff there is an ERR-level (breaking) change.
+          if oasdiff breaking /tmp/spec-old.json /tmp/spec-new.json --fail-on ERR; then
+            echo "verdict=non-breaking" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=breaking" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `gh pr create --label` fails outright on a label the repo does not have, and
+      # neither exists here yet. Create-if-missing keeps the first real run from
+      # dying on repo setup; the create call below also tolerates their absence.
+      - name: Ensure the autobump labels exist
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          gh label create "spec-autobump" \
+            --color "0e8a16" \
+            --description "Automated nexus-exchange dependency + spec pin bump (ENG-7962)" \
+            || echo "::notice::label 'spec-autobump' already exists or could not be created"
+          gh label create "breaking · needs-SDK-update" \
+            --color "d93f0b" \
+            --description "Spec delta is breaking; needs human review (ENG-7962)" \
+            || echo "::notice::label 'breaking · needs-SDK-update' already exists or could not be created"
+
+      - name: Open the bump PR
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          OLD_TAG: ${{ steps.gate.outputs.old_tag }}
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+          VERDICT: ${{ steps.oasdiff.outputs.verdict }}
+          COMPILES: ${{ steps.compile.outputs.result }}
+          CHECKS: ${{ steps.token.outputs.checks }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No file change after bump — nothing to open."
+            exit 0
+          fi
+
+          branch="chore/sdk-autobump-${NEW_VERSION}"
+
+          # Idempotent: don't churn a duplicate on every poll. The branch carries the
+          # version, so anything found here is about *this* bump.
+          #
+          # Order matters. Checking the branch first would make the PR check below
+          # unreachable, and would turn one bad outcome permanent: if `gh pr create`
+          # ever fails, the branch is already pushed, so every later run would find it
+          # and skip — the bump would never get a PR, and the workflow would stay green
+          # while doing nothing. `--state all` so a PR a human deliberately closed
+          # stays closed instead of being reopened daily.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            echo "A PR for $branch already exists (any state); nothing to do."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "::warning::branch $branch exists upstream but has no PR — a previous run pushed it and then failed to open one. Open a PR from that branch, or delete it and let the next poll retry."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add Cargo.toml Cargo.lock .api-version README.md
+          git commit -m "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})"
+          git push --set-upstream origin "$branch"
+
+          # `gh pr merge --auto` needs a PR to arm, so arming can only happen AFTER
+          # `gh pr create` below — on a brand-new branch there is nothing to arm yet.
+          # What is decidable here is whether we will even attempt it, which is what
+          # the body needs to state:
+          #
+          #   skipped     — breaking delta or broken build; a human owns the merge.
+          #   unavailable — `allow_auto_merge` is off, so the request would be refused.
+          #   armed       — we will attempt it below, and correct the body if it fails.
+          #
+          # Nothing from here on may be fatal — the branch is pushed, and losing this
+          # step would leave it with no PR.
+          auto_merge="skipped"
+          if [ "$VERDICT" != "breaking" ] && [ "$COMPILES" = "clean" ]; then
+            allowed="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.allow_auto_merge' || echo false)"
+            if [ "$allowed" = "true" ]; then
+              auto_merge="armed"
+            else
+              auto_merge="unavailable"
+              echo "::warning::allow_auto_merge is disabled on ${GITHUB_REPOSITORY}, so auto-merge was NOT armed. A human must merge this PR."
+            fi
+          fi
+
+          render_body() {
+            python3 scripts/render_autobump_pr_body.py \
+              --new-version "$NEW_VERSION" \
+              --old-tag "$OLD_TAG" \
+              --new-tag "$NEW_TAG" \
+              --verdict "$VERDICT" \
+              --oasdiff-file /tmp/oasdiff-breaking.txt \
+              --auto-merge "$1" \
+              --compiles "$COMPILES" \
+              --pr-checks "$CHECKS" \
+              > "$RUNNER_TEMP/pr-body.md"
+          }
+
+          render_body "$auto_merge"
+
+          if [ "$VERDICT" = "breaking" ]; then
+            label="breaking · needs-SDK-update"
+          else
+            label="spec-autobump"
+          fi
+
+          # Retry without the label rather than losing the PR if it is missing.
+          gh pr create --base main --head "$branch" \
+            --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
+            --body-file "$RUNNER_TEMP/pr-body.md" \
+            --label "$label" \
+          || gh pr create --base main --head "$branch" \
+            --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
+            --body-file "$RUNNER_TEMP/pr-body.md"
+
+          if [ "$VERDICT" = "breaking" ] || [ "$COMPILES" != "clean" ]; then
+            gh pr edit "$branch" --add-reviewer nexus-xyz/eng \
+              || echo "::warning::could not request review (team handle may differ); add a reviewer manually."
+          fi
+
+          # Now that the PR exists, actually arm it. A failure here is reported as
+          # its own state: reusing `unavailable` would blame the repo setting for
+          # something else, which is the same class of lie as claiming "armed".
+          if [ "$auto_merge" = "armed" ]; then
+            if gh pr merge "$branch" --auto --squash; then
+              echo "Auto-merge armed (squash)."
+            else
+              echo "::warning::allow_auto_merge is enabled on ${GITHUB_REPOSITORY} but arming auto-merge failed; a human must merge this PR."
+              render_body "arm-failed"
+              gh pr edit "$branch" --body-file "$RUNNER_TEMP/pr-body.md" \
+                || echo "::error::auto-merge is NOT armed and the PR body could not be corrected — it still says armed. Merge this PR by hand."
+            fi
+          fi

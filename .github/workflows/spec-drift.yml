@@ -3,29 +3,31 @@ name: Spec drift
 # Verifies the spec operations the CLI's commands exercise (endpoints.txt) all
 # still exist in the pinned OpenAPI spec (.api-version), that the commands and
 # endpoints.txt stay in sync (every entry is backed by a real `client.<method>()`
-# call, and vice versa, modulo the documented allowlists), and reports the CLI's
-# API coverage % — the number the dashboard's CLI panel reads. Mirrors the same
-# workflow in the Rust SDK (nexus-exchange-rs). Fetches the spec from the
-# raw-at-tag URL and caches it by the pinned version so a normal run does no
-# network.
+# call, and vice versa, modulo the documented allowlists), that neither allowlist
+# is holding a stale exemption, and reports the CLI's API coverage % — the number
+# the dashboard's CLI panel reads. Mirrors the same workflow in the Rust SDK
+# (nexus-exchange-rs). Fetches the spec from the raw-at-tag URL and caches it by
+# the pinned version so a normal run does no network.
+#
+# Runs on EVERY pull request, deliberately (ENG-7962). It used to be filtered to
+# `.api-version`, `endpoints.txt`, the script, and the two files in CLI_SOURCES.
+# That did trigger on a pin-only bump — the pin is in the list, and the pin *is*
+# the change — but it left two holes:
+#
+#   1. a `paths`-filtered workflow is skipped, not run, on unrelated PRs, so it
+#      cannot serve as a required status check without wedging every such PR;
+#   2. moving a command handler into a NEW module dodged the filter entirely —
+#      the file wasn't listed, so drift never ran on the PR that introduced it.
+#      (Invariant 4 in the checker now also fails such a module outright, so the
+#      two defences are independent.)
+#
+# The pinned spec is cached by tag, so the added runs are a checkout plus a few
+# seconds of Python.
 
 on:
   pull_request:
-    paths:
-      - '.api-version'
-      - 'endpoints.txt'
-      - 'scripts/check_spec_drift.py'
-      - 'src/main.rs'
-      - 'src/wsclient.rs'
-      - '.github/workflows/spec-drift.yml'
   push:
     branches: [main]
-    paths:
-      - '.api-version'
-      - 'endpoints.txt'
-      - 'scripts/check_spec_drift.py'
-      - 'src/main.rs'
-      - 'src/wsclient.rs'
 
 permissions:
   contents: read
@@ -66,8 +68,40 @@ jobs:
             "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${SPEC_REF}/openapi.json" \
             -o openapi.pinned.json
 
+      # Self-test BOTH checkers before trusting a green run from either: proves each
+      # of the six invariants goes RED when defeated (ENG-7962). Hermetic — no
+      # network, no pinned spec, no crates.io (the parity checks take the crate's
+      # data as arguments; the tarball plumbing is covered with temp files). Runs
+      # first so a broken checker fails with a clear message rather than a
+      # misleading "OK".
+      #
+      # Both, not just the drift one: a self-test that nothing runs is the same
+      # unearned reassurance as a check that cannot fail, and README/AGENTS.md both
+      # state these run ahead of the checks they cover.
+      - name: Self-test the checkers
+        run: |
+          python3 scripts/test_check_spec_drift.py
+          python3 scripts/test_sdk_parity.py
+
       - name: Check drift
         run: python3 scripts/check_spec_drift.py openapi.pinned.json
+
+      # Invariants 5-6 (ENG-7962): the pin is only correct if it equals the pin of
+      # the `nexus-exchange` crate we actually compile against — that crate is what
+      # sends `X-Nexus-Api-Version`, so a pin ahead of it is a false claim about
+      # runtime. And every endpoints.txt line must be an operation the crate really
+      # wraps, since the CLI reaches the API only through named SDK methods.
+      #
+      # This is the check whose absence let `amend_order` sit mapped to
+      # `PUT /orders/{order_id}` while the SDK issues `PATCH`: the SDK's own manifest
+      # lists no PUT on that path, so invariant 6 fails it immediately, where the
+      # spec-only check could not.
+      #
+      # Reads both files out of the published .crate tarball (the exact artifact
+      # cargo builds), so it needs no token and makes no assumption about how rs
+      # names its tags.
+      - name: Check SDK parity
+        run: python3 scripts/check_sdk_parity.py
 
       - name: Publish coverage to the step summary
         if: always()

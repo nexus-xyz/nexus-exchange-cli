@@ -1,7 +1,8 @@
 //! Command-line argument parsing and config/credential resolution.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use nexus_exchange::types::{OrderType, Side, TimeInForce};
+use nexus_exchange::rest::{MAX_FILLS_LIMIT, MAX_PORTFOLIO_HISTORY_LIMIT};
+use nexus_exchange::types::{OrderType, PortfolioWindow, Side, TimeInForce};
 use nexus_exchange::{Config, Network};
 
 use crate::credentials::FileConfig;
@@ -352,8 +353,8 @@ pub enum Command {
 
     /// List your recent fills (executions).
     Fills {
-        /// Maximum number of fills to return.
-        #[arg(long, default_value_t = 100)]
+        /// Maximum number of fills to return (the server's page size, 1..=1000).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=MAX_FILLS_LIMIT as i64))]
         limit: u32,
     },
 
@@ -556,6 +557,40 @@ pub enum OrderCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AccountCommand {
+    /// Portfolio summary: equity, PnL, 24h volume, open counts, margin, and the
+    /// withdrawable balance.
+    ///
+    /// The server reports every field optionally; an absent one renders `-`
+    /// (JSON `null`) and never `0` — "not reported" is not "zero".
+    Summary,
+
+    /// Consolidated account snapshot: the portfolio summary *and* every open
+    /// position, from one coherent server-side read.
+    ///
+    /// Prefer this over running `account summary` and `positions` separately:
+    /// those are two independent requests, so a fill landing between them
+    /// returns an aggregate that disagrees with the position list.
+    State,
+
+    /// Effective fee schedule for the account (maker/taker bps, tier, 30d
+    /// volume). A negative maker fee is a rebate paid to you.
+    Fees,
+
+    /// Portfolio time series: equity, cumulative PnL, and cumulative traded
+    /// volume, oldest first.
+    PortfolioHistory {
+        /// Window to report over. Also fixes the server-side sample cadence and
+        /// point capacity (day 5m/288, week 1h/168, month 6h/120, all 1d/366).
+        /// Omit for the server's `day` default.
+        #[arg(long, value_enum)]
+        window: Option<PortfolioWindowArg>,
+        /// Maximum number of points to return. The API schema allows 1..=366
+        /// (the widest window's capacity); the server additionally clamps to the
+        /// selected window's own capacity, so fewer points may come back.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_PORTFOLIO_HISTORY_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
     /// Deposit collateral into the account.
     Deposit {
         /// Amount to deposit (quote asset).
@@ -709,6 +744,38 @@ pub enum SubAccountsCommand {
         yes: bool,
     },
 }
+
+/// Window for the portfolio time series. Maps onto the SDK's
+/// [`PortfolioWindow`], which is the closed set of values the API accepts — so
+/// the `window` query parameter can only ever carry one of these four, never
+/// caller-shaped text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PortfolioWindowArg {
+    /// Trailing 24 hours, sampled every 5 minutes (the server's default).
+    Day,
+    /// Trailing 7 days, sampled hourly.
+    Week,
+    /// Trailing 30 days, sampled every 6 hours.
+    Month,
+    /// Full retained history (~1 year), sampled daily.
+    All,
+}
+
+impl From<PortfolioWindowArg> for PortfolioWindow {
+    fn from(w: PortfolioWindowArg) -> Self {
+        match w {
+            PortfolioWindowArg::Day => PortfolioWindow::Day,
+            PortfolioWindowArg::Week => PortfolioWindow::Week,
+            PortfolioWindowArg::Month => PortfolioWindow::Month,
+            PortfolioWindowArg::All => PortfolioWindow::All,
+        }
+    }
+}
+
+// `MarginModeArg` and its `From<MarginModeArg> for MarginMode` impl stood
+// here and are removed with the command they existed for (ENG-7740): the
+// API has no margin-mode endpoint, so the arg had nothing to map onto.
+// `PortfolioWindowArg` above is unrelated and stays.
 
 #[cfg(test)]
 mod tests {
@@ -1189,6 +1256,127 @@ mod tests {
             line.contains("leverage") && line.contains("rate-limit"),
             "sanity: the summary should still name the settings that do work: {line:?}"
         );
+    }
+
+    /// The portfolio-parity reads (ENG-6460) parse as `account` subcommands.
+    #[test]
+    fn account_portfolio_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "account", "summary"])
+                .unwrap()
+                .command,
+            Command::Account {
+                action: AccountCommand::Summary
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "account", "state"])
+                .unwrap()
+                .command,
+            Command::Account {
+                action: AccountCommand::State
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "account", "fees"])
+                .unwrap()
+                .command,
+            Command::Account {
+                action: AccountCommand::Fees
+            }
+        ));
+    }
+
+    #[test]
+    fn portfolio_history_defaults_window_and_limit_to_the_server() {
+        // Both are optional: omitting them lets the server pick its `day`
+        // default and full window rather than the CLI inventing one.
+        let cli = Cli::try_parse_from(["nexus", "account", "portfolio-history"]).unwrap();
+        match cli.command {
+            Command::Account {
+                action: AccountCommand::PortfolioHistory { window, limit },
+            } => {
+                assert_eq!(window, None);
+                assert_eq!(limit, None);
+            }
+            other => panic!("expected account portfolio-history, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "account",
+            "portfolio-history",
+            "--window",
+            "month",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Account {
+                action: AccountCommand::PortfolioHistory { window, limit },
+            } => {
+                assert_eq!(window, Some(PortfolioWindowArg::Month));
+                assert_eq!(limit, Some(50));
+            }
+            other => panic!("expected account portfolio-history, got {other:?}"),
+        }
+    }
+
+    /// `--limit` is bounded by the API's request schema (1..=366) at parse time,
+    /// so an out-of-range value is refused before anything is signed or sent.
+    #[test]
+    fn portfolio_history_limit_is_bounded_by_the_spec() {
+        for bad in ["0", "367", "-1", "4294967296"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "account", "portfolio-history", "--limit", bad])
+                    .is_err(),
+                "--limit {bad} should be rejected"
+            );
+        }
+        for ok in ["1", "366"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "account", "portfolio-history", "--limit", ok])
+                    .is_ok(),
+                "--limit {ok} should be accepted"
+            );
+        }
+        // The bound tracks the SDK constant rather than a copy of the number.
+        assert_eq!(MAX_PORTFOLIO_HISTORY_LIMIT, 366);
+    }
+
+    /// `--window` only accepts the spec's closed enum, so no caller-shaped text
+    /// can reach the signed query string.
+    #[test]
+    fn portfolio_history_window_is_a_closed_enum() {
+        for bad in ["quarter", "DAY", "", "day; rm -rf /"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "account", "portfolio-history", "--window", bad])
+                    .is_err(),
+                "--window {bad:?} should be rejected"
+            );
+        }
+        assert_eq!(
+            PortfolioWindow::from(PortfolioWindowArg::All).as_str(),
+            "all"
+        );
+    }
+
+    /// `fills --limit` is now the server-side page size, bounded by the API's
+    /// 1..=1000 (nexus-exchange 0.7.0 forwards it instead of the CLI truncating).
+    #[test]
+    fn fills_limit_is_bounded_by_the_page_size() {
+        for bad in ["0", "1001"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "fills", "--limit", bad]).is_err(),
+                "--limit {bad} should be rejected"
+            );
+        }
+        assert!(Cli::try_parse_from(["nexus", "fills", "--limit", "1000"]).is_ok());
+        assert_eq!(MAX_FILLS_LIMIT, 1000);
+        // Default stays the server's own default page size.
+        let cli = Cli::try_parse_from(["nexus", "fills"]).unwrap();
+        assert!(matches!(cli.command, Command::Fills { limit: 100 }));
     }
 
     #[test]

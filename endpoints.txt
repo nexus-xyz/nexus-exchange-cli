@@ -57,6 +57,10 @@ GET /status
 # ── authenticated account (read) ──
 # Migrated to /api/v1:
 GET /api/v1/account
+GET /api/v1/account/summary
+GET /api/v1/account/state
+GET /api/v1/account/fees
+GET /api/v1/account/portfolio-history
 GET /api/v1/positions
 GET /api/v1/fills
 GET /api/v1/orders
@@ -75,6 +79,10 @@ DELETE /api/v1/orders/{order_id}
 DELETE /api/v1/orders
 POST /api/v1/account/credit
 # No /api/v1 variant — stay on the gateway:
+# `order amend` — the SDK issues PATCH on the gateway path (v1 exposes no amend).
+# Was mis-mapped as PUT and parked in CODE_ONLY_OPS as "ahead of spec"; the spec
+# has had this operation since v0.7.1, so it was covered but uncounted (ENG-7962).
+PATCH /orders/{order_id}
 POST /account/deposit
 POST /keys
 DELETE /keys/{key_id}
