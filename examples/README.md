@@ -28,4 +28,6 @@ credentials from `nexus setup`, from `--api-key`/`--api-secret`, or from the
 | [`batch_orders.json`](./batch_orders.json) | Sample input for `nexus order batch` | — |
 
 > Every command takes a global `--output json` flag for machine-readable output,
-> and `--network <stable\|beta\|local>` / `--base-url <url>` to choose the target.
+> and `--network <mainnet\|testnet\|local>` / `--base-url <url>` to choose the
+> target. These examples run against the default **testnet** (play funds), so a
+> copy-paste run cannot move real money.

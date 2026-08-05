@@ -40,7 +40,12 @@ const LONG_VERSION: &str = concat!(
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version = LONG_VERSION, about, long_about = None)]
 pub struct Cli {
-    /// Which network to target (default: stable, or the `nexus setup` value).
+    /// Which network to target (default: testnet, or the `nexus setup` value).
+    ///
+    /// `stable` and `beta` named release channels, not networks, and were
+    /// retired in `nexus-exchange` 0.8.0. `stable` pointed at a **play-funds**
+    /// host, so its replacement is `testnet` — *not* `mainnet`, which is real
+    /// funds and is not reachable in this release.
     #[arg(long, value_enum, global = true, env = "NEXUS_NETWORK")]
     pub network: Option<NetworkArg>,
 
@@ -104,27 +109,109 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
-/// Which Nexus Exchange environment to target.
+/// Which Nexus Exchange network to target.
+///
+/// This is the **network** axis the spec formalizes (ENG-6442), not a release
+/// channel. The distinction is the whole point: the retired `stable`/`beta`
+/// values named deployment channels, which is how a play-funds host came to be
+/// labelled "production" and how the SDK's real-funds guard ended up pointed at
+/// the wrong network (ENG-6452).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum NetworkArg {
-    /// Production / stable channel.
-    Stable,
-    /// Beta channel (tracks `main`; may break).
-    Beta,
-    /// Local development server.
+    /// **Real funds.** Not reachable in this release: the SDK refuses every
+    /// request locally rather than guess a host or sign an unverifiable path.
+    Mainnet,
+    /// **Play funds** credited by the faucet — the default, and the safe target.
+    Testnet,
+    /// A locally run indexer. Play funds, and never a fallback.
     Local,
+}
+
+/// Retired release-channel names, mapped to the network each actually pointed
+/// at. `--network` rejects these outright (clap only accepts the variants
+/// above); this table exists solely so a **config file** written before the
+/// rename gets a real diagnostic instead of a silent fallback.
+///
+/// The mapping is the part worth stating: `stable` was a *play-funds* host, so
+/// it becomes `testnet`. Reading it as `mainnet` — the intuitive guess — has it
+/// exactly backwards and is the mislabel this axis exists to correct.
+const RETIRED_NETWORKS: &[(&str, &str)] = &[("stable", "testnet"), ("beta", "testnet")];
+
+/// The CLI's name for an SDK network, for diagnostics.
+///
+/// The wildcard arm is not defensive padding: [`Network`] is `#[non_exhaustive]`,
+/// so a downstream crate *cannot* match it exhaustively, and a variant added
+/// upstream would otherwise have to be misreported as one of the three names the
+/// CLI knows. Falling back to the SDK's own `Debug` says something true about a
+/// network this build has no vocabulary for.
+fn network_name(n: Network) -> String {
+    match n {
+        Network::Mainnet => "mainnet".to_string(),
+        Network::Testnet => "testnet".to_string(),
+        Network::Local => "local".to_string(),
+        other => format!("{other:?}").to_ascii_lowercase(),
+    }
+}
+
+/// The diagnostic for a config-file `network` this build cannot parse, or `None`
+/// when there is nothing to report. Split out of [`Cli::config`] so the text —
+/// the part a user actually reads — is testable without capturing stderr.
+///
+/// `landing` is where the invocation really ends up, read from the *resolved*
+/// default config rather than restated from [`RETIRED_NETWORKS`]. Those are two
+/// independent facts that merely coincide today: `stable` named a play-funds host
+/// no matter what the SDK default later becomes. Deriving both from the table
+/// would let a future default change silently turn this warning into a false
+/// statement.
+///
+/// A blank value reports nothing. `nexus setup` normalizes an empty answer to
+/// "no preference", and a hand-edited `"network": ""` means the same thing — it
+/// selects nothing, so there is nothing stale to fix.
+fn stale_network_warning(name: &str, landing: Option<&str>) -> Option<String> {
+    if name.trim().is_empty() {
+        return None;
+    }
+    // Every interpolation of `name` uses `{name:?}`, never `{name}`: the value
+    // comes from a file and is echoed to a terminal, and `Debug` escapes control
+    // bytes, so a config cannot smuggle ESC sequences into this line.
+    let landing = match landing {
+        Some(network) => format!("the default network ({network})"),
+        None => "the default network".to_string(),
+    };
+    Some(match NetworkArg::retired_replacement(name) {
+        Some(replacement) => format!(
+            "warning: config-file network {name:?} was a release channel, not a network, and no \
+             longer exists; it named a play-funds host, which is now `{replacement}`. Using \
+             {landing}. Run `nexus setup`, or set \"network\": \"{replacement}\" in the config."
+        ),
+        None => format!(
+            "warning: config-file network {name:?} is not a known network (valid: mainnet, \
+             testnet, local); using {landing}. Run `nexus setup`, or fix \"network\" in the \
+             config."
+        ),
+    })
 }
 
 impl NetworkArg {
     /// Parse a network name from the config file. Returns `None` for unknown
     /// values so a stale config can't crash the CLI.
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "stable" => Some(Self::Stable),
-            "beta" => Some(Self::Beta),
+            "mainnet" => Some(Self::Mainnet),
+            "testnet" => Some(Self::Testnet),
             "local" => Some(Self::Local),
             _ => None,
         }
+    }
+
+    /// The current name for a retired release-channel value, if `s` is one.
+    /// Used only to turn a stale config into an actionable warning.
+    pub(crate) fn retired_replacement(s: &str) -> Option<&'static str> {
+        let name = s.trim().to_ascii_lowercase();
+        RETIRED_NETWORKS
+            .iter()
+            .find(|(retired, _)| *retired == name)
+            .map(|(_, replacement)| *replacement)
     }
 }
 
@@ -193,11 +280,35 @@ impl From<TifArg> for TimeInForce {
     }
 }
 
+/// The `nexus-exchange` release whose `Network` axis the mapping below was read
+/// against.
+///
+/// This constant is the signal, because the `match` cannot be. `Network` is
+/// `#[non_exhaustive]`, so a variant added upstream compiles straight through a
+/// mapping that only matches on the CLI's own enum — and `#[non_exhaustive]` also
+/// forbids a downstream crate from matching `Network` exhaustively, so there is
+/// no compile-time guard to be had. Pinning the version instead means an SDK bump
+/// goes red until someone re-reads the axis.
+///
+/// Transcribing an upstream fact with nothing to notice when upstream moves is
+/// what pointed the real-funds guard at the wrong network to begin with
+/// (ENG-6452), so the transcription is pinned here rather than trusted.
+///
+/// Checked by `the_network_axis_was_checked_against_the_pinned_sdk`, hence
+/// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
+/// has any use for at runtime.
+#[cfg(test)]
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.8.0";
+
 impl From<NetworkArg> for Network {
     fn from(n: NetworkArg) -> Self {
+        // Exhaustive over `NetworkArg` — the CLI's own enum — so adding a value
+        // there without mapping it is a compile error. It is deliberately NOT a
+        // claim about the SDK's axis growing: see
+        // `NETWORK_AXIS_VERIFIED_AGAINST`, which is what notices that.
         match n {
-            NetworkArg::Stable => Network::Stable,
-            NetworkArg::Beta => Network::Beta,
+            NetworkArg::Mainnet => Network::Mainnet,
+            NetworkArg::Testnet => Network::Testnet,
             NetworkArg::Local => Network::Local,
         }
     }
@@ -206,7 +317,8 @@ impl From<NetworkArg> for Network {
 impl Cli {
     /// Resolve the SDK [`Config`], layering: `--base-url` > `--network`/env >
     /// config-file `base_url` > config-file `network` > the SDK default
-    /// (stable). Every resolved config carries the CLI's [`USER_AGENT`].
+    /// (testnet — play funds; the default must never be a real-funds network).
+    /// Every resolved config carries the CLI's [`USER_AGENT`].
     pub fn config(&self, file: &FileConfig) -> Config {
         let config = if let Some(url) = &self.base_url {
             Config::with_base_url(url.clone())
@@ -217,7 +329,24 @@ impl Cli {
         } else if let Some(net) = file.network.as_deref().and_then(NetworkArg::parse) {
             Config::new(net.into())
         } else {
-            Config::default()
+            // Falling through with a *set* config-file network means it did not
+            // parse, whatever the reason: a retired release-channel name, or a
+            // typo like "mainet". Both get a diagnostic — a silent fallback on
+            // the network axis is the failure class this change exists to remove,
+            // and the typo case is the durable one (`stable`/`beta` age out of
+            // configs; misspellings never will).
+            //
+            // Still a fallback rather than a hard error: the default is a
+            // play-funds network, so the request is safe to make — it is the
+            // stale name that needs fixing, not this invocation.
+            let config = Config::default();
+            if let Some(name) = file.network.as_deref() {
+                let landing = config.network().map(network_name);
+                if let Some(warning) = stale_network_warning(name, landing.as_deref()) {
+                    eprintln!("{warning}");
+                }
+            }
+            config
         };
         config.with_user_agent(USER_AGENT)
     }
@@ -810,10 +939,25 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_stable_network() {
+    fn defaults_to_testnet_network() {
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
         assert_eq!(cli.network, None);
-        assert_eq!(base_url(&cli), Network::Stable.base_url());
+        assert_eq!(base_url(&cli), Network::Testnet.base_url());
+    }
+
+    /// The invariant behind the default, not just its current value: omitting
+    /// `--network` must never reach a network that moves real money.
+    #[test]
+    fn the_default_network_is_not_real_funds() {
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        let network = cli
+            .config(&FileConfig::default())
+            .network()
+            .expect("the default config targets a named network, not a bare base URL");
+        assert!(
+            !network.is_mainnet(),
+            "the default network must be play funds, got {network:?}"
+        );
     }
 
     #[test]
@@ -821,7 +965,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "nexus",
             "--network",
-            "beta",
+            "testnet",
             "--base-url",
             "http://x:1",
             "health",
@@ -833,7 +977,7 @@ mod tests {
     #[test]
     fn config_file_is_a_fallback_below_flags() {
         let file = FileConfig {
-            network: Some("beta".into()),
+            network: Some("local".into()),
             base_url: None,
             api_key: None,
             api_secret: None,
@@ -843,14 +987,234 @@ mod tests {
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
         assert_eq!(
             Client::new(cli.config(&file)).base_url(),
-            Network::Beta.base_url()
-        );
-        // Flag beats the file.
-        let cli = Cli::try_parse_from(["nexus", "--network", "local", "markets"]).unwrap();
-        assert_eq!(
-            Client::new(cli.config(&file)).base_url(),
             Network::Local.base_url()
         );
+        // Flag beats the file.
+        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
+        assert_eq!(
+            Client::new(cli.config(&file)).base_url(),
+            Network::Testnet.base_url()
+        );
+    }
+
+    /// ENG-6455. `stable`/`beta` were release channels, not networks; the axis is
+    /// now the spec's. Rejected at parse time so no invocation can keep using a
+    /// name whose meaning was wrong.
+    #[test]
+    fn retired_release_channel_names_are_rejected_by_the_flag() {
+        for retired in ["stable", "beta"] {
+            let parsed = Cli::try_parse_from(["nexus", "--network", retired, "markets"]);
+            assert!(
+                parsed.is_err(),
+                "--network {retired} must not parse; it is not a network"
+            );
+            // clap names the values that *are* valid, which is the migration hint.
+            let rendered = parsed.unwrap_err().to_string();
+            for valid in ["mainnet", "testnet", "local"] {
+                assert!(
+                    rendered.contains(valid),
+                    "the error for `{retired}` should list `{valid}`; got: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A config file written before the rename must not silently change which
+    /// network is used, and must not be fatal either: the default *is* the host
+    /// `stable` named, so the invocation is unaffected and only the stale name
+    /// needs fixing.
+    #[test]
+    fn retired_network_in_the_config_file_falls_back_to_the_default() {
+        for retired in ["stable", "beta", "STABLE", "  beta  "] {
+            let file = FileConfig {
+                network: Some(retired.into()),
+                base_url: None,
+                api_key: None,
+                api_secret: None,
+                session_token: None,
+            };
+            let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+            assert_eq!(
+                Client::new(cli.config(&file)).base_url(),
+                Network::Testnet.base_url(),
+                "a config naming {retired:?} should land on the default network"
+            );
+        }
+    }
+
+    /// What the table claims is what the retired names *were*: `stable`/`beta`
+    /// pointed at a play-funds host. That stays true no matter what the SDK
+    /// default later becomes, so it is asserted on its own terms — every
+    /// replacement must be a real network, and must not be real funds.
+    ///
+    /// Deliberately *not* asserted against `Config::default()`. The two facts
+    /// coincide today, and an earlier version of this test conflated them, which
+    /// would have made a future default change look like a table error. Where a
+    /// stale config actually lands is covered by
+    /// `the_stale_network_warning_names_where_it_actually_lands` and
+    /// `retired_network_in_the_config_file_falls_back_to_the_default`.
+    #[test]
+    fn every_retired_name_maps_to_a_play_funds_network() {
+        for (retired, replacement) in RETIRED_NETWORKS {
+            let mapped = NetworkArg::parse(replacement)
+                .unwrap_or_else(|| panic!("{retired}'s replacement {replacement:?} must parse"));
+            assert!(
+                !Network::from(mapped).is_mainnet(),
+                "{retired:?} named a play-funds host, so its replacement must not be real \
+                 funds, got {replacement:?}"
+            );
+        }
+    }
+
+    /// Pins the transcription. `From<NetworkArg> for Network` mirrors an axis the
+    /// SDK owns, and because `Network` is `#[non_exhaustive]` no match here can
+    /// fail when a variant is added upstream — so the pinned version is the only
+    /// thing that can notice.
+    ///
+    /// When an SDK bump trips this: re-read `Network`'s variants, map any new one
+    /// (or decide the CLI should not expose it), then move the constant. Expect
+    /// `sdk-autobump.yml`'s PR to land on this deliberately.
+    #[test]
+    fn the_network_axis_was_checked_against_the_pinned_sdk() {
+        // `NEXUS_SDK_VERSION` is injected by `build.rs` from `Cargo.lock`, so this
+        // is the version actually linked rather than the caret requirement in
+        // `Cargo.toml` — a patch release picked up by `cargo update` trips it too,
+        // which is right: a `#[non_exhaustive]` enum can gain a variant in one.
+        let linked = env!("NEXUS_SDK_VERSION");
+        assert_eq!(
+            linked, NETWORK_AXIS_VERIFIED_AGAINST,
+            "this build links nexus-exchange {linked}, but the {{mainnet, testnet, local}} \
+             mapping was last read against {NETWORK_AXIS_VERIFIED_AGAINST}. `Network` is \
+             #[non_exhaustive], so the compiler cannot flag a new variant: re-read it, map any \
+             new network (or decide not to expose it), then update \
+             NETWORK_AXIS_VERIFIED_AGAINST."
+        );
+    }
+
+    /// The fix for the case the review caught: a config-file network that is
+    /// neither valid nor retired used to fall through in complete silence, so the
+    /// user believed they had selected a network while the CLI used the default.
+    /// Typos are the durable version of this — `stable`/`beta` age out of configs,
+    /// misspellings never do.
+    #[test]
+    fn an_unparseable_config_network_is_always_reported() {
+        for name in ["mainet", "prod", "Testnet2", "main net"] {
+            let warning = stale_network_warning(name, Some("testnet"))
+                .unwrap_or_else(|| panic!("{name:?} must produce a warning, not silence"));
+            assert!(
+                warning.contains(name),
+                "the warning should quote the offending value; got: {warning}"
+            );
+            assert!(
+                warning.contains("not a known network"),
+                "the warning should say the value is unknown; got: {warning}"
+            );
+            for valid in ["mainnet", "testnet", "local"] {
+                assert!(
+                    warning.contains(valid),
+                    "the warning should list `{valid}` as valid; got: {warning}"
+                );
+            }
+            // No retired-channel explanation for a value that never was one.
+            assert!(
+                !warning.contains("release channel"),
+                "unexpected retired-name story for {name:?}: {warning}"
+            );
+        }
+    }
+
+    /// A retired name keeps its own sentence — the migration story is the whole
+    /// reason the table exists — and still points at `testnet`, never `mainnet`.
+    #[test]
+    fn a_retired_config_network_keeps_its_migration_hint() {
+        for retired in ["stable", "beta", "STABLE", "  beta  "] {
+            let warning = stale_network_warning(retired, Some("testnet"))
+                .unwrap_or_else(|| panic!("{retired:?} must produce a warning"));
+            assert!(
+                warning.contains("release channel"),
+                "the warning for {retired:?} should explain what it was; got: {warning}"
+            );
+            assert!(
+                warning.contains("testnet"),
+                "the warning for {retired:?} must point at testnet; got: {warning}"
+            );
+        }
+    }
+
+    /// The "where you actually land" clause is read from the resolved default, not
+    /// restated from `RETIRED_NETWORKS`, so the warning cannot outlive a change to
+    /// the SDK default. Asserted for a retired *and* an unknown name, since the
+    /// two take different branches.
+    #[test]
+    fn the_stale_network_warning_names_where_it_actually_lands() {
+        let default_network = Config::default()
+            .network()
+            .expect("the SDK default targets a named network");
+        let landing = network_name(default_network);
+        for name in ["stable", "mainet"] {
+            let warning = stale_network_warning(name, Some(&landing)).expect("a warning");
+            assert!(
+                warning.contains(&format!("the default network ({landing})")),
+                "the warning should name the resolved default {landing:?}; got: {warning}"
+            );
+        }
+        // With no named default (a base-URL-only config) the claim is dropped
+        // rather than guessed.
+        let warning = stale_network_warning("mainet", None).expect("a warning");
+        assert!(
+            warning.contains("using the default network;")
+                || warning.contains("using the default network."),
+            "with no named default the warning should not invent one; got: {warning}"
+        );
+    }
+
+    /// A blank value selects nothing, which is not a stale name — `nexus setup`
+    /// normalizes an empty answer to "no preference" and a hand-edited
+    /// `"network": ""` means the same. Warning there would be noise.
+    #[test]
+    fn a_blank_config_network_is_not_reported_as_stale() {
+        for blank in ["", "   ", "\t"] {
+            assert!(
+                stale_network_warning(blank, Some("testnet")).is_none(),
+                "a blank network ({blank:?}) should be silent, not a warning"
+            );
+        }
+    }
+
+    /// `network_name` is what the warning interpolates, so it has to agree with
+    /// the vocabulary `--network` accepts — otherwise the CLI would suggest a
+    /// value it cannot parse.
+    #[test]
+    fn network_name_round_trips_through_the_flag_vocabulary() {
+        for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
+            let name = network_name(arg.into());
+            assert_eq!(
+                NetworkArg::parse(&name),
+                Some(arg),
+                "network_name produced {name:?}, which --network does not accept"
+            );
+        }
+    }
+
+    #[test]
+    fn network_args_map_one_to_one_onto_the_sdk_axis() {
+        assert_eq!(Network::from(NetworkArg::Mainnet), Network::Mainnet);
+        assert_eq!(Network::from(NetworkArg::Testnet), Network::Testnet);
+        assert_eq!(Network::from(NetworkArg::Local), Network::Local);
+        // Only mainnet is real funds — the predicate the SDK guards `fund()` with.
+        assert!(Network::from(NetworkArg::Mainnet).is_mainnet());
+        assert!(!Network::from(NetworkArg::Testnet).is_mainnet());
+        assert!(!Network::from(NetworkArg::Local).is_mainnet());
+    }
+
+    /// `--network mainnet` is accepted here and refused by the SDK at request
+    /// time, with a reason. Asserting the CLI does *not* pre-empt it keeps one
+    /// gate instead of two that can disagree — the SDK owns the refusal.
+    #[test]
+    fn mainnet_is_selectable_and_left_to_the_sdk_to_refuse() {
+        let cli = Cli::try_parse_from(["nexus", "--network", "mainnet", "markets"]).unwrap();
+        assert_eq!(cli.network, Some(NetworkArg::Mainnet));
+        assert_eq!(base_url(&cli), Network::Mainnet.base_url());
     }
 
     #[test]
