@@ -367,6 +367,12 @@ nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 > (the default is the same host it pointed at) and prints a warning telling you
 > what to change.
 
+A config-file `network` the CLI cannot parse — a retired channel name, or a typo
+like `mainet` — never changes the network silently: it warns on stderr (so
+`--output json` stays clean on stdout), names the network actually used, and
+falls back to the default. `--network` itself rejects an unknown value outright,
+because you typed it and can retype it.
+
 Credentials are minted **per network** and are invalid on any other, so an API
 key configured for one network will not authenticate against another.
 
