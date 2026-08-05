@@ -53,13 +53,81 @@ fn endpoints() -> BTreeSet<(String, String)> {
     ops
 }
 
+/// `.api-version` feeds a raw.githubusercontent URL and a cache key in
+/// `spec-drift.yml`, and `sdk-autobump.yml` derives it from the SDK crate. Both
+/// validate it, but failing here names the problem sooner.
 #[test]
 fn api_version_is_a_pinned_semver_tag() {
     let tag = read(".api-version");
     let tag = tag.trim();
+    let rest = tag
+        .strip_prefix('v')
+        .unwrap_or_else(|| panic!(".api-version must start with 'v', got {tag:?}"));
+    let parts: Vec<&str> = rest.split('.').collect();
     assert!(
-        tag.starts_with('v') && tag[1..].split('.').all(|c| c.parse::<u32>().is_ok()),
-        ".api-version must be a vX.Y.Z tag, got {tag:?}"
+        (1..=3).contains(&parts.len()) && parts.iter().all(|c| c.parse::<u32>().is_ok()),
+        ".api-version must be a vX, vX.Y or vX.Y.Z tag, got {tag:?}"
+    );
+}
+
+const MARK_START: &str = "<!-- api-version-sync:start -->";
+const MARK_END: &str = "<!-- api-version-sync:end -->";
+
+/// The text between the sync markers, or a panic naming what's missing. Mirrors
+/// `MANAGED_BLOCK_RE` in `scripts/sync_sdk_version.py`.
+fn managed_block(readme: &str) -> &str {
+    let start = readme
+        .find(MARK_START)
+        .unwrap_or_else(|| panic!("README.md is missing {MARK_START}"))
+        + MARK_START.len();
+    let end = readme
+        .find(MARK_END)
+        .unwrap_or_else(|| panic!("README.md is missing {MARK_END}"));
+    assert!(
+        end > start,
+        "README.md has the api-version-sync markers in the wrong order"
+    );
+    &readme[start..end]
+}
+
+/// `scripts/sync_sdk_version.py --write` owns the marked README block, and fails
+/// loudly if the markers are gone — which would kill an autobump run mid-flight.
+/// Cheaper to notice here.
+#[test]
+fn readme_has_exactly_one_managed_api_version_block() {
+    let readme = read("README.md");
+    assert_eq!(
+        readme.matches(MARK_START).count(),
+        1,
+        "expected exactly one {MARK_START}"
+    );
+    assert_eq!(
+        readme.matches(MARK_END).count(),
+        1,
+        "expected exactly one {MARK_END}"
+    );
+    // A second block would rot: the script's regex substitutes with count=1.
+    assert!(
+        managed_block(&readme).contains("Currently targets Exchange API spec"),
+        "the managed block no longer states the targeted spec version; \
+         sync_sdk_version.py::render_managed_block defines its shape"
+    );
+}
+
+/// The pin and the sentence a reader actually sees must agree. Nothing else
+/// notices if they diverge — `spec-drift` reads `.api-version` and never looks at
+/// the prose, so a stale line is a silently wrong claim about which spec version
+/// the CLI targets and sends as `X-Nexus-Api-Version` (ENG-7962).
+#[test]
+fn readme_managed_line_matches_the_pinned_api_version() {
+    let readme = read("README.md");
+    let tag = read(".api-version").trim().to_string();
+    let block = managed_block(&readme);
+    assert!(
+        block.contains(&format!("**`{tag}`**")),
+        "README managed block says {block:?} but .api-version pins {tag}. Both are \
+         derived from the `nexus-exchange` crate, so the fix is \
+         `python3 scripts/sync_sdk_version.py --write` — not a hand-edit of either."
     );
 }
 
@@ -86,6 +154,11 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
         ("GET", "/keys"),
         ("GET", "/ws"),
         ("POST", "/ws/token"),
+        // `order amend`. Listed here deliberately: this op spent time misfiled as
+        // ahead-of-spec under the wrong verb (PUT), which kept a covered operation
+        // out of the manifest and out of the coverage count. The spec has had
+        // `PATCH /orders/{order_id}` since v0.7.1 (ENG-7962).
+        ("PATCH", "/orders/{order_id}"),
     ] {
         assert!(
             ops.contains(&(want.0.to_string(), want.1.to_string())),
@@ -98,11 +171,18 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
 
 /// The drift script's ahead-of-spec ops are intentionally NOT in endpoints.txt;
 /// assert they really are absent so the two files can't both claim them.
+///
+/// Keep this list to ops the pinned spec genuinely lacks. `PUT /orders/{order_id}`
+/// used to head it, described as "amend" — but the SDK issues `PATCH` and the spec
+/// has defined `PATCH /orders/{order_id}` since v0.7.1, so the entry asserted a
+/// false claim and passed only because the verb didn't match either file
+/// (ENG-7962). Invariant 3 of the drift check now fails a `CODE_ONLY_OPS` entry
+/// whose path the spec defines under any verb, which is the real guard; this list
+/// is the cheap offline echo of it.
 #[test]
 fn ahead_of_spec_ops_are_not_in_endpoints_txt() {
     let ops = endpoints();
     for absent in [
-        ("PUT", "/orders/{order_id}"), // amend
         ("POST", "/account/leverage"),
         ("POST", "/account/margin-mode"),
         ("GET", "/funding-payments"),

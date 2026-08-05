@@ -193,12 +193,15 @@ async fn main() -> Result<()> {
         }
         Command::Fills { limit } => {
             require_authenticated(authenticated, "fills")?;
-            let mut fills = client
-                .fetch_my_trades()
+            // `--limit` is now the server-side page size (nexus-exchange 0.7.0
+            // forwards it to `GET /api/v1/fills`), so the CLI no longer truncates
+            // a fixed 100-fill page client-side — a `--limit` above the server's
+            // default actually returns more fills. clap bounds it to the API's
+            // 1..=1000, so an out-of-range value is refused before signing.
+            let fills = client
+                .fetch_my_trades(Some(limit))
                 .await
                 .context("failed to fetch fills")?;
-            // The SDK returns the full set; honor the CLI's `--limit` client-side.
-            fills.truncate(limit as usize);
             emit(format, output::fills(&fills), || output::fills_json(&fills));
         }
         Command::Orders => {
@@ -611,6 +614,53 @@ async fn handle_account(
     format: OutputFormat,
 ) -> Result<()> {
     match action {
+        AccountCommand::Summary => {
+            require_authenticated(authenticated, "account summary")?;
+            let summary = client
+                .fetch_account_summary()
+                .await
+                .map_err(|e| margin_read_error(e, "failed to fetch account summary"))?;
+            emit(format, output::account_summary(&summary), || {
+                output::account_summary_json(&summary)
+            });
+        }
+        AccountCommand::State => {
+            require_authenticated(authenticated, "account state")?;
+            // One request, not two: the summary and the position list come from
+            // a single server-side read, so they cannot straddle a fill and come
+            // back inconsistent the way `account summary` + `positions` can.
+            // This is also why the CLI never fetches the two halves concurrently.
+            let state = client
+                .fetch_account_state()
+                .await
+                .map_err(|e| margin_read_error(e, "failed to fetch account state"))?;
+            emit(format, output::account_state(&state), || {
+                output::account_state_json(&state)
+            });
+        }
+        AccountCommand::Fees => {
+            require_authenticated(authenticated, "account fees")?;
+            let fees = client
+                .fetch_account_fees()
+                .await
+                .context("failed to fetch account fees")?;
+            emit(format, output::account_fees(&fees), || {
+                output::account_fees_json(&fees)
+            });
+        }
+        AccountCommand::PortfolioHistory { window, limit } => {
+            require_authenticated(authenticated, "account portfolio-history")?;
+            // `window` is a closed enum and `limit` is a bounded u32 rejected by
+            // clap outside 1..=366, so neither reaches the signed request as
+            // caller-shaped text.
+            let history = client
+                .fetch_portfolio_history(window.map(Into::into), limit)
+                .await
+                .context("failed to fetch portfolio history")?;
+            emit(format, output::portfolio_history(&history), || {
+                output::portfolio_history_json(&history)
+            });
+        }
         AccountCommand::Deposit { amount, yes } => {
             require_authenticated(authenticated, "account deposit")?;
             let amount = parse_amount("amount", &amount)?;
@@ -1046,6 +1096,34 @@ fn emit(format: OutputFormat, human: String, json: impl FnOnce() -> String) {
     match format {
         OutputFormat::Human => println!("{human}"),
         OutputFormat::Json => println!("{}", json()),
+    }
+}
+
+/// Server error code for a read whose engine-authoritative margin view is
+/// temporarily unavailable (`502`). `withdrawable` and the consolidated account
+/// state are derived from that view, and the server returns this **instead of** a
+/// locally-estimated figure.
+const AUTHORITATIVE_MARGIN_UNAVAILABLE: &str = "authoritative_margin_unavailable";
+
+/// Attach context to a failed margin-derived account read, spelling out the
+/// fail-closed case.
+///
+/// The danger this guards against is a caller — a human eyeballing output, or a
+/// script checking a balance before withdrawing — reading the failure as "the
+/// account is empty". It never is: the server refused to estimate, so the true
+/// balance is simply *unknown* until the read succeeds. We exit non-zero (as any
+/// error does) and say so in words.
+fn margin_read_error(err: nexus_exchange::Error, context: &'static str) -> anyhow::Error {
+    let fail_closed = err.code() == Some(AUTHORITATIVE_MARGIN_UNAVAILABLE);
+    let err = anyhow::Error::new(err).context(context);
+    if fail_closed {
+        err.context(
+            "the exchange could not reach its authoritative margin view and refused to report \
+             an estimate — your balance is UNKNOWN, not zero, and no position was closed; \
+             retry in a moment",
+        )
+    } else {
+        err
     }
 }
 

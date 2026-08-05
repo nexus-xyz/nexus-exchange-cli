@@ -462,13 +462,17 @@ verifies — in the `spec-drift` CI workflow — that:
   script (ops that are ahead of the pinned spec, and the WebSocket upgrade).
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **33 of 92** spec operations (**35.9%**) — measured by running the
-check against the pinned `v0.7.1` spec after merging `main`, not carried over
-from either side. The numerator is 33 because this branch adds command surface;
-the denominator is 92 because the spec carries both stacks (gateway + `/api/v1`)
-plus the admin/stats surfaces the CLI does not target, and grew again in `v0.7.1`
-with the bridge, cancel-on-disconnect, and stats endpoints the CLI does not yet
-expose. Run it locally with a fetched spec:
+exercises **38 of 98** spec operations (**38.8%**) — measured by running the
+check against the pinned `v0.7.2` spec on the merged tree, not carried over from
+either side of the rebase. The denominator carries both stacks (gateway +
+`/api/v1`) plus the admin/stats surfaces the CLI does not target; it grew again
+in `v0.7.2` with the portfolio-parity, order-preview and history endpoints.
+`main` alone reads 36: four are what the `nexus account` commands added in
+ENG-6460 now cover, and the thirty-sixth is a correction rather than new
+delivery — `order amend` was exempted as ahead-of-spec while mapped to the wrong
+verb (`PUT`, where the SDK issues `PATCH`), so it went covered but uncounted
+until invariant 3 rejected the stale exemption. The two beyond that are this
+branch's own additions. Run it locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json

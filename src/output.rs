@@ -6,10 +6,11 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountSummary, AdlEvent, AgentInfo, ApiKeyInfo, CreditResult, DepositResult, Fill,
-    FundingPayment, FundingSample, HealthStatus, LeverageUpdate, MarginModeUpdate, MarkPrice,
-    Market, MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
-    Position, PriceLevel, RateLimitStatus, Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    AccountFees, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent, AgentInfo,
+    ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment, FundingSample, HealthStatus,
+    LeverageUpdate, MarginModeUpdate, MarkPrice, Market, MarketStatus, MarketSummary, Ohlcv, Order,
+    OrderBook, OrderResponse, OrderResult, PortfolioHistory, Position, PriceLevel, RateLimitStatus,
+    Side, SubAccount, Ticker, Trade, Transfer, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -26,6 +27,24 @@ fn opt<T: std::fmt::Display>(v: &Option<T>) -> String {
     v.as_ref()
         .map(|d| d.to_string())
         .unwrap_or_else(|| "-".to_string())
+}
+
+/// Neutralize control characters in a free-form, server-supplied string before
+/// it reaches a terminal.
+///
+/// Open strings the server chooses — a position's `side`, a fee `tier` /
+/// `schedule`, the served portfolio `window`, a `*_error` reason — are echoed
+/// straight into the user's terminal, which *interprets* ESC sequences: colour,
+/// cursor movement, clear-screen. That is enough to hide or forge a line of
+/// output (a fabricated "withdrawable" figure, say), so the escape byte never
+/// leaves this function intact. Only C0/C1 controls and DEL are replaced; the
+/// text is otherwise passed through verbatim, so legitimate values are
+/// unchanged. JSON output needs no equivalent — `serde_json` escapes control
+/// characters itself, and machine consumers don't interpret them.
+fn safe(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 /// Render an optional value as a JSON string, or `null` when absent.
@@ -391,6 +410,17 @@ pub fn balance_json(b: &AccountSummary) -> String {
     pretty(&value)
 }
 
+/// Render open positions: the core table, then the enriched per-position risk
+/// table, then any reasons the server could not derive a risk field.
+///
+/// Two narrow tables rather than one very wide one — the combined column set
+/// runs past 140 characters and would wrap on a normal terminal, which is worse
+/// than reading two aligned blocks.
+///
+/// A risk field the server could not derive comes back `null` **with a reason in
+/// its companion `*_error`**, never as a fabricated number, so a blank cell here
+/// means "not computable" and never `0`. The reasons are listed under the table
+/// so a `-` is explained rather than mistaken for a zero.
 pub fn positions(ps: &[Position]) -> String {
     if ps.is_empty() {
         return "No open positions.".to_string();
@@ -402,16 +432,84 @@ pub fn positions(ps: &[Position]) -> String {
     for p in ps {
         out.push_str(&format!(
             "{:<16}  {:<5}  {:>12}  {:>14}  {:>16}  {:>16}\n",
-            p.market_id,
-            p.side,
+            safe(&p.market_id),
+            safe(&p.side),
             p.size,
             p.entry_price,
             p.unrealized_pnl,
             opt(&p.liquidation_price),
         ));
     }
+
+    out.push_str(&format!(
+        "\n{:<16}  {:>16}  {:>14}  {:>10}  {:>9}  {:>14}\n",
+        "MARKET", "NOTIONAL", "MARGIN USED", "ROE", "MAX LEV", "FUNDING PAID"
+    ));
+    for p in ps {
+        out.push_str(&format!(
+            "{:<16}  {:>16}  {:>14}  {:>10}  {:>9}  {:>14}\n",
+            safe(&p.market_id),
+            opt(&p.notional_value),
+            opt(&p.margin_used),
+            opt(&p.roe),
+            p.max_leverage
+                .map(|l| format!("{l}x"))
+                .unwrap_or_else(|| "-".to_string()),
+            opt(&p.funding_paid),
+        ));
+    }
+
     out.push_str(&format!("\n{} position(s).", ps.len()));
+
+    let unavailable = position_errors(ps);
+    if !unavailable.is_empty() {
+        out.push_str(
+            "\n\nNot computable by the server (shown as `-` above — this means unknown, not zero):",
+        );
+        for (field, reason, markets) in unavailable {
+            out.push_str(&format!("\n  {field} ({reason}): {}", markets.join(", ")));
+        }
+    }
     out
+}
+
+/// Collect `(field, reason, markets)` for every risk field the server reported as
+/// `null` *with* a reason. A field that is simply absent (an older server) has no
+/// reason and is left out rather than invented.
+///
+/// Grouped by `(field, reason)` because the common case repeats: `leverage` is
+/// currently never derivable, so an ungrouped list would print the same sentence
+/// once per position and bury the reasons that differ.
+fn position_errors(ps: &[Position]) -> Vec<(&'static str, String, Vec<String>)> {
+    let mut rows: Vec<(&'static str, String, Vec<String>)> = Vec::new();
+    for p in ps {
+        let fields: [(&'static str, bool, &Option<String>); 5] = [
+            ("leverage", p.leverage.is_none(), &p.leverage_error),
+            (
+                "notional value",
+                p.notional_value.is_none(),
+                &p.notional_value_error,
+            ),
+            ("roe", p.roe.is_none(), &p.roe_error),
+            ("margin used", p.margin_used.is_none(), &p.margin_used_error),
+            (
+                "max leverage",
+                p.max_leverage.is_none(),
+                &p.max_leverage_error,
+            ),
+        ];
+        for (name, missing, reason) in fields {
+            if let (true, Some(reason)) = (missing, reason.as_deref()) {
+                let reason = safe(reason);
+                let market = safe(&p.market_id);
+                match rows.iter_mut().find(|(f, r, _)| *f == name && *r == reason) {
+                    Some((_, _, markets)) => markets.push(market),
+                    None => rows.push((name, reason, vec![market])),
+                }
+            }
+        }
+    }
+    rows
 }
 
 fn positions_value(ps: &[Position]) -> Value {
@@ -425,6 +523,22 @@ fn positions_value(ps: &[Position]) -> Value {
                 "unrealized_pnl": p.unrealized_pnl.to_string(),
                 "realized_pnl": p.realized_pnl.to_string(),
                 "liquidation_price": opt_json(&p.liquidation_price),
+                // Enriched risk detail. Each value is `null` — never `0` — when
+                // the server could not derive it, and the companion `*_error`
+                // carries the machine-readable reason. Pair them: `null` with a
+                // reason is "not computable, because X", not a zero.
+                "leverage": opt_json(&p.leverage),
+                "leverage_error": p.leverage_error,
+                "notional_value": opt_json(&p.notional_value),
+                "notional_value_error": p.notional_value_error,
+                "roe": opt_json(&p.roe),
+                "roe_error": p.roe_error,
+                "margin_used": opt_json(&p.margin_used),
+                "margin_used_error": p.margin_used_error,
+                // A count, not money: stays a JSON number (or null).
+                "max_leverage": p.max_leverage,
+                "max_leverage_error": p.max_leverage_error,
+                "funding_paid": opt_json(&p.funding_paid),
             })
         })
         .collect()
@@ -432,6 +546,205 @@ fn positions_value(ps: &[Position]) -> Value {
 
 pub fn positions_json(ps: &[Position]) -> String {
     pretty(&positions_value(ps))
+}
+
+// ───────────────── portfolio: summary / state / fees / history ─────────────────
+
+/// Render the portfolio summary (`GET /api/v1/account/summary`).
+///
+/// Every field is optional on the wire, so an unreported one shows `-`. That is
+/// deliberately **not** `0`: substituting zero for an unreported aggregate would
+/// make an underwater account read as flat. A footnote spells this out whenever
+/// something is missing.
+///
+/// Note this can only be reached on a successful read: the endpoint fails closed
+/// (`502 authoritative_margin_unavailable`) rather than serving an estimated
+/// `withdrawable`, and the CLI surfaces that as an error, never as an empty
+/// account.
+pub fn account_summary(s: &AccountPortfolioSummary) -> String {
+    let rows = [
+        ("collateral", opt(&s.collateral)),
+        ("total equity", opt(&s.total_equity)),
+        ("unrealized pnl", opt(&s.total_unrealized_pnl)),
+        ("realized pnl 24h", opt(&s.total_realized_pnl_24h)),
+        ("volume 24h", opt(&s.total_volume_24h)),
+        ("open positions", opt(&s.open_positions_count)),
+        ("open orders", opt(&s.open_orders_count)),
+        ("margin used", opt(&s.margin_used)),
+        ("available margin", opt(&s.available_margin)),
+        ("withdrawable", opt(&s.withdrawable)),
+        ("early access", opt(&s.early_access_allowed)),
+    ];
+    let mut out = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<20}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rows.iter().any(|(_, v)| v == "-") {
+        out.push_str("\n\n`-` means the server did not report that field — it does not mean zero.");
+    }
+    out
+}
+
+fn account_summary_value(s: &AccountPortfolioSummary) -> Value {
+    // An absent field stays `null`: a caller must be able to tell "not reported"
+    // from a real `0`, so nothing here is defaulted.
+    json!({
+        "collateral": opt_json(&s.collateral),
+        "total_equity": opt_json(&s.total_equity),
+        "total_unrealized_pnl": opt_json(&s.total_unrealized_pnl),
+        "total_realized_pnl_24h": opt_json(&s.total_realized_pnl_24h),
+        "total_volume_24h": opt_json(&s.total_volume_24h),
+        "open_positions_count": s.open_positions_count,
+        "open_orders_count": s.open_orders_count,
+        "margin_used": opt_json(&s.margin_used),
+        "available_margin": opt_json(&s.available_margin),
+        "withdrawable": opt_json(&s.withdrawable),
+        "early_access_allowed": s.early_access_allowed,
+    })
+}
+
+pub fn account_summary_json(s: &AccountPortfolioSummary) -> String {
+    pretty(&account_summary_value(s))
+}
+
+/// Render the consolidated account state (`GET /api/v1/account/state`): the
+/// summary and the position list, which come from one server-side read and so
+/// cannot disagree with each other.
+pub fn account_state(s: &AccountState) -> String {
+    format!(
+        "{}\n\n{}",
+        account_summary(&s.summary),
+        positions(&s.positions)
+    )
+}
+
+pub fn account_state_json(s: &AccountState) -> String {
+    pretty(&json!({
+        "summary": account_summary_value(&s.summary),
+        "positions": positions_value(&s.positions),
+    }))
+}
+
+/// Render the account's effective fee schedule (`GET /api/v1/account/fees`).
+///
+/// The maker fee is signed — a negative value is a rebate paid to the maker — so
+/// it is labelled rather than left to be misread as a charge. The rate is scoped
+/// to the reported `schedule`, not a venue-wide guarantee, which the footnote
+/// says out loud.
+pub fn account_fees(f: &AccountFees) -> String {
+    let maker = if f.maker_fee_bps < 0 {
+        format!("{} bps (rebate paid to you)", f.maker_fee_bps)
+    } else {
+        format!("{} bps", f.maker_fee_bps)
+    };
+    let volume = if f.volume_30d_estimated {
+        format!("{} (estimated — may undercount)", f.volume_30d)
+    } else {
+        f.volume_30d.to_string()
+    };
+    let discounts = if f.discounts.is_empty() {
+        "none".to_string()
+    } else {
+        // The discount shape is not fixed by the spec yet, so pass the server's
+        // objects through as compact JSON rather than inventing a layout.
+        f.discounts
+            .iter()
+            .map(|d| Value::Object(d.fields.clone()).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rows = [
+        ("maker fee", maker),
+        ("taker fee", format!("{} bps", f.taker_fee_bps)),
+        ("tier", safe(&f.tier)),
+        ("schedule", safe(&f.schedule)),
+        ("volume 30d", volume),
+        ("discounts", discounts),
+    ];
+    let mut out = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<16}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push_str(&format!(
+        "\n\nForward-looking schedule rate for the `{}` schedule, not a realized per-fill average.",
+        safe(&f.schedule)
+    ));
+    out
+}
+
+pub fn account_fees_json(f: &AccountFees) -> String {
+    pretty(&json!({
+        // Basis points stay JSON numbers, and maker stays signed: a negative
+        // value is a rebate, so it must not be rendered unsigned.
+        "maker_fee_bps": f.maker_fee_bps,
+        "taker_fee_bps": f.taker_fee_bps,
+        "tier": f.tier,
+        "schedule": f.schedule,
+        "volume_30d": f.volume_30d.to_string(),
+        "volume_30d_estimated": f.volume_30d_estimated,
+        "discounts": f.discounts.iter().map(|d| Value::Object(d.fields.clone())).collect::<Vec<_>>(),
+    }))
+}
+
+/// Render the portfolio time series (`GET /api/v1/account/portfolio-history`).
+///
+/// The header reports the window the server actually **served** (which may
+/// differ from the one requested) and the sample cadence. An unrecognized window
+/// is displayed rather than dropped, so a value added to a later spec is still
+/// visible here.
+pub fn portfolio_history(h: &PortfolioHistory) -> String {
+    let window = match h.window_parsed() {
+        Some(w) => w.to_string(),
+        None => format!("{} (unknown to this CLI build)", safe(&h.window)),
+    };
+    let mut out = format!(
+        "{:<16}{}\n{:<16}{} ms\n\n",
+        "window", window, "cadence", h.cadence_ms
+    );
+    if h.points.is_empty() {
+        out.push_str("No points in this window.");
+        return out;
+    }
+    out.push_str(&format!(
+        "{:<22}  {:>16}  {:>16}  {:>18}\n",
+        "TIME (UTC)", "EQUITY", "PNL", "VOLUME"
+    ));
+    for p in &h.points {
+        out.push_str(&format!(
+            "{:<22}  {:>16}  {:>16}  {:>18}\n",
+            ms_to_iso8601(p.timestamp_ms),
+            p.equity,
+            p.pnl,
+            p.volume,
+        ));
+    }
+    out.push_str(&format!("\n{} point(s), oldest first.", h.points.len()));
+    out
+}
+
+pub fn portfolio_history_json(h: &PortfolioHistory) -> String {
+    let points: Value = h
+        .points
+        .iter()
+        .map(|p| {
+            json!({
+                "timestamp_ms": p.timestamp_ms,
+                "datetime": ms_to_iso8601(p.timestamp_ms),
+                "equity": p.equity.to_string(),
+                "pnl": p.pnl.to_string(),
+                "volume": p.volume.to_string(),
+            })
+        })
+        .collect();
+    pretty(&json!({
+        // The served window, verbatim — including a value this build cannot name,
+        // so a script sees exactly what the server sent.
+        "window": h.window,
+        "cadence_ms": h.cadence_ms,
+        "points": points,
+    }))
 }
 
 // ───────────────────────── fills ─────────────────────────
@@ -1765,6 +2078,360 @@ mod tests {
         .unwrap();
         let v: Value = serde_json::from_str(&positions_json(&ps)).unwrap();
         assert_eq!(v[0]["liquidation_price"], Value::Null);
+    }
+
+    // ───────────────── portfolio parity (ENG-6460) ─────────────────
+
+    /// A position whose risk fields the server *could* derive.
+    fn enriched_position_fixture() -> Vec<Position> {
+        serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP", "side": "Buy", "size": "0.5",
+            "entry_price": "80000", "unrealized_pnl": "50", "realized_pnl": "0",
+            "liquidation_price": "60000",
+            "leverage": null, "leverage_error": "margin_state_not_mirrored",
+            "notional_value": "40050", "notional_value_error": null,
+            "roe": "0.025", "roe_error": null,
+            "margin_used": "2002.5", "margin_used_error": null,
+            "max_leverage": 20, "max_leverage_error": null,
+            "funding_paid": "1.25"
+        }]))
+        .unwrap()
+    }
+
+    #[test]
+    fn positions_json_carries_every_enriched_field() {
+        let v: Value = serde_json::from_str(&positions_json(&enriched_position_fixture())).unwrap();
+        let row = &v.as_array().unwrap()[0];
+        // Money stays a decimal string; a count stays a JSON number.
+        assert_eq!(row["notional_value"], json!("40050"));
+        assert_eq!(row["margin_used"], json!("2002.5"));
+        assert_eq!(row["roe"], json!("0.025"));
+        assert_eq!(row["funding_paid"], json!("1.25"));
+        assert_eq!(row["max_leverage"], json!(20));
+        // An underivable field is null WITH its reason — never 0, and never a
+        // reason without a null.
+        assert_eq!(row["leverage"], Value::Null);
+        assert_eq!(row["leverage_error"], json!("margin_state_not_mirrored"));
+        assert_eq!(row["roe_error"], Value::Null);
+    }
+
+    /// A server that predates the enriched fields (or omits them) must still
+    /// render, with every enriched value null rather than defaulted to zero.
+    #[test]
+    fn positions_json_nulls_absent_enriched_fields_rather_than_zeroing_them() {
+        let ps: Vec<Position> = serde_json::from_value(json!([{
+            "market_id": "ETH-USDX-PERP", "side": "Sell", "size": "1",
+            "entry_price": "3000", "unrealized_pnl": "-10", "realized_pnl": "0"
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&positions_json(&ps)).unwrap();
+        for field in [
+            "leverage",
+            "notional_value",
+            "roe",
+            "margin_used",
+            "max_leverage",
+            "funding_paid",
+            "liquidation_price",
+        ] {
+            assert_eq!(v[0][field], Value::Null, "{field} must be null, not 0");
+        }
+    }
+
+    #[test]
+    fn positions_human_shows_risk_detail_and_explains_a_blank() {
+        let out = positions(&enriched_position_fixture());
+        assert!(out.contains("NOTIONAL") && out.contains("40050"));
+        assert!(out.contains("MARGIN USED") && out.contains("2002.5"));
+        assert!(out.contains("ROE") && out.contains("0.025"));
+        assert!(out.contains("MAX LEV") && out.contains("20x"));
+        assert!(out.contains("FUNDING PAID") && out.contains("1.25"));
+        // The one field the server could not derive is explained, and the note
+        // says plainly that a blank is not a zero.
+        assert!(
+            out.contains("leverage (margin_state_not_mirrored): BTC-USDX-PERP"),
+            "{out}"
+        );
+        assert!(out.contains("not zero"), "{out}");
+        assert!(out.contains("1 position(s)."));
+    }
+
+    /// `leverage` is currently never derivable, so its reason would repeat once
+    /// per position. Group by (field, reason) and list the markets instead.
+    #[test]
+    fn positions_human_groups_a_shared_reason_across_markets() {
+        let ps: Vec<Position> = serde_json::from_value(json!([
+            {"market_id": "BTC-USDX-PERP", "side": "Buy", "size": "1",
+             "entry_price": "1", "unrealized_pnl": "0", "realized_pnl": "0",
+             "leverage": null, "leverage_error": "margin_state_not_mirrored"},
+            {"market_id": "ETH-USDX-PERP", "side": "Sell", "size": "1",
+             "entry_price": "1", "unrealized_pnl": "0", "realized_pnl": "0",
+             "leverage": null, "leverage_error": "margin_state_not_mirrored",
+             "roe": null, "roe_error": "mark_price_unavailable"}
+        ]))
+        .unwrap();
+        let out = positions(&ps);
+        assert!(
+            out.contains("leverage (margin_state_not_mirrored): BTC-USDX-PERP, ETH-USDX-PERP"),
+            "{out}"
+        );
+        // A reason only one market reports stays on its own line.
+        assert!(
+            out.contains("roe (mark_price_unavailable): ETH-USDX-PERP"),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("margin_state_not_mirrored").count(),
+            1,
+            "the shared reason should print once:\n{out}"
+        );
+    }
+
+    /// With nothing underivable there is no explanation block to print.
+    #[test]
+    fn positions_human_omits_the_note_when_nothing_is_missing() {
+        let ps: Vec<Position> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP", "side": "Buy", "size": "0.5",
+            "entry_price": "80000", "unrealized_pnl": "50", "realized_pnl": "0",
+            "leverage": "5", "notional_value": "40050", "roe": "0.025",
+            "margin_used": "2002.5", "max_leverage": 20, "funding_paid": "0"
+        }]))
+        .unwrap();
+        assert!(!positions(&ps).contains("Not computable"));
+    }
+
+    fn summary_fixture() -> AccountPortfolioSummary {
+        serde_json::from_value(json!({
+            "collateral": "1000", "total_equity": "1050",
+            "total_unrealized_pnl": "50", "total_realized_pnl_24h": "10",
+            "total_volume_24h": "5000", "open_positions_count": 1,
+            "open_orders_count": 2, "margin_used": "200",
+            "available_margin": "800", "withdrawable": "800",
+            "early_access_allowed": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn account_summary_surfaces_withdrawable() {
+        let human = account_summary(&summary_fixture());
+        assert!(human.contains("withdrawable") && human.contains("800"));
+        assert!(human.contains("total equity") && human.contains("1050"));
+        // Nothing is missing, so no footnote.
+        assert!(!human.contains("does not mean zero"));
+
+        let v: Value = serde_json::from_str(&account_summary_json(&summary_fixture())).unwrap();
+        assert_eq!(v["withdrawable"], json!("800"));
+        assert_eq!(v["open_positions_count"], json!(1));
+        assert_eq!(v["early_access_allowed"], json!(true));
+    }
+
+    /// The spec gives the summary schema no `required` array, so every field may
+    /// be absent. An absent one must read as "not reported" (`null` / `-`), never
+    /// as `0` — a zeroed aggregate would make an underwater account look flat.
+    #[test]
+    fn account_summary_never_substitutes_zero_for_an_absent_field() {
+        let empty: AccountPortfolioSummary = serde_json::from_value(json!({})).unwrap();
+        let v: Value = serde_json::from_str(&account_summary_json(&empty)).unwrap();
+        for field in [
+            "collateral",
+            "total_equity",
+            "total_unrealized_pnl",
+            "total_realized_pnl_24h",
+            "total_volume_24h",
+            "open_positions_count",
+            "open_orders_count",
+            "margin_used",
+            "available_margin",
+            "withdrawable",
+            "early_access_allowed",
+        ] {
+            assert_eq!(v[field], Value::Null, "{field} must be null, not 0");
+        }
+        let human = account_summary(&empty);
+        assert!(human.contains("withdrawable        -"), "{human}");
+        assert!(human.contains("does not mean zero"), "{human}");
+    }
+
+    #[test]
+    fn account_state_pairs_the_summary_with_its_positions() {
+        let state: AccountState = serde_json::from_value(json!({
+            "summary": {"total_equity": "1050", "withdrawable": "800",
+                        "open_positions_count": 1},
+            "positions": [{
+                "market_id": "BTC-USDX-PERP", "side": "Buy", "size": "0.5",
+                "entry_price": "80000", "unrealized_pnl": "50", "realized_pnl": "0"
+            }]
+        }))
+        .unwrap();
+        let human = account_state(&state);
+        assert!(human.contains("withdrawable") && human.contains("800"));
+        assert!(human.contains("MARKET") && human.contains("1 position(s)."));
+
+        let v: Value = serde_json::from_str(&account_state_json(&state)).unwrap();
+        assert_eq!(v["summary"]["withdrawable"], json!("800"));
+        assert_eq!(v["positions"][0]["market_id"], json!("BTC-USDX-PERP"));
+        // The two halves come from one read, so the reported count and the list
+        // agree — surface both rather than recomputing one from the other.
+        assert_eq!(
+            v["summary"]["open_positions_count"],
+            json!(v["positions"].as_array().unwrap().len())
+        );
+    }
+
+    fn fees_fixture(maker_fee_bps: i32) -> AccountFees {
+        serde_json::from_value(json!({
+            "maker_fee_bps": maker_fee_bps, "taker_fee_bps": 5, "tier": "base",
+            "schedule": "standard", "volume_30d": "123456.78",
+            "volume_30d_estimated": false, "discounts": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn account_fees_labels_a_negative_maker_fee_as_a_rebate() {
+        let human = account_fees(&fees_fixture(-2));
+        assert!(human.contains("-2 bps (rebate paid to you)"), "{human}");
+        assert!(human.contains("taker fee") && human.contains("5 bps"));
+        assert!(human.contains("discounts") && human.contains("none"));
+        // The rate is scoped to a schedule, not a venue-wide guarantee.
+        assert!(human.contains("`standard` schedule"), "{human}");
+
+        // A positive fee is not mislabelled.
+        assert!(!account_fees(&fees_fixture(3)).contains("rebate"));
+
+        let v: Value = serde_json::from_str(&account_fees_json(&fees_fixture(-2))).unwrap();
+        // Bps stay signed JSON numbers; volume stays an exact decimal string.
+        assert_eq!(v["maker_fee_bps"], json!(-2));
+        assert_eq!(v["taker_fee_bps"], json!(5));
+        assert_eq!(v["volume_30d"], json!("123456.78"));
+        assert_eq!(v["volume_30d_estimated"], json!(false));
+        assert_eq!(v["discounts"], json!([]));
+    }
+
+    #[test]
+    fn account_fees_flags_an_estimated_volume() {
+        let fees: AccountFees = serde_json::from_value(json!({
+            "maker_fee_bps": 0, "taker_fee_bps": 5, "tier": "base",
+            "schedule": "standard", "volume_30d": "42",
+            "volume_30d_estimated": true, "discounts": [{"kind": "promo"}]
+        }))
+        .unwrap();
+        let human = account_fees(&fees);
+        assert!(human.contains("may undercount"), "{human}");
+        // The discount shape isn't fixed by the spec yet, so it rides through.
+        assert!(human.contains("promo"), "{human}");
+        let v: Value = serde_json::from_str(&account_fees_json(&fees)).unwrap();
+        assert_eq!(v["discounts"][0]["kind"], json!("promo"));
+    }
+
+    fn history_fixture(window: &str) -> PortfolioHistory {
+        serde_json::from_value(json!({
+            "window": window,
+            "cadence_ms": 300000i64,
+            "points": [
+                {"timestamp_ms": 1_700_000_000_000i64, "equity": "1000",
+                 "pnl": "0", "volume": "0"},
+                {"timestamp_ms": 1_700_000_300_000i64, "equity": "1050",
+                 "pnl": "50", "volume": "12000"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn portfolio_history_renders_the_served_window_and_points() {
+        let human = portfolio_history(&history_fixture("day"));
+        assert!(human.contains("window          day"), "{human}");
+        assert!(human.contains("cadence         300000 ms"), "{human}");
+        assert!(human.contains("2023-11-14T22:13:20Z"), "{human}");
+        assert!(human.contains("1050") && human.contains("12000"));
+        assert!(human.contains("2 point(s), oldest first."), "{human}");
+
+        let v: Value = serde_json::from_str(&portfolio_history_json(&history_fixture("day")))
+            .expect("valid JSON");
+        assert_eq!(v["window"], json!("day"));
+        assert_eq!(v["cadence_ms"], json!(300000i64));
+        let p = &v["points"][1];
+        assert_eq!(p["timestamp_ms"], json!(1_700_000_300_000i64));
+        assert_eq!(p["datetime"], json!("2023-11-14T22:18:20Z"));
+        assert_eq!(p["equity"], json!("1050"));
+        assert_eq!(p["pnl"], json!("50"));
+        assert_eq!(p["volume"], json!("12000"));
+    }
+
+    /// A window added to a later spec still decodes; the CLI reports the served
+    /// label rather than dropping it or claiming the requested one.
+    #[test]
+    fn portfolio_history_reports_an_unknown_window_verbatim() {
+        let human = portfolio_history(&history_fixture("quarter"));
+        assert!(
+            human.contains("quarter (unknown to this CLI build)"),
+            "{human}"
+        );
+        let v: Value =
+            serde_json::from_str(&portfolio_history_json(&history_fixture("quarter"))).unwrap();
+        assert_eq!(v["window"], json!("quarter"));
+    }
+
+    /// An empty series says so instead of rendering a headerless table — but the
+    /// window/cadence it was served under stay visible.
+    #[test]
+    fn portfolio_history_handles_an_empty_series() {
+        let empty: PortfolioHistory = serde_json::from_value(json!({
+            "window": "all", "cadence_ms": 86400000i64, "points": []
+        }))
+        .unwrap();
+        let human = portfolio_history(&empty);
+        assert!(human.contains("No points in this window."), "{human}");
+        assert!(human.contains("window          all"), "{human}");
+        let v: Value = serde_json::from_str(&portfolio_history_json(&empty)).unwrap();
+        assert_eq!(v["points"], json!([]));
+    }
+
+    /// Free-form server strings reach a terminal that interprets ESC sequences,
+    /// so control bytes are neutralized before printing. JSON is untouched —
+    /// `serde_json` escapes them itself, and machine consumers don't interpret.
+    #[test]
+    fn server_strings_cannot_smuggle_terminal_escapes() {
+        let evil = "day\u{1b}[2K\u{1b}[31mwithdrawable  999999";
+        let history: PortfolioHistory = serde_json::from_value(json!({
+            "window": evil, "cadence_ms": 1i64, "points": []
+        }))
+        .unwrap();
+        let human = portfolio_history(&history);
+        assert!(
+            !human.contains('\u{1b}'),
+            "escape byte reached stdout: {human:?}"
+        );
+        assert!(human.contains("day?[2K?[31m"), "{human}");
+        // The JSON view keeps the value verbatim (escaped by serde_json).
+        let raw = portfolio_history_json(&history);
+        assert!(!raw.contains('\u{1b}'), "raw escape in JSON: {raw:?}");
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["window"], json!(evil));
+
+        // Same for a position's `side` and a `*_error` reason.
+        let ps: Vec<Position> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP", "side": "Buy\u{1b}[31m", "size": "1",
+            "entry_price": "1", "unrealized_pnl": "0", "realized_pnl": "0",
+            "roe": null, "roe_error": "mark_price_unavailable\u{1b}[2J"
+        }]))
+        .unwrap();
+        assert!(!positions(&ps).contains('\u{1b}'));
+
+        // And for the fee schedule's open strings.
+        let fees: AccountFees = serde_json::from_value(json!({
+            "maker_fee_bps": 0, "taker_fee_bps": 0, "tier": "base\u{1b}[0m",
+            "schedule": "standard\u{7f}", "volume_30d": "0",
+            "volume_30d_estimated": false, "discounts": []
+        }))
+        .unwrap();
+        let human = account_fees(&fees);
+        assert!(
+            !human.contains('\u{1b}') && !human.contains('\u{7f}'),
+            "{human:?}"
+        );
     }
 
     #[test]

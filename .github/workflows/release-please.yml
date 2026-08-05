@@ -2,8 +2,11 @@
 #
 # Watches `main` and, from Conventional Commit messages, maintains a standing
 # "release PR" that bumps `version` in Cargo.toml + Cargo.lock and writes
-# CHANGELOG.md. Semver follows commit type: feat -> minor, fix -> patch,
-# feat!/BREAKING CHANGE -> major. Merging the release PR creates the `v<version>`
+# CHANGELOG.md. The CLI is pre-1.0 and stays on 0.X.Y (ENG-7411): feat!/BREAKING
+# CHANGE -> X, feat/fix -> Y, via bump-minor-pre-major +
+# bump-patch-for-minor-pre-major in release-please-config.json. Those flags are
+# what keep a breaking change from cutting 1.0.0; dropping them is how the CLI
+# would deliberately go 1.0. Merging the release PR creates the `v<version>`
 # tag AND a *draft* GitHub Release (`"draft": true` in release-please-config.json),
 # which in turn fires the existing signed `release.yml` (cargo-dist build ->
 # minisign -> upload -> Homebrew). dist runs with `create-release = false`, so it
