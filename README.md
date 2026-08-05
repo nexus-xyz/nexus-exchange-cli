@@ -301,18 +301,43 @@ Every subcommand supports `--help`.
 
 ### Network selection
 
-By default the CLI targets the **stable** network. Override per-invocation:
+The CLI targets a **network**, not a release channel. By default that is
+**testnet** — play funds credited by the faucet — because the default must never
+be a network that moves real money.
 
 ```sh
-nexus --network beta markets
+nexus markets                                    # testnet (the default)
 nexus --network local markets
 nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 ```
 
 | Flag | Env | Default |
 |---|---|---|
-| `--network <stable\|beta\|local>` | `NEXUS_NETWORK` | `stable` |
+| `--network <mainnet\|testnet\|local>` | `NEXUS_NETWORK` | `testnet` |
 | `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
+
+| Network | Funds | Notes |
+|---|---|---|
+| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet, and its base uses a different path layout than the one the SDK signs. Use `--base-url` to target a host you control. |
+| `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
+| `local` | play | A locally run indexer. A developer convenience, never a fallback. |
+
+> **`stable` and `beta` were retired** in `nexus-exchange` 0.8.0 and are no
+> longer accepted. They named *release channels*, which is how a play-funds host
+> came to be labelled "production" — so `stable`'s replacement is **`testnet`**,
+> not `mainnet`. That mapping is the correction, not a rename: reading `stable`
+> as `mainnet` has it backwards. A config file still naming one keeps working
+> (the default is the same host it pointed at) and prints a warning telling you
+> what to change.
+
+A config-file `network` the CLI cannot parse — a retired channel name, or a typo
+like `mainet` — never changes the network silently: it warns on stderr (so
+`--output json` stays clean on stdout), names the network actually used, and
+falls back to the default. `--network` itself rejects an unknown value outright,
+because you typed it and can retype it.
+
+Credentials are minted **per network** and are invalid on any other, so an API
+key configured for one network will not authenticate against another.
 
 ### Output format
 
@@ -448,9 +473,21 @@ surface so the two move together.
 ### API coverage
 
 The CLI targets a specific released version of the Exchange API spec, pinned in
-[`.api-version`](./.api-version) (`v0.7.1`, matching the wrapped
+[`.api-version`](./.api-version) — matching the wrapped
 [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs) SDK, which
-pins and sends the same tag as `X-Nexus-Api-Version` on every request).
+pins and sends the same tag as `X-Nexus-Api-Version` on every request.
+
+<!-- api-version-sync:start -->
+
+Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.8.0`**.
+
+<!-- api-version-sync:end -->
+
+That pin is a **derived value, not a choice**. The CLI issues no HTTP of its own, so
+the crate decides which spec version is actually spoken; a pin that disagrees with
+the crate's is simply a false statement about what the binary sends.
+[`scripts/check_sdk_parity.py`](./scripts/check_sdk_parity.py) enforces that in CI.
+
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
 verifies — in the `spec-drift` CI workflow — that:

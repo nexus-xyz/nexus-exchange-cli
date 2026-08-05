@@ -24,6 +24,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::NetworkArg;
+
 /// Persisted configuration. Every field is optional: the file is purely a
 /// fallback layer beneath flags and environment variables.
 ///
@@ -227,10 +229,25 @@ pub fn setup() -> Result<()> {
 
     let existing = load()?.unwrap_or_default();
 
+    // Never offer a stored value back as the default unless it is still a real
+    // network: a config written before the release-channel rename holds
+    // `stable`/`beta`, and pre-filling that would have the user press Enter and
+    // re-save a name that no longer exists.
     let network = prompt_line(
-        "Network [stable/beta/local]",
-        existing.network.as_deref().or(Some("stable")),
+        "Network [mainnet/testnet/local]",
+        existing
+            .network
+            .as_deref()
+            .filter(|n| NetworkArg::parse(n).is_some())
+            .or(Some("testnet")),
     )?;
+    // Validated before the credential prompts so a typo costs nothing — the
+    // secret has not been typed yet. Writing an unusable network would push the
+    // failure to every later invocation instead of surfacing it here.
+    let network = non_empty(network);
+    if let Some(name) = network.as_deref() {
+        validate_network_name(name)?;
+    }
 
     let api_key = prompt_line("API key id (nx_...)", existing.api_key.as_deref())?;
 
@@ -238,8 +255,8 @@ pub fn setup() -> Result<()> {
     let api_secret = rpassword::prompt_password("API secret (input hidden, blank keeps current): ")
         .context("failed to read API secret")?;
 
-    let mut cfg = FileConfig {
-        network: non_empty(network),
+    let cfg = FileConfig {
+        network,
         api_key: non_empty(api_key),
         // Keep an existing secret if the user left the prompt blank.
         api_secret: non_empty(api_secret).or(existing.api_secret),
@@ -247,10 +264,7 @@ pub fn setup() -> Result<()> {
         // `setup` doesn't touch the wallet session token; preserve it.
         session_token: existing.session_token,
     };
-    // Normalize away an all-blank network so it doesn't shadow the default.
-    if cfg.network.as_deref() == Some("") {
-        cfg.network = None;
-    }
+    // (An all-blank network is already `None` — `non_empty` trims first.)
 
     let path = save(&cfg)?;
     println!("\nSaved to {} (permissions 0600).", path.display());
@@ -279,6 +293,27 @@ fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+/// Reject a network name `setup` must not persist. Split out from the
+/// interactive flow so the error text — the part a user actually reads — is
+/// testable without a terminal.
+///
+/// A retired release-channel name gets its own sentence: `stable` named a
+/// play-funds host, so the reader needs `testnet`, and the intuitive guess
+/// (`mainnet`) is the one genuinely dangerous answer.
+fn validate_network_name(name: &str) -> Result<()> {
+    if NetworkArg::parse(name).is_some() {
+        return Ok(());
+    }
+    let hint = match NetworkArg::retired_replacement(name) {
+        Some(replacement) => format!(
+            " `{name}` was a release channel, not a network; it named a play-funds host, \
+             which is now `{replacement}`."
+        ),
+        None => String::new(),
+    };
+    anyhow::bail!("unknown network `{name}`; expected `mainnet`, `testnet` or `local`.{hint}")
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -393,7 +428,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let _tmp = TempConfigHome::new("roundtrip");
         let cfg = FileConfig {
-            network: Some("beta".into()),
+            network: Some("testnet".into()),
             base_url: None,
             api_key: Some("nx_abc".into()),
             api_secret: Some("shh".into()),
@@ -404,7 +439,7 @@ mod tests {
 
         // Round-trips through disk.
         let loaded = load().unwrap().expect("config should be present");
-        assert_eq!(loaded.network.as_deref(), Some("beta"));
+        assert_eq!(loaded.network.as_deref(), Some("testnet"));
         assert_eq!(loaded.api_key.as_deref(), Some("nx_abc"));
         assert_eq!(loaded.api_secret.as_deref(), Some("shh"));
         assert_eq!(loaded.base_url, None);
@@ -443,6 +478,49 @@ mod tests {
         std::fs::write(&path, b"{ this is not json").unwrap();
         let err = load().unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn setup_accepts_every_real_network() {
+        for name in ["mainnet", "testnet", "local", "TESTNET", "  local  "] {
+            assert!(
+                validate_network_name(name).is_ok(),
+                "{name} is a real network and must be accepted"
+            );
+        }
+    }
+
+    /// ENG-6455: `setup` must not be able to write a name that no longer exists,
+    /// and the error has to point at the *right* replacement — `stable` was play
+    /// funds, so `testnet`. Naming `mainnet` here would be the dangerous answer.
+    #[test]
+    fn setup_rejects_retired_release_channels_and_names_the_replacement() {
+        for retired in ["stable", "beta"] {
+            let err = validate_network_name(retired)
+                .expect_err("a retired release channel must not be persisted")
+                .to_string();
+            assert!(
+                err.contains("testnet"),
+                "the error for `{retired}` must point at testnet; got: {err}"
+            );
+            assert!(
+                err.contains("release channel"),
+                "the error for `{retired}` should explain what it was; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_rejects_an_unknown_network_without_a_bogus_hint() {
+        let err = validate_network_name("prod")
+            .expect_err("an unknown network must be rejected")
+            .to_string();
+        assert!(err.contains("mainnet") && err.contains("testnet") && err.contains("local"));
+        // No retired-name sentence for something that was never a channel.
+        assert!(
+            !err.contains("release channel"),
+            "unexpected retired-name hint for an unrelated value: {err}"
+        );
     }
 
     #[test]
