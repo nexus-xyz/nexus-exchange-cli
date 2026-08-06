@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.3.0...v0.4.0) (2026-08-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** withdraw `account margin-mode` — no endpoint backs it (ENG-7740) ([#45](https://github.com/nexus-xyz/nexus-exchange-cli/issues/45))
+* **cli:** `--network stable` and `--network beta` are rejected. They named release channels, and the replacement for `stable` is `testnet`, NOT `mainnet` — reading it the intuitive way points a real-funds label at a faucet host, which is the precise error the axis exists to prevent. Rejected at parse time rather than aliased: for a CLI, an error is the only way to force the re-decide the SDK gets from the compiler, and a silent remap is what must not happen on a real-funds axis.
+* **cli:** verify spec+SDK parity and autobump the SDK dependency (ENG-7962) ([#51](https://github.com/nexus-xyz/nexus-exchange-cli/issues/51))
+* **cli:** `nexus fills --limit` is now the server-side page size rather than a client-side truncation of a fixed 100-fill page — a value above 100 now actually returns more fills, and clap rejects anything outside the API's 1..=1000 (previously any u32 was accepted and silently truncated). Forced by nexus-exchange 0.7.0, where `fetch_my_trades` takes the limit.
+* **cli:** `nexus order get`, `nexus order cancel <ORDER_ID>`, and `nexus order amend` now require `--market <MARKET>`, because the exchange routes single-order-by-id requests per market. `nexus order cancel --all` is unchanged.
+
+### Features
+
+* **cli:** accept `--tif post-only` ([#47](https://github.com/nexus-xyz/nexus-exchange-cli/issues/47)) ([fb9e857](https://github.com/nexus-xyz/nexus-exchange-cli/commit/fb9e857f86e8f9340603c62a4c243e35194449bf))
+* **cli:** adopt the {mainnet, testnet, local} network axis (ENG-6455) ([#52](https://github.com/nexus-xyz/nexus-exchange-cli/issues/52)) ([e910889](https://github.com/nexus-xyz/nexus-exchange-cli/commit/e910889c418d81edf7d31ffda9ce4ea8b0a61390))
+* **cli:** bump spec to v0.7.1 via nexus-exchange 0.6.0; surface spec tag in `nexus --version` (ENG-6039) ([#43](https://github.com/nexus-xyz/nexus-exchange-cli/issues/43)) ([7b3a6ad](https://github.com/nexus-xyz/nexus-exchange-cli/commit/7b3a6ad7e71dcc3c924f8b65d6675b8de5300fa1))
+* **cli:** flip runtime routing to /api/v1 via nexus-exchange 0.5.1 (ENG-5190) ([#37](https://github.com/nexus-xyz/nexus-exchange-cli/issues/37)) ([2c78e3b](https://github.com/nexus-xyz/nexus-exchange-cli/commit/2c78e3bf0498c0adb73c5ab8949d5cbbfb9b8dc8))
+* **cli:** surface portfolio-parity data in `nexus account` / `positions` (ENG-6460) ([#48](https://github.com/nexus-xyz/nexus-exchange-cli/issues/48)) ([ab59a87](https://github.com/nexus-xyz/nexus-exchange-cli/commit/ab59a87bf0666b64438e9829b19b856c541f3015))
+* **cli:** target the /api/v1 direct-indexer surface (ENG-4949) ([#34](https://github.com/nexus-xyz/nexus-exchange-cli/issues/34)) ([4dd59c6](https://github.com/nexus-xyz/nexus-exchange-cli/commit/4dd59c6899ebfc63048debc3293fd3ed0c043ad5))
+* **cli:** verify spec+SDK parity and autobump the SDK dependency (ENG-7962) ([#51](https://github.com/nexus-xyz/nexus-exchange-cli/issues/51)) ([a27091f](https://github.com/nexus-xyz/nexus-exchange-cli/commit/a27091f3785ad5a26aff7f705fe1bf0125e1eb4a))
+
+
+### Bug Fixes
+
+* **cli:** atomic credential-file writes for safe auth persistence (ENG-3816) ([#40](https://github.com/nexus-xyz/nexus-exchange-cli/issues/40)) ([43a2455](https://github.com/nexus-xyz/nexus-exchange-cli/commit/43a24556e1da20a2d73b81a5b1b6d5221dfd4cf3))
+* **cli:** withdraw `account margin-mode` — no endpoint backs it (ENG-7740) ([#45](https://github.com/nexus-xyz/nexus-exchange-cli/issues/45)) ([f15021f](https://github.com/nexus-xyz/nexus-exchange-cli/commit/f15021f74ae137e502c5b6de2d743f85b51d9974))
+
 ## [0.3.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.2.0...v0.3.0) (2026-07-06)
 
 
