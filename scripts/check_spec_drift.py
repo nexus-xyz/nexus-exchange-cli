@@ -144,7 +144,11 @@ METHOD_OP = {
     "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # ── ahead of the pinned spec (see CODE_ONLY_OPS) ──
     "set_leverage": ("POST", "/account/leverage"),
-    "set_margin_mode": ("POST", "/account/margin-mode"),
+    # NOTE: `set_margin_mode` is deliberately unmapped. The SDK exposes it, but it
+    # targets POST /account/margin-mode, which no spec version has ever defined
+    # and no service routes. The `account margin-mode` command that called it was
+    # withdrawn in ENG-7740; ENG-7614 tracks the engine work that must land first.
+    # Do not add a row here without a spec operation to point it at.
     "fetch_funding_payments": ("GET", "/funding-payments"),
     "create_transfer": ("POST", "/transfers"),
     "fetch_transfers": ("GET", "/transfers"),
@@ -164,7 +168,6 @@ METHOD_OP = {
 # spec has had it since v0.7.1, so it now lives in endpoints.txt.
 CODE_ONLY_OPS = {
     ("POST", "/account/leverage"),       # account leverage -> set_leverage
-    ("POST", "/account/margin-mode"),    # account margin-mode -> set_margin_mode
     ("GET", "/funding-payments"),        # funding-payments -> fetch_funding_payments
     ("POST", "/transfers"),              # transfers create -> create_transfer
     ("GET", "/transfers"),               # transfers list -> fetch_transfers

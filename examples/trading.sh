@@ -37,4 +37,6 @@ nexus order cancel --all --yes                           # DELETE /api/v1/orders
 nexus account deposit 1000 --yes                 # POST /account/deposit
 nexus account credit                             # POST /account/credit (testnet faucet)
 nexus account leverage "$MARKET" 10              # POST /account/leverage
-nexus account margin-mode "$MARKET" isolated     # POST /account/margin-mode
+# No margin-mode example: `nexus account margin-mode` was withdrawn in ENG-7740
+# because no endpoint accepts a margin-mode change. ENG-7614 tracks the engine
+# work that has to land before the command can return.

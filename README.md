@@ -272,7 +272,9 @@ nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account leverage BTC-USDX-PERP 10
-nexus account margin-mode BTC-USDX-PERP isolated
+# Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
+# withdrawn (ENG-7740): no endpoint accepts a margin-mode change, so the command
+# could only ever fail. Tracking: ENG-7614.
 
 # Wallet-signed auth (EVM key; see Credentials below)
 nexus auth login                    # EIP-191 sign-in; prompts for the key,
