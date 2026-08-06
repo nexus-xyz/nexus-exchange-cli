@@ -97,7 +97,16 @@ class SyntheticRepo:
         so inheriting them here would fire stale-allowlist errors on every fixture
         and drown the invariant under test. A test that needs an exemption passes
         it explicitly."""
-        with patched("CODE_ONLY_OPS", set(code_only)), patched(
+        # CODE_ONLY_OPS is an attributed dict since ENG-7927: each key maps to
+        # (command, kind, issue). Tests still pass a bare set of ops, since none
+        # of them is about attribution — `check_allowlist_is_honest` owns that and
+        # has its own cases. Synthesize a well-formed row so the shape is right.
+        code_only_rows = (
+            code_only
+            if isinstance(code_only, dict)
+            else {op: ("test-command", csd.SERVED_UNSPECIFIED, "ENG-0000") for op in code_only}
+        )
+        with patched("CODE_ONLY_OPS", code_only_rows), patched(
             "NON_REST_TARGETS", set(non_rest)
         ):
             return _quiet(
@@ -458,7 +467,7 @@ class TestRealRepoState(unittest.TestCase):
         """Cheap invariant on the real files: an op cannot be both claimed and
         exempted."""
         targeted = {(m, csd.normalize_path(p)) for m, p in csd.load_targeted()}
-        overlap = sorted(csd.CODE_ONLY_OPS & targeted)
+        overlap = sorted(csd.CODE_ONLY_OPS.keys() & targeted)
         self.assertEqual(overlap, [], f"claimed AND exempted: {overlap}")
 
 

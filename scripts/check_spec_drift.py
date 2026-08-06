@@ -156,24 +156,56 @@ METHOD_OP = {
     "fetch_sub_accounts": ("GET", "/sub-accounts"),
 }
 
-# Called by a command but intentionally absent from endpoints.txt: these ops are
-# AHEAD OF the pinned spec, so adding them to endpoints.txt would (correctly)
-# fail the endpoints.txt<->spec invariant until the spec ships them. Move a row
-# out of here into endpoints.txt once the pinned spec gains the operation.
+# Why a row can be absent from the pinned spec. The distinction is the entire
+# point of this table: one of these is a documentation lag, the other is a dead
+# end, and the old table could not tell them apart.
 #
-# Invariant 3 keeps this list honest: an entry the pinned spec defines (at the
-# same path, under ANY method) fails the check, so "ahead of spec" cannot quietly
-# become "covered but uncounted". `PUT /orders/{}` used to sit here on exactly
-# that mistake (ENG-7962) — the operation is `PATCH /orders/{order_id}` and the
-# spec has had it since v0.7.1, so it now lives in endpoints.txt.
+#   SERVED_UNSPECIFIED — the route works; the spec has not caught up. The command
+#                        does what it says. Fix is a spec PR.
+#   ROUTE_INVISIBLE    — nothing serves it. The command is a callable dead end: it
+#                        parses, authenticates, dispatches, and cannot succeed.
+#                        Fix is a product/contract decision, or withdraw the
+#                        command (which is what ENG-7740 did to `margin-mode`).
+SERVED_UNSPECIFIED = "served-unspecified"
+ROUTE_INVISIBLE = "route-invisible"
+
+# Called by a command but intentionally absent from endpoints.txt: adding them
+# there would (correctly) fail the endpoints.txt<->spec invariant while the spec
+# lacks the op. Move a row into endpoints.txt once the pinned spec gains the
+# operation — `check_allowlist_is_honest` FAILS if you don't.
+#
+# Each row must justify itself: (calling CLI command, why, tracking issue). An
+# unattributed row is rejected. That rule exists because
+# `("POST", "/account/margin-mode")` sat here for months claiming to be "ahead of
+# the pinned spec" when the path had never appeared in ANY spec version and no
+# service routed it — the `spec-drift` gate stayed green the whole time, and the
+# command shipped as a dead end (ENG-7740). There was no issue to point at,
+# because the row was a guess rather than a plan. Naming one is the forcing
+# function.
 CODE_ONLY_OPS = {
-    ("POST", "/account/leverage"),       # account leverage -> set_leverage
-    ("GET", "/funding-payments"),        # funding-payments -> fetch_funding_payments
-    ("POST", "/transfers"),              # transfers create -> create_transfer
-    ("GET", "/transfers"),               # transfers list -> fetch_transfers
-    ("POST", "/sub-accounts"),           # sub-accounts create -> create_sub_account
-    ("GET", "/sub-accounts"),            # sub-accounts list -> fetch_sub_accounts
+    ("POST", "/account/leverage"): ("account leverage", SERVED_UNSPECIFIED, "ENG-3817"),
+    ("GET", "/funding-payments"): ("funding-payments", SERVED_UNSPECIFIED, "ENG-3817"),
+    # These four are the same shape margin-mode was: the SDK ships methods, the
+    # CLI exposes commands, and neither `/transfers` nor `/sub-accounts` has a
+    # served route or a contract (ENG-7800 verifies both against v0.7.2). They are
+    # classified honestly here rather than hidden behind "ahead of spec"; ENG-7800
+    # owns the withdraw-or-specify decision.
+    ("POST", "/transfers"): ("transfers create", ROUTE_INVISIBLE, "ENG-7800"),
+    ("GET", "/transfers"): ("transfers list", ROUTE_INVISIBLE, "ENG-7800"),
+    ("POST", "/sub-accounts"): ("sub-accounts create", ROUTE_INVISIBLE, "ENG-7800"),
+    ("GET", "/sub-accounts"): ("sub-accounts list", ROUTE_INVISIBLE, "ENG-7800"),
 }
+
+# Well-formed tracking reference, e.g. ENG-7800.
+_ISSUE_RE = re.compile(r"^ENG-\d+$")
+
+# NOTE (merge, ENG-7927 x ENG-7962): the 'has the spec caught up' half of
+# invariant 3 is NOT repeated here. `check_code_vs_targets` already does it, and
+# does it better: it compares by PATH under any method, which is what caught
+# `PUT /orders/{}` sitting here while the spec had `PATCH`. Checking it a second
+# time by exact (method, path) would report the weaker result alongside the
+# stronger one. What this file adds is ATTRIBUTION - a row must name the command
+# it backs, why the op is absent, and an issue.
 
 # Listed in endpoints.txt but reached WITHOUT a named SDK REST method call, so the
 # source parser cannot (and should not) see it. The WebSocket upgrade is opened by
@@ -315,11 +347,11 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
     targeted_norm = {(m, normalize_path(p)) for m, p in targeted}
 
     # (a) called but not listed (and not an intentional code-only op).
-    called_missing_from_targets = sorted(called - targeted_norm - CODE_ONLY_OPS)
+    called_missing_from_targets = sorted(called - targeted_norm - CODE_ONLY_OPS.keys())
     # (b) listed but not called (and not an intentional non-REST target).
     targets_without_call = sorted(targeted_norm - called - NON_REST_TARGETS)
     # Invariant 3: a CODE_ONLY_OPS entry no command calls is stale.
-    stale_code_only = sorted(CODE_ONLY_OPS - called)
+    stale_code_only = sorted(CODE_ONLY_OPS.keys() - called)
     # Invariant 3: a CODE_ONLY_OPS entry the pinned spec already defines is not
     # "ahead of spec". Compare by PATH (any method) so a wrong verb in METHOD_OP
     # is caught too — that is the failure mode ENG-7962 found. Report the spec's
@@ -454,6 +486,80 @@ def check_targets_vs_spec(targeted, available):
     return len(missing)
 
 
+def check_allowlist_is_honest():
+    """Invariant 3: every CODE_ONLY_OPS row's claim is true and attributed.
+
+    `CODE_ONLY_OPS` is the escape hatch that lets a command ship without a spec
+    operation, so it is the one place a false claim goes unnoticed. Two ways a row
+    can lie. This function owns one of them; `check_code_vs_targets` owns the other.
+
+      (a) HERE — the row is unattributed: no calling command, no reason, or no
+          tracking issue. The withdrawn margin-mode op was exactly this: a bare
+          entry with a comment asserting "ahead of the pinned spec", which was
+          never true (ENG-7740). The path is spelled out in the `#` comments
+          above rather than here, because `coverage.rs`'s
+          `margin_mode_is_absent_from_every_drift_artifact` strips `#` lines
+          before scanning and a docstring is not stripped — naming it here would
+          trip a guard that exists to keep it out of the tables.
+      (b) NOT here — the pinned spec DOES contain the op, so the row's premise has
+          expired. `check_code_vs_targets` checks that by PATH under any method
+          (ENG-7962), which is strictly stronger than the by-(method, path) check
+          this function originally carried, so it is not duplicated.
+
+    Also prints the ROUTE_INVISIBLE rows as a standing report: those are commands
+    with nothing behind them, and they should be visible in every run rather than
+    buried in a Python literal.
+
+    Returns the number of errors printed.
+    """
+    errors = 0
+
+    malformed = []
+    for op, row in sorted(CODE_ONLY_OPS.items()):
+        if not (isinstance(row, tuple) and len(row) == 3):
+            malformed.append((op, "expected a (command, kind, issue) triple"))
+            continue
+        command, kind, issue = row
+        if not command or not isinstance(command, str):
+            malformed.append((op, "no calling CLI command named"))
+        elif kind not in (SERVED_UNSPECIFIED, ROUTE_INVISIBLE):
+            malformed.append(
+                (op, f"kind must be {SERVED_UNSPECIFIED!r} or {ROUTE_INVISIBLE!r}, got {kind!r}")
+            )
+        elif not _ISSUE_RE.match(issue or ""):
+            malformed.append((op, f"tracking issue must look like ENG-1234, got {issue!r}"))
+
+    if malformed:
+        errors += len(malformed)
+        print(
+            f"\nERROR: {len(malformed)} CODE_ONLY_OPS row(s) are unattributed. A row "
+            f"lets a command ship with no spec operation, so it must name the "
+            f"command it backs, why the op is absent, and the issue that resolves it:"
+        )
+        for (m, p), why in malformed:
+            print(f"  - {m} {p}: {why}")
+
+    invisible = sorted(
+        (op, row) for op, row in CODE_ONLY_OPS.items()
+        if isinstance(row, tuple) and len(row) == 3 and row[1] == ROUTE_INVISIBLE
+    )
+    if invisible:
+        print(
+            f"\nNOTE: {len(invisible)} command(s) target a route nothing serves — they "
+            f"parse, authenticate, dispatch, and cannot succeed. Withdraw or specify "
+            f"(this is the ENG-7740 shape):"
+        )
+        for (m, p), (command, _, issue) in invisible:
+            print(f"  - `nexus {command}` -> {m} {p}  ({issue})")
+
+    if not errors:
+        print(
+            f"\nOK: all {len(CODE_ONLY_OPS)} CODE_ONLY_OPS row(s) are attributed, and "
+            f"none is in the pinned spec."
+        )
+    return errors
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(f"usage: {sys.argv[0]} <openapi.json>")
@@ -470,6 +576,9 @@ def main():
     # Invariants 2-4: CLI code <-> endpoints.txt, allowlist hygiene, and
     # CLI_SOURCES completeness.
     failures += check_code_vs_targets(targeted, available)
+    # Invariant 3, attribution half (ENG-7927): every CODE_ONLY_OPS row names the
+    # command it backs, why the op is absent, and a tracking issue.
+    failures += check_allowlist_is_honest()
 
     if failures:
         sys.exit(1)
