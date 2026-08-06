@@ -268,6 +268,14 @@ pub enum TifArg {
     Ioc,
     /// Fill-or-kill.
     Fok,
+    /// Post-only: rest or be rejected, never cross the spread.
+    ///
+    /// Spelled `post-only` on the command line (clap kebab-cases the variant).
+    /// Post-only is a time-in-force on this API rather than a boolean flag, so
+    /// it belongs here rather than as `--post-only` — which is what made it
+    /// look absent: the capability is in the spec and the engine, and only the
+    /// CLI could not reach it.
+    PostOnly,
 }
 
 impl From<TifArg> for TimeInForce {
@@ -276,6 +284,7 @@ impl From<TifArg> for TimeInForce {
             TifArg::Gtc => TimeInForce::Gtc,
             TifArg::Ioc => TimeInForce::Ioc,
             TifArg::Fok => TimeInForce::Fok,
+            TifArg::PostOnly => TimeInForce::PostOnly,
         }
     }
 }

@@ -13,6 +13,12 @@ nexus order place \
   --market "$MARKET" --side buy --type limit \
   --price 84000 --quantity 0.01 --tif gtc --yes
 
+# Post-only: rest or be rejected, never cross. It is a time-in-force on this
+# API, not a separate flag — so it is `--tif post-only`, not `--post-only`.
+nexus order place \
+  --market "$MARKET" --side buy --type limit \
+  --price 84000 --quantity 0.01 --tif post-only --yes
+
 # A market order ignores --price. --reduce-only never opens/flips a position.
 nexus order place \
   --market "$MARKET" --side sell --type market --quantity 0.01 --reduce-only --yes
