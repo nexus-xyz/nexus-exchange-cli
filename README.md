@@ -259,8 +259,10 @@ nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account leverage BTC-USDX-PERP 10
-nexus account margin-mode BTC-USDX-PERP isolated
 nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
+# Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
+# withdrawn (ENG-7740): no endpoint accepts a margin-mode change, so the command
+# could only ever fail. Tracking: ENG-7614.
 
 # Wallet-signed auth (EVM key; see Credentials below)
 nexus auth login                    # EIP-191 sign-in; prompts for the key,
@@ -298,6 +300,31 @@ The `order batch` file is a JSON array of order objects mirroring the
 ```
 
 Every subcommand supports `--help`.
+
+### Reading portfolio data
+
+Three rules apply to `account summary` / `account state` / `positions`, and they
+matter before you act on a number:
+
+- **`-` (JSON `null`) is not zero.** The server nulls a figure it cannot derive
+  rather than fabricating one; for a position's risk fields it puts the reason in
+  a companion `*_error`, which `nexus positions` lists under the table. An
+  unreported aggregate rendered as `0` would make an underwater account look
+  flat, so the CLI never substitutes one.
+- **A failed read is not an empty account.** `account summary` and `account
+  state` derive `withdrawable` from the exchange's authoritative margin view and
+  fail closed (`502 authoritative_margin_unavailable`) instead of reporting an
+  estimate. The CLI exits non-zero and says the balance is *unknown*; retry
+  rather than treating it as a zero balance.
+- **Prefer `account state` over `account summary` + `positions`.** Those are two
+  independent requests, and a fill landing between them returns an aggregate that
+  disagrees with the position list. `account state` gets both halves from one
+  server-side read, so they cannot tear.
+
+`withdrawable` is engine-authoritative free margin floored at zero — it already
+nets initial margin and order reservations out of equity, so it is what can
+actually leave the account. Prefer it over `available margin` when deciding how
+much to withdraw.
 
 ### Network selection
 
@@ -515,6 +542,54 @@ branch's own additions. Run it locally with a fetched spec:
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
 python3 scripts/check_spec_drift.py openapi.pinned.json
 ```
+
+See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
+
+### Keeping the pin current
+
+The CLI follows the **crate**, not the spec — `api → rs → cli`, never `api → cli`.
+This is the one place the CLI diverges from the rest of the client fleet, and it
+follows from wrapping an SDK instead of implementing the spec: `nexus-exchange-py`,
+`-ts` and `-mcp` generate against the spec directly, so a spec release is
+immediately actionable for them. Here it is not. New operations are unreachable
+until the crate wraps them, and advancing `.api-version` without a crate release
+would make the pin claim a version the binary never sends. So this repo is
+deliberately **not** a target of the api repo's `spec-released` fan-out
+([ENG-8464](https://linear.app/nexus-labs/issue/ENG-8464)).
+
+| | question | mechanism |
+| -- | -- | -- |
+| **Verification** | does the pin still match the code? | `spec-drift.yml` → `check_spec_drift.py` |
+| **Verification** | is the pin even the right one? | `spec-drift.yml` → `check_sdk_parity.py` |
+| **Detection** | has a newer crate been published? | `sdk-autobump.yml` → `sync_sdk_version.py` |
+
+`sdk-autobump.yml` polls crates.io daily (and on demand). When a newer
+`nexus-exchange` exists it bumps `Cargo.toml`/`Cargo.lock`, copies the crate's own
+pin into `.api-version`, updates the managed README block, classifies any spec delta
+with [oasdiff](https://github.com/oasdiff/oasdiff), and opens a labelled PR. The
+poll needs no secret and no cross-repo permission: crates.io wants only a
+User-Agent, and the crate's `.api-version` and `endpoints.txt` come from the
+published tarball.
+
+Everything else — `endpoints.txt`, `METHOD_OP`, the coverage numbers — stays
+human-owned. Note that a crate bump can change the SDK's **Rust API**, not just its
+paths (0.7.0 added a `limit` parameter to `fetch_my_trades`), which no spec-level
+check would notice; the workflow therefore runs `cargo check` itself and reports the
+result in the PR. Check the lag by hand with:
+
+```sh
+python3 scripts/sync_sdk_version.py --check   # newer crate available?
+python3 scripts/check_sdk_parity.py           # pin + manifest vs the crate
+```
+
+Three things gate such a PR landing unattended, none in this repo's gift:
+`allow_auto_merge` is disabled here (the workflow probes it and says so in the PR
+body rather than silently no-opping); a PR opened with the default `GITHUB_TOKEN`
+does not trigger `spec-drift`/CI, so a `SDK_DISPATCH_TOKEN` secret is needed for the
+checks to run at all; and
+[ENG-4149](https://linear.app/nexus-labs/issue/ENG-4149) provisions the ruleset
+bypass. Until those are resolved a human merges the PR — which the body says
+plainly rather than implying otherwise.
 
 See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
 

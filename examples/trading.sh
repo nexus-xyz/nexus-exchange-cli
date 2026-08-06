@@ -13,6 +13,12 @@ nexus order place \
   --market "$MARKET" --side buy --type limit \
   --price 84000 --quantity 0.01 --tif gtc --yes
 
+# Post-only: rest or be rejected, never cross. It is a time-in-force on this
+# API, not a separate flag — so it is `--tif post-only`, not `--post-only`.
+nexus order place \
+  --market "$MARKET" --side buy --type limit \
+  --price 84000 --quantity 0.01 --tif post-only --yes
+
 # A market order ignores --price. --reduce-only never opens/flips a position.
 nexus order place \
   --market "$MARKET" --side sell --type market --quantity 0.01 --reduce-only --yes
@@ -44,4 +50,6 @@ nexus order cancel --all --yes                            # DELETE /api/v1/order
 nexus account deposit 1000 --yes                 # POST /account/deposit
 nexus account credit                             # POST /account/credit (testnet faucet)
 nexus account leverage "$MARKET" 10              # POST /account/leverage
-nexus account margin-mode "$MARKET" isolated     # POST /account/margin-mode
+# No margin-mode example: `nexus account margin-mode` was withdrawn in ENG-7740
+# because no endpoint accepts a margin-mode change. ENG-7614 tracks the engine
+# work that has to land before the command can return.

@@ -74,6 +74,69 @@ fn unknown_command_is_a_usage_error() {
     assert!(out.stderr.contains("unrecognized") || out.stderr.contains("error"));
 }
 
+/// `account margin-mode` is withdrawn (ENG-7740). The binary must reject it as an
+/// unknown subcommand — with credentials supplied, so this proves the rejection
+/// happens at argument parsing and NOT that it merely stopped at the auth gate.
+/// A pinned `--market` + mode pair is passed to make sure clap isn't silently
+/// accepting them as positionals for some other command.
+///
+/// The old behaviour was worse than an error: the command parsed, passed the auth
+/// gate, and dispatched `POST /account/margin-mode` — a path no spec defines and
+/// no service routes — so the user got an opaque transport/HTTP failure from a
+/// command that `--help` advertised as working.
+#[test]
+fn withdrawn_margin_mode_command_is_rejected() {
+    let out = bin()
+        .args([
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "account",
+            "margin-mode",
+            "BTC-USDX-PERP",
+            "isolated",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "should be a clap usage error, got stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unrecognized subcommand") || stderr.contains("margin-mode"),
+        "the error should name the unrecognized subcommand, got: {stderr}"
+    );
+    // It must not have reached the network: no request may be attempted for a
+    // command that cannot succeed.
+    assert!(
+        !stderr.contains("failed to set margin mode"),
+        "must not dispatch a margin-mode request, got: {stderr}"
+    );
+}
+
+/// `account help` must not advertise the withdrawn command, while still listing
+/// the account commands that do work.
+#[test]
+fn account_help_omits_margin_mode() {
+    let out = run(&["account", "--help"]);
+    assert_eq!(out.code, Some(0));
+    assert!(
+        out.stdout.contains("leverage") && out.stdout.contains("rate-limit"),
+        "sanity: working account commands should still be listed: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("margin-mode"),
+        "help must not offer the withdrawn margin-mode command: {}",
+        out.stdout
+    );
+}
+
 #[test]
 fn authenticated_command_without_credentials_is_refused() {
     // `balance` requires credentials; with none configured it must fail fast
@@ -486,4 +549,87 @@ fn batch_orders_example_parses_and_routes() {
         stderr.contains("failed to submit order batch"),
         "example should parse and route to the batch submit, got: {stderr}"
     );
+}
+
+/// `--tif post-only` must be accepted.
+///
+/// Post-only is a *time-in-force* on this API (`TimeInForce::PostOnly`), not a
+/// boolean flag, and the SDK has carried it for a while — but `TifArg` listed
+/// only gtc/ioc/fok, so the CLI was the one client that could not express it.
+/// That reads as "the venue has no post-only" from the command line, which is
+/// wrong: the spec's `OrderRequest.time_in_force` enum and the engine's
+/// `TimeInForce` both include it.
+///
+/// Asserted through argument parsing rather than a live order: reaching the
+/// credentials gate proves clap accepted the value and dispatch routed on it.
+#[test]
+fn tif_accepts_post_only() {
+    let out = bin()
+        .args([
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "sell",
+            "--type",
+            "limit",
+            "--price",
+            "84000",
+            "--quantity",
+            "0.01",
+            "--tif",
+            "post-only",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("invalid value"),
+        "`--tif post-only` must parse; got: {stderr}"
+    );
+    // Hermetic env means no credentials, so the authenticated-command gate is
+    // the expected stopping point — it proves parsing succeeded.
+    assert!(
+        stderr.contains("no credentials are configured"),
+        "expected the credentials gate after successful parse; got: {stderr}"
+    );
+}
+
+/// The full accepted set, so dropping a variant is a test failure rather than a
+/// silently narrower CLI.
+#[test]
+fn tif_rejects_an_unknown_value_and_lists_every_supported_one() {
+    let out = bin()
+        .args([
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "sell",
+            "--type",
+            "limit",
+            "--price",
+            "84000",
+            "--quantity",
+            "0.01",
+            "--tif",
+            "not-a-tif",
+            "--yes",
+        ])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value 'not-a-tif'"),
+        "got: {stderr}"
+    );
+    for expected in ["gtc", "ioc", "fok", "post-only"] {
+        assert!(
+            stderr.contains(expected),
+            "the error should list `{expected}` as supported; got: {stderr}"
+        );
+    }
 }
