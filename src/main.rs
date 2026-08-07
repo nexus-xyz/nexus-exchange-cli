@@ -7,6 +7,7 @@
 
 mod cli;
 mod credentials;
+mod guardrails;
 mod output;
 mod wsclient;
 
@@ -21,8 +22,9 @@ use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
     AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
-    OrderCommand, OutputFormat, SubAccountsCommand, TransfersCommand,
+    NetworkArg, OrderCommand, OutputFormat, SubAccountsCommand, TransfersCommand,
 };
+use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 
 #[tokio::main]
@@ -62,6 +64,15 @@ async fn main() -> Result<()> {
     }
     let client = Client::new(config.clone());
     let format = cli.output;
+
+    // The network whose credentials this invocation presents, and the one every
+    // real-funds guardrail keys off. Announced before the command runs so the
+    // warning precedes the action it is warning about.
+    let network = cli.credential_network(&file);
+    guardrails::announce_network(
+        network,
+        cli.base_url.as_deref().or(file.base_url.as_deref()),
+    );
 
     match cli.command {
         // ── public market data ──
@@ -241,13 +252,15 @@ async fn main() -> Result<()> {
         }
 
         // ── trading ──
-        Command::Order { action } => handle_order(&client, authenticated, action, format).await?,
+        Command::Order { action } => {
+            handle_order(&client, authenticated, action, format, network, &file).await?
+        }
 
         // ── account / keys / agents / transfers / sub-accounts ──
         Command::Account { action } => {
-            handle_account(&client, authenticated, action, format).await?
+            handle_account(&client, authenticated, action, format, network).await?
         }
-        Command::Auth { action } => handle_auth(&client, action, format).await?,
+        Command::Auth { action } => handle_auth(&client, action, format, network).await?,
         Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
         Command::Agents { action } => handle_agents(&client, authenticated, action, format).await?,
         Command::Transfers { action } => {
@@ -325,6 +338,8 @@ async fn handle_order(
     authenticated: bool,
     action: OrderCommand,
     format: OutputFormat,
+    network: NetworkArg,
+    config_file: &FileConfig,
 ) -> Result<()> {
     match action {
         OrderCommand::Place {
@@ -373,6 +388,13 @@ async fn handle_order(
                 request.time_in_force,
                 if reduce_only { ", reduce-only" } else { "" },
             );
+            // The real-funds acknowledgement comes first and is a separate
+            // question: "do you understand this network" is not "is this order
+            // right", and collapsing them would let a hurried yes answer both.
+            if !guardrails::acknowledge_real_funds(network, config_file, yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
             if !confirm(&summary, yes)? {
                 eprintln!("aborted.");
                 return Ok(());
@@ -482,6 +504,10 @@ async fn handle_order(
             if requests.is_empty() {
                 anyhow::bail!("the batch file contains no orders");
             }
+            if !guardrails::acknowledge_real_funds(network, config_file, yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
             if !confirm(
                 &format!("Submit a batch of {} order(s)", requests.len()),
                 yes,
@@ -515,6 +541,7 @@ async fn handle_account(
     authenticated: bool,
     action: AccountCommand,
     format: OutputFormat,
+    network: NetworkArg,
 ) -> Result<()> {
     match action {
         AccountCommand::Summary => {
@@ -577,6 +604,11 @@ async fn handle_account(
             });
         }
         AccountCommand::Credit { amount } => {
+            // Ahead of the credential check, unlike every other arm: "there is no
+            // faucet for real funds" is true whether or not you are authenticated,
+            // and it is the more useful of the two errors. Telling a mainnet user
+            // to configure credentials first would send them to fix the wrong thing.
+            guardrails::refuse_faucet_on_real_funds(network)?;
             require_authenticated(authenticated, "account credit")?;
             let amount = match amount.as_deref() {
                 Some(a) => Some(parse_amount("amount", a)?),
@@ -642,7 +674,12 @@ fn resolve_private_key(flag_or_env: Option<String>) -> Result<String> {
 }
 
 /// Handle the `nexus auth` subcommands (wallet-signed sign-in).
-async fn handle_auth(client: &Client, action: AuthCommand, format: OutputFormat) -> Result<()> {
+async fn handle_auth(
+    client: &Client,
+    action: AuthCommand,
+    format: OutputFormat,
+    network: NetworkArg,
+) -> Result<()> {
     match action {
         AuthCommand::Login { private_key } => {
             // Build the signer from the raw key (validated by the SDK), then
@@ -653,10 +690,12 @@ async fn handle_auth(client: &Client, action: AuthCommand, format: OutputFormat)
                 .context("invalid EVM private key")?;
             let login = client.sign_in(&signer).await.context("failed to sign in")?;
 
-            // Persist the token via the session-token credential path (0600).
+            // Persist the token via the session-token credential path (0600),
+            // under the network it was minted against — it authenticates there
+            // and nowhere else.
             let token = login.token.expose_secret();
-            let path =
-                credentials::save_session_token(token).context("failed to save session token")?;
+            let path = credentials::save_session_token(network, token)
+                .context("failed to save session token")?;
             let path = path.display().to_string();
             emit(format, output::login(&login.address, token, &path), || {
                 output::login_json(&login.address, token, &path)
@@ -1049,7 +1088,7 @@ fn parse_amount(field: &str, value: &str) -> Result<Decimal> {
 /// Confirm a mutating action. Returns `Ok(true)` to proceed. With `--yes`, skips
 /// the prompt; without a terminal and without `--yes`, refuses outright so an
 /// automated context can never place/cancel by accident.
-fn confirm(prompt: &str, yes: bool) -> Result<bool> {
+pub(crate) fn confirm(prompt: &str, yes: bool) -> Result<bool> {
     if yes {
         return Ok(true);
     }
