@@ -553,3 +553,212 @@ fn tif_rejects_an_unknown_value_and_lists_every_supported_one() {
         );
     }
 }
+
+// ───────────────── real-funds guardrails (ENG-6462) ─────────────────
+//
+// These run the real binary with no network access, which is the point: every
+// guardrail below has to fire locally, before a request is built. The pinned
+// SDK also refuses mainnet outright today, so a test asserting on a *response*
+// could not distinguish a working guardrail from that blanket refusal.
+
+/// Run with a config file written into a private `XDG_CONFIG_HOME`, so the
+/// file layer — the one that is namespaced — can be exercised end to end.
+fn run_with_config(config_json: &str, tag: &str, args: &[&str]) -> Output {
+    let home = std::env::temp_dir().join(format!(
+        "nexus-cli-it-{}-{}-{tag}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dir = home.join("nexus");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(dir.join("config.json"), config_json).expect("write config");
+
+    let mut cmd = bin();
+    cmd.env("XDG_CONFIG_HOME", &home);
+    let out = cmd.args(args).output().expect("failed to run binary");
+    let _ = std::fs::remove_dir_all(&home);
+    Output {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+#[test]
+fn mainnet_announces_itself_on_stderr() {
+    let out = run(&["--network", "mainnet", "markets"]);
+    assert!(
+        out.stderr.contains("REAL FUNDS"),
+        "a real-funds network must announce itself; got: {}",
+        out.stderr
+    );
+}
+
+/// The default is play funds and says nothing. A banner on every invocation is
+/// how a warning stops being read.
+#[test]
+fn play_funds_networks_stay_quiet() {
+    for args in [
+        vec!["--base-url", "http://127.0.0.1:1", "markets"],
+        vec!["--network", "local", "markets"],
+    ] {
+        let out = run(&args);
+        assert!(
+            !out.stderr.contains("REAL FUNDS"),
+            "{args:?} is play funds and must not warn; got: {}",
+            out.stderr
+        );
+    }
+}
+
+/// The banner is a warning, not data: `--output json` has to stay parseable.
+#[test]
+fn the_mainnet_banner_never_touches_stdout() {
+    let out = run(&["--output", "json", "--network", "mainnet", "markets"]);
+    assert!(
+        !out.stdout.contains("REAL FUNDS"),
+        "the banner leaked into stdout: {}",
+        out.stdout
+    );
+    assert!(out.stderr.contains("REAL FUNDS"));
+}
+
+#[test]
+fn the_faucet_is_refused_on_mainnet() {
+    let out = run(&["--network", "mainnet", "account", "credit"]);
+    assert_ne!(out.code, Some(0), "the faucet must fail on mainnet");
+    assert!(
+        out.stderr.contains("account deposit"),
+        "the refusal must name the real-funds alternative; got: {}",
+        out.stderr
+    );
+    // Refused on the network axis, not deflected into a credentials error.
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "the faucet refusal should not be masked by the auth gate; got: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn the_faucet_still_works_on_play_funds() {
+    // No credentials configured, so this stops at the auth gate — which proves
+    // the faucet guard let it through rather than refusing on the network.
+    let out = run(&["--network", "testnet", "account", "credit"]);
+    assert!(
+        out.stderr.contains("no credentials are configured"),
+        "testnet should reach the auth gate, not a faucet refusal; got: {}",
+        out.stderr
+    );
+}
+
+/// A first mainnet trade with no terminal and no `--yes` must stop, rather than
+/// silently trading because nobody was there to answer.
+#[test]
+fn a_first_mainnet_trade_refuses_without_an_acknowledgement() {
+    let out = run(&[
+        "--network",
+        "mainnet",
+        "--api-key",
+        "k",
+        "--api-secret",
+        "s",
+        "order",
+        "place",
+        "--market",
+        "BTC-USDX-PERP",
+        "--side",
+        "buy",
+        "--type",
+        "market",
+        "--quantity",
+        "0.01",
+    ]);
+    assert_ne!(out.code, Some(0));
+    assert!(
+        out.stderr.contains("REAL FUNDS") && out.stderr.contains("--yes"),
+        "the refusal should explain itself and name the escape hatch; got: {}",
+        out.stderr
+    );
+}
+
+/// The same trade on testnet must not acquire a real-funds prompt.
+#[test]
+fn a_testnet_trade_is_not_gated_by_the_acknowledgement() {
+    let out = run(&[
+        "--network",
+        "testnet",
+        "--api-key",
+        "k",
+        "--api-secret",
+        "s",
+        "order",
+        "place",
+        "--market",
+        "BTC-USDX-PERP",
+        "--side",
+        "buy",
+        "--type",
+        "market",
+        "--quantity",
+        "0.01",
+    ]);
+    assert!(
+        !out.stderr.contains("REAL FUNDS"),
+        "play funds must not raise a real-funds prompt; got: {}",
+        out.stderr
+    );
+}
+
+/// ENG-6462's core guarantee, end to end: a config holding only testnet
+/// credentials leaves a mainnet invocation unauthenticated instead of
+/// presenting a key that is invalid there by construction.
+#[test]
+fn a_testnet_config_does_not_authenticate_a_mainnet_command() {
+    let config = r#"{
+        "network": "testnet",
+        "networks": {
+            "testnet": { "api_key": "nx_testnet", "api_secret": "shh" }
+        }
+    }"#;
+
+    let out = run_with_config(config, "cross", &["--network", "mainnet", "balance"]);
+    assert!(
+        out.stderr.contains("no credentials are configured"),
+        "the testnet key must not be offered to mainnet; got: {}",
+        out.stderr
+    );
+
+    // ...while the network it was minted for still authenticates and gets as far
+    // as the request itself.
+    let out = run_with_config(config, "same", &["--network", "testnet", "balance"]);
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "the testnet key must still work on testnet; got: {}",
+        out.stderr
+    );
+}
+
+/// A config written before namespacing keeps working, and its key stays on the
+/// network that file names.
+#[test]
+fn a_pre_namespacing_config_still_authenticates() {
+    let config = r#"{"network": "testnet", "api_key": "nx_old", "api_secret": "old"}"#;
+
+    let out = run_with_config(config, "legacy-same", &["balance"]);
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "a flat config must keep authenticating; got: {}",
+        out.stderr
+    );
+
+    let out = run_with_config(config, "legacy-cross", &["--network", "mainnet", "balance"]);
+    assert!(
+        out.stderr.contains("no credentials are configured"),
+        "a flat testnet key must not be promoted to mainnet; got: {}",
+        out.stderr
+    );
+}
