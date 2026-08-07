@@ -583,7 +583,8 @@ either side of the rebase. The denominator carries both stacks (gateway +
 `/api/v1`) plus the admin/stats surfaces the CLI does not target; it grew again
 in `v0.7.2` with the portfolio-parity, order-preview and history endpoints.
 `main` alone reads 36: four are what the `nexus account` commands added in
-ENG-6460 now cover, and the thirty-sixth is a correction rather than new
+[ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover, and the
+thirty-sixth is a correction rather than new
 delivery — `order amend` was exempted as ahead-of-spec while mapped to the wrong
 verb (`PUT`, where the SDK issues `PATCH`), so it went covered but uncounted
 until invariant 3 rejected the stale exemption. The two beyond that are this
