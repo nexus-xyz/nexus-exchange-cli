@@ -347,11 +347,37 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
     targeted_norm = {(m, normalize_path(p)) for m, p in targeted}
 
     # (a) called but not listed (and not an intentional code-only op).
-    called_missing_from_targets = sorted(called - targeted_norm - CODE_ONLY_OPS.keys())
+    # `CODE_ONLY_OPS` keys are normalised once here and used normalised everywhere
+    # below. They were previously compared RAW against `called` and `targeted_norm`,
+    # which are both normalised — so a row written the natural way
+    # (`/orders/{order_id}` rather than `/orders/{}`) could not match anything.
+    #
+    # Found while writing a test for the caught-up check (@Luc-Campos's LOW 1 on
+    # #46): that comparison was one of THREE with the same mismatch, and fixing only
+    # it left a test that could not isolate the branch, because the other two still
+    # fired. All three misreport in a different direction:
+    #
+    #   * `called_missing_from_targets` — the row fails to exempt the call, so the op
+    #     reads as "called but not in endpoints.txt";
+    #   * `stale_code_only` — the row reads as "no command calls this" even when one
+    #     does;
+    #   * the caught-up check — the row silently opts out of it (LOW 1).
+    #
+    # It is latent on the real tree only because every committed row happens to be
+    # written with bare `{}`, a convention nothing stated and nothing enforced. This
+    # makes the convention unnecessary rather than merely documented.
+    code_only_norm = {(m, normalize_path(p)) for m, p in CODE_ONLY_OPS}
+    # Normalised key -> the raw key, so errors still name the line as written.
+    code_only_raw_by_norm = {(m, normalize_path(p)): (m, p) for m, p in CODE_ONLY_OPS}
+
+    called_missing_from_targets = sorted(called - targeted_norm - code_only_norm)
     # (b) listed but not called (and not an intentional non-REST target).
     targets_without_call = sorted(targeted_norm - called - NON_REST_TARGETS)
-    # Invariant 3: a CODE_ONLY_OPS entry no command calls is stale.
-    stale_code_only = sorted(CODE_ONLY_OPS.keys() - called)
+    # Invariant 3: a CODE_ONLY_OPS entry no command calls is stale. Reported with the
+    # raw key so the reader can find the row.
+    stale_code_only = sorted(
+        code_only_raw_by_norm[op] for op in (code_only_norm - called)
+    )
     # Invariant 3: a CODE_ONLY_OPS entry the pinned spec already defines is not
     # "ahead of spec". Compare by PATH (any method) so a wrong verb in METHOD_OP
     # is caught too — that is the failure mode ENG-7962 found. Report the spec's
@@ -359,10 +385,16 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
     spec_methods_by_path = {}
     for m, p in available:
         spec_methods_by_path.setdefault(normalize_path(p), set()).add(m)
+    # `normalize_path` on BOTH sides (@Luc-Campos on #46). `spec_methods_by_path`
+    # is keyed by the normalized path, so testing the raw allowlist key opted a row
+    # out of this check whenever the two spellings differed — `/positions/{market_id}`
+    # written the natural way against a spec `/positions/{marketId}` silently missed.
+    # It still failed, via `stale_code_only`, but with a message naming the wrong
+    # cause: "nothing calls this" rather than "the spec has caught up".
     caught_up_code_only = sorted(
-        (m, p, sorted(spec_methods_by_path[p]))
+        (m, p, sorted(spec_methods_by_path[normalize_path(p)]))
         for m, p in CODE_ONLY_OPS
-        if p in spec_methods_by_path
+        if normalize_path(p) in spec_methods_by_path
     )
     # Invariant 3: a NON_REST_TARGETS entry endpoints.txt does not list exempts
     # nothing.
@@ -553,9 +585,13 @@ def check_allowlist_is_honest():
             print(f"  - `nexus {command}` -> {m} {p}  ({issue})")
 
     if not errors:
+        # Only the half this function owns. The "none is in the pinned spec" clause
+        # moved to `check_code_vs_targets` (by path, under any method — ENG-7962),
+        # so asserting it here printed an OK next to that function's ERROR when the
+        # caught-up check fired. A function about honesty should not claim a result
+        # it did not compute (@Luc-Campos on #46).
         print(
-            f"\nOK: all {len(CODE_ONLY_OPS)} CODE_ONLY_OPS row(s) are attributed, and "
-            f"none is in the pinned spec."
+            f"\nOK: all {len(CODE_ONLY_OPS)} CODE_ONLY_OPS row(s) are attributed."
         )
     return errors
 

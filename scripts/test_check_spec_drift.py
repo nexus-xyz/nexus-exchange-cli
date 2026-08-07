@@ -463,12 +463,243 @@ class TestRealRepoState(unittest.TestCase):
         self.assertIn(("PATCH", "/orders/{order_id}"), csd.load_targeted())
         self.assertNotIn(("PUT", "/orders/{}"), csd.CODE_ONLY_OPS)
 
+    def test_the_real_code_only_table_is_fully_attributed(self):
+        """Runs `check_allowlist_is_honest` against the REAL table, not a synthetic one.
+
+        `TestCheckAllowlistIsHonest` patches `CODE_ONLY_OPS` to prove the *check*
+        rejects a bad row. This proves the *committed* table currently passes it — a
+        different claim, and the one that catches a hand-edit to the real file
+        (dropping an issue id, say) between checker runs.
+
+        This is what the PR description called `code_only_ops_rows_are_attributed`
+        and promised as a Rust test in `tests/coverage.rs`. It lives here instead:
+        the assertion is about a Python literal in `check_spec_drift.py`, so reading
+        it from Rust would mean re-parsing that file, and the check it calls is
+        already importable here.
+        """
+        self.assertEqual(_quiet(csd.check_allowlist_is_honest), 0)
+
+    def test_every_real_code_only_row_has_a_recognised_kind(self):
+        """Stronger than the error count: pins the shape field by field.
+
+        The check above would also pass on a table that is empty, so this asserts
+        each row is a triple whose `kind` is one of the two the PR defines. An
+        unrecognised kind would let a row look attributed while classifying nothing,
+        which is what the standing ROUTE_INVISIBLE report depends on.
+        """
+        self.assertGreater(len(csd.CODE_ONLY_OPS), 0, "an empty table proves nothing")
+        for op, row in sorted(csd.CODE_ONLY_OPS.items()):
+            with self.subTest(op=op):
+                self.assertIsInstance(row, tuple, f"{op} is not a triple")
+                self.assertEqual(len(row), 3, f"{op} is not a (command, kind, issue) triple")
+                command, kind, issue = row
+                self.assertTrue(command, f"{op} names no command")
+                self.assertIn(kind, (csd.SERVED_UNSPECIFIED, csd.ROUTE_INVISIBLE))
+                self.assertRegex(issue, r"^ENG-\d+$", f"{op} cites {issue!r}")
+
     def test_no_code_only_entry_shares_a_path_with_endpoints_txt(self):
         """Cheap invariant on the real files: an op cannot be both claimed and
         exempted."""
         targeted = {(m, csd.normalize_path(p)) for m, p in csd.load_targeted()}
         overlap = sorted(csd.CODE_ONLY_OPS.keys() & targeted)
         self.assertEqual(overlap, [], f"claimed AND exempted: {overlap}")
+
+
+class TestCheckAllowlistIsHonest(unittest.TestCase):
+    """`check_allowlist_is_honest` had no automated test at all (@Luc-Campos on #46).
+
+    He broke the attribution table four ways by hand and confirmed the gate caught
+    every one — `check_spec_drift.py` exit 1 each time — while this suite stayed
+    36/36 green. So the check worked and nothing protected it: weaken or revert it
+    and CI would not notice.
+
+    That is precisely the failure this PR exists to fix, one level up. The PR's
+    argument is that an exemption must carry evidence rather than an assertion; a
+    check whose only evidence is a table in a PR description is the same shape. The
+    four cases below are his table, mechanised.
+
+    `check_allowlist_is_honest` reads the module-level `CODE_ONLY_OPS` directly and
+    takes no arguments, so these patch it rather than going through
+    `SyntheticRepo` — which exercises `check_code_vs_targets` instead.
+    """
+
+    GOOD = ("order cancel-batch", csd.SERVED_UNSPECIFIED, "ENG-5487")
+
+    def _errors(self, rows):
+        with patched("CODE_ONLY_OPS", rows):
+            return _quiet(csd.check_allowlist_is_honest)
+
+    def test_a_well_formed_table_passes(self):
+        """The control. Without it every case below could pass by rejecting everything."""
+        self.assertEqual(self._errors({("POST", "/orders/cancel-batch"): self.GOOD}), 0)
+
+    def test_an_empty_issue_fails(self):
+        rows = {("POST", "/orders/cancel-batch"): ("order cancel-batch", csd.SERVED_UNSPECIFIED, "")}
+        self.assertGreater(self._errors(rows), 0)
+
+    def test_a_bare_op_with_no_row_fails(self):
+        """The pre-ENG-7927 format: an op mapped to nothing.
+
+        This is the margin-mode shape — a bare entry whose only justification was a
+        `#` comment asserting it was ahead of the pinned spec, which was never true.
+        """
+        self.assertGreater(self._errors({("POST", "/orders/cancel-batch"): None}), 0)
+
+    def test_an_unrecognised_kind_fails(self):
+        """`kind` is the SERVED_UNSPECIFIED / ROUTE_INVISIBLE distinction this PR adds.
+
+        A free-text value would let a row look attributed while classifying nothing,
+        which is what makes the standing ROUTE_INVISIBLE report trustworthy.
+        """
+        rows = {("POST", "/orders/cancel-batch"): ("order cancel-batch", "probably-fine", "ENG-5487")}
+        self.assertGreater(self._errors(rows), 0)
+
+    def test_an_empty_command_fails(self):
+        rows = {("POST", "/orders/cancel-batch"): ("", csd.SERVED_UNSPECIFIED, "ENG-5487")}
+        self.assertGreater(self._errors(rows), 0)
+
+    def test_a_malformed_issue_id_fails(self):
+        """`_ISSUE_RE` is what makes the issue a citation rather than a free-text field."""
+        rows = {
+            ("POST", "/orders/cancel-batch"): ("order cancel-batch", csd.SERVED_UNSPECIFIED, "see Slack")
+        }
+        self.assertGreater(self._errors(rows), 0)
+
+    def test_a_row_that_is_not_a_triple_fails(self):
+        """Guards the shape itself, not just the field values."""
+        rows = {("POST", "/orders/cancel-batch"): ("order cancel-batch", csd.SERVED_UNSPECIFIED)}
+        self.assertGreater(self._errors(rows), 0)
+
+    def test_route_invisible_rows_are_reported_even_when_the_table_is_valid(self):
+        """The standing report is a deliverable of this PR, so it is asserted.
+
+        A ROUTE_INVISIBLE row is a shipped command with nothing serving it. That is
+        not an error — it is tracked, not broken — so the run stays green, and the
+        value is entirely in it being printed on every run rather than buried in a
+        Python literal. A silent pass would satisfy the error count and lose the point.
+        """
+        rows = {
+            ("POST", "/orders/cancel-batch"): (
+                "order cancel-batch", csd.ROUTE_INVISIBLE, "ENG-5487",
+            )
+        }
+        with patched("CODE_ONLY_OPS", rows):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                errors = csd.check_allowlist_is_honest()
+        self.assertEqual(errors, 0, "a tracked invisible route is not an error")
+        out = buf.getvalue()
+        self.assertIn("order cancel-batch", out)
+        self.assertIn("ENG-5487", out)
+
+    def test_the_ok_line_claims_only_what_this_function_checked(self):
+        """LOW 2 from the review, pinned so it cannot drift back.
+
+        The OK line used to add "and none is in the pinned spec" — a clause that
+        moved to `check_code_vs_targets` (by path, any method) under ENG-7962. Left
+        here it printed an OK beside that function's ERROR.
+        """
+        with patched("CODE_ONLY_OPS", {("POST", "/orders/cancel-batch"): self.GOOD}):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                csd.check_allowlist_is_honest()
+        out = buf.getvalue()
+        self.assertIn("are attributed", out)
+        self.assertNotIn("pinned spec", out)
+
+
+class TestCaughtUpCheckNormalisesBothSides(unittest.TestCase):
+    """LOW 1 from the review: the caught-up check compared a raw key to normalised ones.
+
+    `spec_methods_by_path` is keyed by `normalize_path`, so a row written the natural
+    way — `/positions/{market_id}` against a spec `/positions/{marketId}` — opted out
+    of the caught-up check silently.
+
+    **This has to assert the reported CAUSE, not the error count.** My first version
+    of this test checked only `errors > 0` and passed with the bug restored, because
+    the row still fails — via `stale_code_only` ("no longer called by any command")
+    instead of the caught-up check ("NOT ahead of the pinned spec"). The count is
+    identical either way, which is exactly why the review described the symptom as a
+    message pointing at the wrong cause rather than as a missed failure.
+    """
+
+    # `fetch_mark_price` is GET /api/v1/markets/{market_id}/mark-price — a real
+    # METHOD_OP entry WITH a placeholder, which POSITIONS does not have. The fixture
+    # calls it so `stale_code_only` cannot fire, which is what isolates the caught-up
+    # branch: otherwise both messages print and neither assertion means anything.
+    MARK_PRICE = csd.METHOD_OP["fetch_mark_price"]
+    RUST_CALLING_MARK_PRICE = (
+        RUST_CALLING_MARKETS + "let mp = client.fetch_mark_price(id).await?;\n"
+    )
+
+    def _run(self, spec, code_only):
+        """Like `SyntheticRepo.check`, but keeps stdout so the message is assertable."""
+        repo = SyntheticRepo(
+            self, {"main.rs": self.RUST_CALLING_MARK_PRICE}, ["GET /markets"]
+        )
+        rows = {op: ("test-command", csd.SERVED_UNSPECIFIED, "ENG-0000") for op in code_only}
+        buf = io.StringIO()
+        with patched("CODE_ONLY_OPS", rows), patched("NON_REST_TARGETS", set()):
+            with contextlib.redirect_stdout(buf):
+                errors = csd.check_code_vs_targets(
+                    repo.targeted(),
+                    csd.spec_ops(spec),
+                    sources=repo.sources,
+                    src_dir=repo.src_dir,
+                )
+        return errors, buf.getvalue()
+
+    def test_a_differently_spelled_placeholder_is_reported_as_caught_up(self):
+        """The spec spells the placeholder differently; both normalise to the same path.
+
+        `assertNotIn` on the stale message is the load-bearing half: with the raw-key
+        comparison the row still errors, just via the wrong branch, so asserting only
+        `errors > 0` passes with the bug in place.
+        """
+        method, path = self.MARK_PRICE
+        spec_path = path.replace("{market_id}", "{marketId}")
+        errors, out = self._run(
+            spec_of(MARKETS, (method, spec_path)), code_only={(method, path)}
+        )
+        self.assertGreater(errors, 0)
+        self.assertIn("NOT ahead of the pinned spec", out)
+        self.assertNotIn("no longer called by any command", out)
+
+    def test_an_identically_spelled_placeholder_is_reported_the_same_way(self):
+        """The control: same spelling must reach the same branch, so the test above
+        is about normalisation rather than about that one path."""
+        method, path = self.MARK_PRICE
+        errors, out = self._run(
+            spec_of(MARKETS, (method, path)), code_only={(method, path)}
+        )
+        self.assertGreater(errors, 0)
+        self.assertIn("NOT ahead of the pinned spec", out)
+        self.assertNotIn("no longer called by any command", out)
+
+    def test_a_named_placeholder_row_still_exempts_the_call_it_backs(self):
+        """The third site with the same mismatch, and the one no test covered.
+
+        `called_missing_from_targets` subtracted the RAW allowlist keys from the
+        normalised set of called ops, so a row written `/…/{market_id}` failed to
+        exempt the call it exists for — the op then read as "called but not in
+        endpoints.txt", a third wrong diagnosis of one row.
+
+        Asserted separately from the caught-up and stale messages because reverting
+        this fix alone leaves both of those passing, so neither would catch it.
+        """
+        method, path = self.MARK_PRICE
+        errors, out = self._run(
+            spec_of(MARKETS, (method, path)), code_only={(method, path)}
+        )
+        self.assertNotIn("are NOT in endpoints.txt", out)
+        del errors  # the count is not the property; the absent message is
+
+    def test_a_genuinely_uncalled_row_is_still_reported_as_stale(self):
+        """And the other branch must keep working — otherwise the assertions above
+        could pass by routing everything through the caught-up message."""
+        errors, out = self._run(spec_of(MARKETS), code_only={("GET", "/nobody-calls-this")})
+        self.assertGreater(errors, 0)
+        self.assertIn("no longer called by any command", out)
 
 
 if __name__ == "__main__":
