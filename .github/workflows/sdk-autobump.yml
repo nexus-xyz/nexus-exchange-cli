@@ -34,6 +34,20 @@ name: SDK autobump
 # this workflow still opens the PR, runs `cargo check` itself so the "does it even
 # compile" question is answered either way, and says plainly in the PR body that
 # the checks did not run.
+#
+# WHEN THE BUMP DOES NOT COMPILE (ENG-9373). Three things happen, because the PR
+# body alone was not enough — the 0.8.0 bump sat for a day looking unreviewed while
+# `cargo check` had already failed, since the Actions list and the PR list both
+# looked normal:
+#
+#   * the PR is opened as a DRAFT, which is the only one of these visible in the PR
+#     list without opening it;
+#   * the run FAILS, at the very end, so the conclusion matches the answer and any
+#     alert on it fires;
+#   * auto-merge is not armed (it already wasn't).
+#
+# The failure is deliberately the LAST step: the PR must exist first, or the pushed
+# branch would be left with no PR and every later poll would skip it.
 
 on:
   schedule:
@@ -309,12 +323,28 @@ jobs:
             label="spec-autobump"
           fi
 
+          # A bump that does not compile is, in this bot's own words, "incomplete as
+          # opened": the version moved, the call sites need a human. Open it as a
+          # DRAFT so that is legible in the PR *list*, which is where these actually
+          # get triaged. A normal PR with no checks is indistinguishable there from
+          # one merely awaiting review — which is how the 0.8.0 bump sat for a day
+          # while `cargo check` had already failed (ENG-9373).
+          #
+          # Only for a broken build, not for a breaking spec delta: that one compiles
+          # and is a legitimate thing to review and merge, so drafting it would
+          # understate it. Auto-merge is already skipped on both paths, so a draft
+          # forecloses nothing.
+          draft=()
+          if [ "$COMPILES" != "clean" ]; then
+            draft=(--draft)
+          fi
+
           # Retry without the label rather than losing the PR if it is missing.
-          gh pr create --base main --head "$branch" \
+          gh pr create --base main --head "$branch" "${draft[@]}" \
             --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
             --body-file "$RUNNER_TEMP/pr-body.md" \
             --label "$label" \
-          || gh pr create --base main --head "$branch" \
+          || gh pr create --base main --head "$branch" "${draft[@]}" \
             --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
             --body-file "$RUNNER_TEMP/pr-body.md"
 
@@ -336,3 +366,29 @@ jobs:
                 || echo "::error::auto-merge is NOT armed and the PR body could not be corrected — it still says armed. Merge this PR by hand."
             fi
           fi
+
+      # LAST, deliberately. `cargo check` failing is a real failure and the run must
+      # say so — a green run means every alert wired to the workflow conclusion stays
+      # silent while an unbuildable PR waits, which is how the 0.8.0 bump went a day
+      # unnoticed (ENG-9373).
+      #
+      # It fails HERE rather than in the check step itself so the PR is opened,
+      # labelled, drafted, reviewer-requested and body-rendered first. Failing early
+      # would leave the bump with no PR at all, and the next poll would find the
+      # pushed branch, warn, and skip — losing the bump entirely. A red run with a
+      # complete draft PR is the outcome we want; the failure is the notification,
+      # not the mechanism.
+      - name: Fail the run if the bump does not compile
+        if: steps.gate.outputs.proceed == 'true' && steps.compile.outputs.result != 'clean'
+        # Through `env:`, not interpolated into the script — the same way every other
+        # step in this file takes a value, including `github.event.inputs.version`,
+        # which is the genuinely untrusted one. Nothing dangerous can reach this
+        # particular string today (`new_version` is a cargo-resolved semver read back
+        # out of Cargo.lock, so an injection payload would have to survive dependency
+        # resolution first). The convention is what keeps that true if someone later
+        # changes what feeds it, which is exactly the kind of edit nobody re-audits.
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          echo "::error::nexus-exchange ${NEW_VERSION} does not compile against the current call sites. The bump PR is open as a draft and needs a code change pushed onto its branch; see the 'Does it still compile?' step for the errors."
+          exit 1

@@ -106,6 +106,13 @@ def main():
             "bot — the bot bumps the version; adapting to a changed API is a human "
             "job.\n"
         )
+        out.append(
+            "It is therefore opened as a **draft**, and the workflow run that opened "
+            "it **fails** rather than reporting success. Both exist so this is legible "
+            "without reading this far: an earlier bump sat for a day looking merely "
+            "unreviewed, because every signal that it was broken lived in this body "
+            "(ENG-9373). Mark it ready once it compiles.\n"
+        )
 
     # --- spec delta ----------------------------------------------------------
     if args.verdict == "no-spec-change":
