@@ -192,7 +192,36 @@ fn stale_network_warning(name: &str, landing: Option<&str>) -> Option<String> {
     })
 }
 
+/// The network an invocation targets when nothing selects one.
+///
+/// The SDK's own [`Config::default`] is the authority; this is the CLI's
+/// transcription of it, needed because credential namespacing has to name a
+/// section (a string key) before any [`Config`] exists, and because
+/// [`Network`] is `#[non_exhaustive]` so the SDK default cannot be mapped back
+/// to a [`NetworkArg`] infallibly. `the_default_network_matches_the_sdk` is what
+/// notices if the two ever disagree — pinning an upstream fact without a check
+/// is the failure mode ENG-6452 was.
+pub(crate) const DEFAULT_NETWORK: NetworkArg = NetworkArg::Testnet;
+
 impl NetworkArg {
+    /// The canonical lowercase name, used as the config file's section key and
+    /// in diagnostics. Exhaustive, so a new network must choose its own name
+    /// rather than inherit a wrong one.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Local => "local",
+        }
+    }
+
+    /// Whether this network moves real money — the one bit every guardrail keys
+    /// off. Asserted against the SDK's own `is_mainnet` by
+    /// `real_funds_matches_the_sdk`, rather than assumed to stay in sync.
+    pub(crate) fn is_real_funds(self) -> bool {
+        matches!(self, Self::Mainnet)
+    }
+
     /// Parse a network name from the config file. Returns `None` for unknown
     /// values so a stale config can't crash the CLI.
     pub(crate) fn parse(s: &str) -> Option<Self> {
@@ -360,24 +389,50 @@ impl Cli {
         config.with_user_agent(USER_AGENT)
     }
 
-    /// Resolve an API key/secret pair, layering flags/env over the config file.
-    /// Returns `None` when no usable pair is configured. Warns (and still
-    /// returns `None`) when only one half is present, since that is almost
-    /// always a mistake.
+    /// Which network's stored credentials this invocation uses:
+    /// `--network`/`NEXUS_NETWORK` > config-file `network` > [`DEFAULT_NETWORK`].
+    ///
+    /// Deliberately **not** affected by `--base-url`. A base-URL override
+    /// changes where the request goes, not who you are — pointing at a proxy,
+    /// a tunnel or a staging host in front of a network should still present
+    /// that network's key, and an override cannot be mapped back to a network
+    /// name anyway. So the namespace is always well-defined, and `--base-url`
+    /// callers keep the credentials they had before namespacing existed.
+    ///
+    /// An unparseable config-file network resolves to the default, matching
+    /// where [`Cli::config`] sends the traffic; that path is also what prints
+    /// the diagnostic, so this stays silent rather than warning twice.
+    pub fn credential_network(&self, file: &FileConfig) -> NetworkArg {
+        self.network
+            .or_else(|| file.network.as_deref().and_then(NetworkArg::parse))
+            .unwrap_or(DEFAULT_NETWORK)
+    }
+
+    /// Resolve an API key/secret pair, layering flags/env over the config file's
+    /// section for the resolved network. Returns `None` when no usable pair is
+    /// configured. Warns (and still returns `None`) when only one half is
+    /// present, since that is almost always a mistake.
+    ///
+    /// Flags and env are **not** namespaced: they are a per-invocation override
+    /// the user has just typed for the network they just selected, so scoping
+    /// them would mean inventing `NEXUS_TESTNET_API_KEY`-style variables for no
+    /// gain. Only the persisted layer — the one that outlives the invocation and
+    /// can hold several networks at once — is sectioned.
     ///
     /// The pair is handed to [`Config::api_key`] so the SDK signs authenticated
     /// requests; the CLI never touches the secret beyond passing it through.
     pub fn credentials(&self, file: &FileConfig) -> Option<(String, String)> {
+        let stored = file.credentials_for(self.credential_network(file));
         let key = self
             .credentials
             .api_key
             .clone()
-            .or_else(|| file.api_key.clone());
+            .or_else(|| stored.and_then(|c| c.api_key.clone()));
         let secret = self
             .credentials
             .api_secret
             .clone()
-            .or_else(|| file.api_secret.clone());
+            .or_else(|| stored.and_then(|c| c.api_secret.clone()));
 
         match (key, secret) {
             (Some(k), Some(s)) => Some((k, s)),
@@ -397,15 +452,16 @@ impl Cli {
         }
     }
 
-    /// Resolve a wallet session token, layering flag/env over the config file
-    /// (the same precedence as the HMAC pair). Returns `None` when none is
-    /// configured. Handed to [`Config::session_token`] only when no HMAC key
-    /// pair is present, so the HMAC pair takes precedence as the request signer.
+    /// Resolve a wallet session token, layering flag/env over the config file's
+    /// section for the resolved network (the same precedence, and the same
+    /// namespacing, as the HMAC pair). Returns `None` when none is configured.
+    /// Handed to [`Config::session_token`] only when no HMAC key pair is
+    /// present, so the HMAC pair takes precedence as the request signer.
     pub fn session_token(&self, file: &FileConfig) -> Option<String> {
-        self.credentials
-            .session_token
-            .clone()
-            .or_else(|| file.session_token.clone())
+        self.credentials.session_token.clone().or_else(|| {
+            file.credentials_for(self.credential_network(file))
+                .and_then(|c| c.session_token.clone())
+        })
     }
 }
 
@@ -964,6 +1020,7 @@ impl From<PortfolioWindowArg> for PortfolioWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::NetworkCredentials;
     use clap::CommandFactory;
     use nexus_exchange::Client;
 
@@ -1019,10 +1076,7 @@ mod tests {
     fn config_file_is_a_fallback_below_flags() {
         let file = FileConfig {
             network: Some("local".into()),
-            base_url: None,
-            api_key: None,
-            api_secret: None,
-            session_token: None,
+            ..Default::default()
         };
         // No flag → file network wins.
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
@@ -1069,10 +1123,7 @@ mod tests {
         for retired in ["stable", "beta", "STABLE", "  beta  "] {
             let file = FileConfig {
                 network: Some(retired.into()),
-                base_url: None,
-                api_key: None,
-                api_secret: None,
-                session_token: None,
+                ..Default::default()
             };
             let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
             assert_eq!(
@@ -1305,10 +1356,11 @@ mod tests {
 
     #[test]
     fn credentials_fall_back_to_file() {
-        let file = FileConfig {
+        let mut file = FileConfig::default();
+        *file.section_mut(DEFAULT_NETWORK) = NetworkCredentials {
             api_key: Some("k".into()),
             api_secret: Some("s".into()),
-            ..Default::default()
+            session_token: None,
         };
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
         assert_eq!(cli.credentials(&file), Some(("k".into(), "s".into())));
@@ -1316,10 +1368,11 @@ mod tests {
 
     #[test]
     fn flag_overrides_file_credentials() {
-        let file = FileConfig {
+        let mut file = FileConfig::default();
+        *file.section_mut(DEFAULT_NETWORK) = NetworkCredentials {
             api_key: Some("file-key".into()),
             api_secret: Some("file-secret".into()),
-            ..Default::default()
+            session_token: None,
         };
         // Flag key layers over the file secret, per-field.
         let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
@@ -1972,10 +2025,8 @@ mod tests {
 
     #[test]
     fn session_token_resolves_flag_over_file() {
-        let file = FileConfig {
-            session_token: Some("file-token".into()),
-            ..Default::default()
-        };
+        let mut file = FileConfig::default();
+        file.section_mut(DEFAULT_NETWORK).session_token = Some("file-token".into());
         // No flag -> file token.
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
         assert_eq!(cli.session_token(&file).as_deref(), Some("file-token"));
@@ -2059,5 +2110,216 @@ mod tests {
         assert!(help.contains("cancel-batch"));
         assert!(help.contains("get-by-client-id"));
         assert!(help.contains("cancel-by-client-id"));
+    }
+
+    // ───────────────── per-network credentials (ENG-6462) ─────────────────
+
+    /// [`DEFAULT_NETWORK`] transcribes the SDK's default so credential sections
+    /// can be named before a `Config` exists. If the SDK ever moves its default,
+    /// the two must move together — otherwise the CLI would read one network's
+    /// stored key while sending the request to another.
+    #[test]
+    fn the_default_network_matches_the_sdk() {
+        let sdk_default = Config::default()
+            .network()
+            .expect("the SDK default targets a named network, not a bare base URL");
+        assert_eq!(
+            Network::from(DEFAULT_NETWORK),
+            sdk_default,
+            "DEFAULT_NETWORK is {:?} but the SDK now defaults to {sdk_default:?}; credentials \
+             would be read from one network's section and sent to another",
+            DEFAULT_NETWORK
+        );
+    }
+
+    /// The default must never move real money.
+    ///
+    /// `legacy_credential_owner` falls back to [`DEFAULT_NETWORK`] when a
+    /// pre-namespacing config names no network, or names one this build cannot
+    /// parse. So this constant decides who inherits an orphaned flat key, and
+    /// while it is play funds that fallback is harmless. Were it ever a
+    /// real-funds network, the migration would silently start attributing
+    /// unattributable keys to mainnet — and nothing else in the tree would
+    /// object, because `the_default_network_matches_the_sdk` only pins the two
+    /// defaults *together*: an upstream default moving to mainnet would drag
+    /// this one along and read as a passing test.
+    ///
+    /// This is the assertion that refuses. It is deliberately not derived from
+    /// the SDK — the point is to fail rather than to follow.
+    #[test]
+    fn the_default_network_is_play_funds() {
+        assert!(
+            !DEFAULT_NETWORK.is_real_funds(),
+            "DEFAULT_NETWORK is {:?}, which moves real funds; a legacy config naming no network \
+             would have its credentials migrated onto a real-funds section, and an unnamed \
+             invocation would send requests there. Both need a deliberate decision, not a \
+             constant change",
+            DEFAULT_NETWORK
+        );
+    }
+
+    /// `is_real_funds` is what every guardrail keys off, so it must agree with
+    /// the SDK's own notion rather than with a hardcoded list that can rot.
+    #[test]
+    fn real_funds_matches_the_sdk() {
+        for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
+            assert_eq!(
+                arg.is_real_funds(),
+                Network::from(arg).is_mainnet(),
+                "{} disagrees with the SDK about whether it moves real funds",
+                arg.as_str()
+            );
+        }
+    }
+
+    /// Exactly one network moves real funds.
+    ///
+    /// `FileConfig::mainnet_acknowledged` is a single flag, but the prompt that
+    /// sets it is gated on `is_real_funds()` rather than on mainnet by name.
+    /// That is 1:1 only while there is one such network. Add a second and
+    /// acknowledging the first would silently disarm the prompt for it — the
+    /// one-time gate would be one-time across *all* real-funds networks, which
+    /// is not what it promises. Splitting the flag per network at that point is
+    /// a schema change, so it wants to be a decision rather than a discovery.
+    #[test]
+    fn exactly_one_network_moves_real_funds() {
+        let real: Vec<_> = [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local]
+            .into_iter()
+            .filter(|n| n.is_real_funds())
+            .map(|n| n.as_str())
+            .collect();
+        assert_eq!(
+            real,
+            ["mainnet"],
+            "the real-funds networks are {real:?}; `mainnet_acknowledged` is one flag shared by \
+             all of them, so a second one needs the acknowledgement split per network first"
+        );
+    }
+
+    /// The section key is the name users type and hand-edit into the config
+    /// file, so it has to survive a round trip through `parse`.
+    #[test]
+    fn section_keys_round_trip_through_parse() {
+        for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
+            assert_eq!(NetworkArg::parse(arg.as_str()), Some(arg));
+        }
+    }
+
+    #[test]
+    fn the_credential_network_follows_flag_then_file_then_default() {
+        let file = FileConfig {
+            network: Some("local".into()),
+            ..Default::default()
+        };
+
+        let cli = Cli::try_parse_from(["nexus", "--network", "mainnet", "markets"]).unwrap();
+        assert_eq!(cli.credential_network(&file), NetworkArg::Mainnet);
+
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(cli.credential_network(&file), NetworkArg::Local);
+        assert_eq!(
+            cli.credential_network(&FileConfig::default()),
+            DEFAULT_NETWORK
+        );
+    }
+
+    /// A base-URL override redirects the request but must not change *whose*
+    /// key is presented — there is no network to derive from an arbitrary URL,
+    /// and users pointing at a proxy in front of a network still want that
+    /// network's credentials.
+    #[test]
+    fn a_base_url_override_does_not_change_the_credential_namespace() {
+        let file = FileConfig {
+            network: Some("mainnet".into()),
+            ..Default::default()
+        };
+        let cli = Cli::try_parse_from(["nexus", "--base-url", "http://127.0.0.1:9090", "markets"])
+            .unwrap();
+        assert_eq!(cli.credential_network(&file), NetworkArg::Mainnet);
+    }
+
+    /// The core guarantee of ENG-6462: a key stored for one network is never
+    /// offered to another. Server-side enforcement (ENG-6443) would reject it
+    /// anyway, but only after the request has left with a real-funds host as its
+    /// destination — the refusal belongs on this side too.
+    #[test]
+    fn a_stored_key_is_never_offered_to_another_network() {
+        let mut file = FileConfig::default();
+        *file.section_mut(NetworkArg::Testnet) = NetworkCredentials {
+            api_key: Some("nx_testnet".into()),
+            api_secret: Some("testnet-secret".into()),
+            session_token: Some("testnet-token".into()),
+        };
+
+        let on_testnet = Cli::try_parse_from(["nexus", "--network", "testnet", "balance"]).unwrap();
+        assert_eq!(
+            on_testnet.credentials(&file),
+            Some(("nx_testnet".into(), "testnet-secret".into()))
+        );
+        assert_eq!(
+            on_testnet.session_token(&file).as_deref(),
+            Some("testnet-token")
+        );
+
+        let on_mainnet = Cli::try_parse_from(["nexus", "--network", "mainnet", "balance"]).unwrap();
+        assert_eq!(
+            on_mainnet.credentials(&file),
+            None,
+            "a testnet key must not authenticate a mainnet invocation"
+        );
+        assert_eq!(
+            on_mainnet.session_token(&file),
+            None,
+            "a testnet session token must not authenticate a mainnet invocation"
+        );
+    }
+
+    /// Flags and env stay global: they are a per-invocation override for the
+    /// network just selected, so they apply whichever section is active — and
+    /// they still win over a stored value for that network.
+    #[test]
+    fn flags_override_the_selected_networks_section() {
+        let mut file = FileConfig::default();
+        *file.section_mut(NetworkArg::Mainnet) = NetworkCredentials {
+            api_key: Some("stored".into()),
+            api_secret: Some("stored-secret".into()),
+            session_token: None,
+        };
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "mainnet",
+            "--api-key",
+            "flag",
+            "--api-secret",
+            "flag-secret",
+            "balance",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.credentials(&file),
+            Some(("flag".into(), "flag-secret".into()))
+        );
+    }
+
+    /// Two networks configured at once is the case a flat config could not
+    /// express, and the reason for the map.
+    #[test]
+    fn two_networks_coexist() {
+        let mut file = FileConfig::default();
+        *file.section_mut(NetworkArg::Testnet) = NetworkCredentials {
+            api_key: Some("nx_testnet".into()),
+            api_secret: Some("s1".into()),
+            session_token: None,
+        };
+        *file.section_mut(NetworkArg::Mainnet) = NetworkCredentials {
+            api_key: Some("nx_mainnet".into()),
+            api_secret: Some("s2".into()),
+            session_token: None,
+        };
+        for (flag, expected) in [("testnet", "nx_testnet"), ("mainnet", "nx_mainnet")] {
+            let cli = Cli::try_parse_from(["nexus", "--network", flag, "balance"]).unwrap();
+            assert_eq!(cli.credentials(&file).unwrap().0, expected);
+        }
     }
 }

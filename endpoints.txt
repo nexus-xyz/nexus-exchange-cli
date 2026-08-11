@@ -9,9 +9,13 @@
 #     src/main.rs and src/wsclient.rs and mapped to spec ops via METHOD_OP in
 #     check_spec_drift.py), modulo two documented allowlists in that script:
 #       - CODE_ONLY_OPS    — a command exists and calls an SDK method, but the
-#         op is AHEAD OF the pinned spec, so it is kept OUT of this file (adding
-#         it here would fail the spec check). E.g. order amend, account
-#         leverage/margin-mode, funding-payments, transfers, sub-accounts.
+#         op is absent from the pinned spec, so it is kept OUT of this file
+#         (adding it here would fail the spec check). Currently: account
+#         leverage, funding-payments, transfers, sub-accounts. Each row there must
+#         name its calling command, say WHY the op is absent (the route is served
+#         but unspecified, vs. nothing serves it at all), and cite a tracking
+#         issue — ENG-7927, after an unverified "ahead of spec" claim let
+#         `account margin-mode` ship with no endpoint at all (ENG-7740).
 #       - NON_REST_TARGETS — exercised without a named REST method call; e.g.
 #         GET /ws (the WebSocket upgrade, opened by the streaming client, not a
 #         `client.<method>()` REST call).
@@ -83,9 +87,11 @@ DELETE /api/v1/orders/{order_id}
 DELETE /api/v1/orders
 POST /api/v1/account/credit
 # No /api/v1 variant — stay on the gateway:
-# `order amend` — the SDK issues PATCH on the gateway path (v1 exposes no amend).
-# Was mis-mapped as PUT and parked in CODE_ONLY_OPS as "ahead of spec"; the spec
-# has had this operation since v0.7.1, so it was covered but uncounted (ENG-7962).
+# `order amend` — the SDK issues PATCH on the gateway path (v1 exposes no amend),
+# via `signed_patch_with_query("/orders/{id}")`. Was mis-mapped as PUT and parked
+# in CODE_ONLY_OPS as "ahead of spec"; the spec has had this operation since
+# v0.7.1, so it was covered but uncounted. Found independently by ENG-7962 and
+# ENG-7927, which is why the merge briefly carried this line twice.
 PATCH /orders/{order_id}
 POST /account/deposit
 POST /keys

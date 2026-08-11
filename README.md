@@ -383,7 +383,31 @@ falls back to the default. `--network` itself rejects an unknown value outright,
 because you typed it and can retype it.
 
 Credentials are minted **per network** and are invalid on any other, so an API
-key configured for one network will not authenticate against another.
+key configured for one network will not authenticate against another. The CLI
+stores them per network too — see [Per-network credentials](#per-network-credentials).
+
+#### Real-funds guardrails
+
+Three things stand between you and an accidental real-funds action. They are
+local: each one fires before a request is built.
+
+| Guardrail | Behavior |
+|---|---|
+| Active-network banner | Selecting `mainnet` prints a real-funds warning to **stderr** before the command runs. Play-funds networks stay silent, so the banner keeps meaning something. |
+| Faucet refusal | `nexus account credit` claims synthetic USDX and is **refused outright** on mainnet — there is no faucet for real funds. Use `nexus account deposit <amount>`. |
+| First-trade acknowledgement | The first `order place` / `order batch` on mainnet asks for a one-time confirmation, recorded in the config as `mainnet_acknowledged` so it is asked once, not on every order. |
+
+The banner goes to stderr, so `--output json` stays machine-parseable.
+
+`--yes` skips the acknowledgement, exactly as it skips every other confirmation
+in this CLI — otherwise mainnet could not be scripted at all. It does not record
+the acknowledgement, so a later interactive trade is still asked once. Without a
+terminal and without `--yes`, the trade is refused rather than assumed.
+
+> **Mainnet is not reachable in this release.** The guardrails above are in place
+> ahead of the cutover that makes it reachable (ENG-8865); until then a mainnet
+> request is refused by the SDK regardless. They are tested locally, not against
+> a live real-funds host.
 
 ### Output format
 
@@ -435,12 +459,63 @@ visible in your shell history and in the process list. The secret is never
 echoed during setup, never printed back, and the config file is created
 owner-read/write only (`0600`).
 
+#### Per-network credentials
+
+A key is valid on **exactly one network**, so the config file stores credentials
+under a `networks` map rather than one flat slot. Testnet and mainnet keys
+coexist, and the CLI presents only the section for the network you selected:
+
+```json
+{
+  "network": "testnet",
+  "networks": {
+    "testnet": { "api_key": "nx_test...", "api_secret": "..." },
+    "mainnet": { "api_key": "nx_main...", "api_secret": "..." }
+  }
+}
+```
+
+```sh
+nexus setup                    # answer `testnet`, enter that network's key
+nexus setup                    # run again, answer `mainnet` — the first is kept
+
+nexus balance                  # uses the testnet section
+nexus --network mainnet balance   # uses the mainnet section, or nothing
+```
+
+Which section is used follows the same order as network selection:
+`--network` / `NEXUS_NETWORK`, then the config file's `network`, then the
+default (`testnet`). Some consequences worth knowing:
+
+- **A key is never offered to the wrong network.** If only `testnet` is
+  configured, `--network mainnet` runs *unauthenticated* rather than sending a
+  testnet key to a real-funds host. You get the "no credentials are configured"
+  error, not a signature failure from the server.
+- **`--base-url` does not change the namespace.** It redirects the request; it
+  does not change who you are. Pointing at a proxy or a tunnel in front of a
+  network still presents that network's credentials.
+- **Flags and env are not namespaced.** `--api-key` / `NEXUS_API_KEY` (and the
+  session-token equivalents) apply to whichever network is selected — they are a
+  per-invocation override you just typed. Only the persisted layer, the one that
+  can hold several networks at once, is sectioned.
+- **`nexus auth login` stores its session token in the active network's
+  section**, for the same reason: the token is minted against one network's
+  indexer and authenticates nowhere else.
+
+**Upgrading:** a config written by an earlier version keeps its credentials at
+the top level. Those are read as belonging to the network that file names (or
+the default, if it names none), so nothing breaks and — importantly — an old
+testnet key is not promoted to mainnet. The file is rewritten into the layout
+above the next time anything writes to it; you can also just re-run
+`nexus setup`.
+
 #### Wallet sign-in (session token)
 
 As an alternative to an HMAC key pair, you can authenticate with an EVM wallet.
 `nexus auth login` reads a raw private key, signs the fixed sign-in challenge
 (EIP-191), and exchanges it for a **session token** stored in the same config
-file (mode `0600`) under `session_token`. The session token authenticates
+file (mode `0600`) under the active network's `session_token`. The session token
+authenticates
 session-scoped routes; the HMAC pair, when present, takes precedence as the
 request signer.
 
