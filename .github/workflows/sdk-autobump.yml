@@ -380,6 +380,15 @@ jobs:
       # not the mechanism.
       - name: Fail the run if the bump does not compile
         if: steps.gate.outputs.proceed == 'true' && steps.compile.outputs.result != 'clean'
+        # Through `env:`, not interpolated into the script — the same way every other
+        # step in this file takes a value, including `github.event.inputs.version`,
+        # which is the genuinely untrusted one. Nothing dangerous can reach this
+        # particular string today (`new_version` is a cargo-resolved semver read back
+        # out of Cargo.lock, so an injection payload would have to survive dependency
+        # resolution first). The convention is what keeps that true if someone later
+        # changes what feeds it, which is exactly the kind of edit nobody re-audits.
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
-          echo "::error::nexus-exchange ${{ steps.bump.outputs.new_version }} does not compile against the current call sites. The bump PR is open as a draft and needs a code change pushed onto its branch; see the 'Does it still compile?' step for the errors."
+          echo "::error::nexus-exchange ${NEW_VERSION} does not compile against the current call sites. The bump PR is open as a draft and needs a code change pushed onto its branch; see the 'Does it still compile?' step for the errors."
           exit 1
