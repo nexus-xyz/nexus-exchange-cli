@@ -1965,6 +1965,32 @@ mod tests {
         );
     }
 
+    /// The default must never move real money.
+    ///
+    /// `legacy_credential_owner` falls back to [`DEFAULT_NETWORK`] when a
+    /// pre-namespacing config names no network, or names one this build cannot
+    /// parse. So this constant decides who inherits an orphaned flat key, and
+    /// while it is play funds that fallback is harmless. Were it ever a
+    /// real-funds network, the migration would silently start attributing
+    /// unattributable keys to mainnet — and nothing else in the tree would
+    /// object, because `the_default_network_matches_the_sdk` only pins the two
+    /// defaults *together*: an upstream default moving to mainnet would drag
+    /// this one along and read as a passing test.
+    ///
+    /// This is the assertion that refuses. It is deliberately not derived from
+    /// the SDK — the point is to fail rather than to follow.
+    #[test]
+    fn the_default_network_is_play_funds() {
+        assert!(
+            !DEFAULT_NETWORK.is_real_funds(),
+            "DEFAULT_NETWORK is {:?}, which moves real funds; a legacy config naming no network \
+             would have its credentials migrated onto a real-funds section, and an unnamed \
+             invocation would send requests there. Both need a deliberate decision, not a \
+             constant change",
+            DEFAULT_NETWORK
+        );
+    }
+
     /// `is_real_funds` is what every guardrail keys off, so it must agree with
     /// the SDK's own notion rather than with a hardcoded list that can rot.
     #[test]
@@ -1977,6 +2003,30 @@ mod tests {
                 arg.as_str()
             );
         }
+    }
+
+    /// Exactly one network moves real funds.
+    ///
+    /// `FileConfig::mainnet_acknowledged` is a single flag, but the prompt that
+    /// sets it is gated on `is_real_funds()` rather than on mainnet by name.
+    /// That is 1:1 only while there is one such network. Add a second and
+    /// acknowledging the first would silently disarm the prompt for it — the
+    /// one-time gate would be one-time across *all* real-funds networks, which
+    /// is not what it promises. Splitting the flag per network at that point is
+    /// a schema change, so it wants to be a decision rather than a discovery.
+    #[test]
+    fn exactly_one_network_moves_real_funds() {
+        let real: Vec<_> = [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local]
+            .into_iter()
+            .filter(|n| n.is_real_funds())
+            .map(|n| n.as_str())
+            .collect();
+        assert_eq!(
+            real,
+            ["mainnet"],
+            "the real-funds networks are {real:?}; `mainnet_acknowledged` is one flag shared by \
+             all of them, so a second one needs the acknowledgement split per network first"
+        );
     }
 
     /// The section key is the name users type and hand-edit into the config
