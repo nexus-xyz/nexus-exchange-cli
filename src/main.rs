@@ -22,7 +22,7 @@ use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
     AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
-    NetworkArg, OrderCommand, OutputFormat, SubAccountsCommand, TransfersCommand,
+    OrderCommand, OutputFormat, SubAccountsCommand, Target, TransfersCommand,
 };
 use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
@@ -47,16 +47,22 @@ async fn main() -> Result<()> {
     // the user notices rather than silently losing settings).
     let file = credentials::load()?.unwrap_or_default();
 
+    // Where this invocation is pointed, which key it presents, and what that
+    // place moves — resolved once so the request, the credential and the guard
+    // cannot disagree. A selection that cannot be honoured stops here, before
+    // anything is signed or sent.
+    let target = cli.target(&file)?;
+
     // Build the SDK config (network / base URL), then attach credentials so the
     // SDK signs authenticated requests. `credentials` is resolved once here so
     // its single "half a pair" warning isn't emitted twice.
-    let credentials = cli.credentials(&file);
-    let session_token = cli.session_token(&file);
+    let credentials = cli.credentials(&file, &target);
+    let session_token = cli.session_token(&file, &target);
     // Either credential path authenticates account-scoped commands. The HMAC
     // pair is the request signer; the session token is a fallback used only
     // when no pair is configured (both set `Config::credentials`, last wins).
     let authenticated = credentials.is_some() || session_token.is_some();
-    let mut config = cli.config(&file);
+    let mut config = cli.config(&target);
     match (credentials, session_token) {
         (Some((key, secret)), _) => config = config.api_key(key, secret),
         (None, Some(token)) => config = config.session_token(token),
@@ -65,14 +71,9 @@ async fn main() -> Result<()> {
     let client = Client::new(config.clone());
     let format = cli.output;
 
-    // The network whose credentials this invocation presents, and the one every
-    // real-funds guardrail keys off. Announced before the command runs so the
-    // warning precedes the action it is warning about.
-    let network = cli.credential_network(&file);
-    guardrails::announce_network(
-        network,
-        cli.base_url.as_deref().or(file.base_url.as_deref()),
-    );
+    // Announced before the command runs so the warning precedes the action it is
+    // warning about.
+    guardrails::announce_network(&target);
 
     match cli.command {
         // ── public market data ──
@@ -253,16 +254,18 @@ async fn main() -> Result<()> {
 
         // ── trading ──
         Command::Order { action } => {
-            handle_order(&client, authenticated, action, format, network, &file).await?
+            handle_order(&client, authenticated, action, format, &target, &file).await?
         }
 
         // ── account / keys / agents / transfers / sub-accounts ──
         Command::Account { action } => {
-            handle_account(&client, authenticated, action, format, network).await?
+            handle_account(&client, authenticated, action, format, &target).await?
         }
-        Command::Auth { action } => handle_auth(&client, action, format, network).await?,
+        Command::Auth { action } => handle_auth(&client, action, format, &target).await?,
         Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
-        Command::Agents { action } => handle_agents(&client, authenticated, action, format).await?,
+        Command::Agents { action } => {
+            handle_agents(&client, authenticated, action, format, &target).await?
+        }
         Command::Transfers { action } => {
             handle_transfers(&client, authenticated, action, format).await?
         }
@@ -338,7 +341,7 @@ async fn handle_order(
     authenticated: bool,
     action: OrderCommand,
     format: OutputFormat,
-    network: NetworkArg,
+    target: &Target,
     config_file: &FileConfig,
 ) -> Result<()> {
     match action {
@@ -391,7 +394,7 @@ async fn handle_order(
             // The real-funds acknowledgement comes first and is a separate
             // question: "do you understand this network" is not "is this order
             // right", and collapsing them would let a hurried yes answer both.
-            if !guardrails::acknowledge_real_funds(network, config_file, yes)? {
+            if !guardrails::acknowledge_real_funds(target, config_file, yes)? {
                 eprintln!("aborted.");
                 return Ok(());
             }
@@ -504,7 +507,7 @@ async fn handle_order(
             if requests.is_empty() {
                 anyhow::bail!("the batch file contains no orders");
             }
-            if !guardrails::acknowledge_real_funds(network, config_file, yes)? {
+            if !guardrails::acknowledge_real_funds(target, config_file, yes)? {
                 eprintln!("aborted.");
                 return Ok(());
             }
@@ -541,7 +544,7 @@ async fn handle_account(
     authenticated: bool,
     action: AccountCommand,
     format: OutputFormat,
-    network: NetworkArg,
+    target: &Target,
 ) -> Result<()> {
     match action {
         AccountCommand::Summary => {
@@ -608,7 +611,7 @@ async fn handle_account(
             // faucet for real funds" is true whether or not you are authenticated,
             // and it is the more useful of the two errors. Telling a mainnet user
             // to configure credentials first would send them to fix the wrong thing.
-            guardrails::refuse_faucet_on_real_funds(network)?;
+            guardrails::refuse_faucet_without_play_funds(target)?;
             require_authenticated(authenticated, "account credit")?;
             let amount = match amount.as_deref() {
                 Some(a) => Some(parse_amount("amount", a)?),
@@ -678,7 +681,7 @@ async fn handle_auth(
     client: &Client,
     action: AuthCommand,
     format: OutputFormat,
-    network: NetworkArg,
+    target: &Target,
 ) -> Result<()> {
     match action {
         AuthCommand::Login { private_key } => {
@@ -694,7 +697,7 @@ async fn handle_auth(
             // under the network it was minted against — it authenticates there
             // and nowhere else.
             let token = login.token.expose_secret();
-            let path = credentials::save_session_token(network, token)
+            let path = credentials::save_session_token(target.namespace(), token)
                 .context("failed to save session token")?;
             let path = path.display().to_string();
             emit(format, output::login(&login.address, token, &path), || {
@@ -769,6 +772,7 @@ async fn handle_agents(
     authenticated: bool,
     action: AgentsCommand,
     format: OutputFormat,
+    target: &Target,
 ) -> Result<()> {
     match action {
         AgentsCommand::List => {
@@ -797,6 +801,10 @@ async fn handle_agents(
             let now_ms = unix_millis()?;
             let expires_at = expires_at.unwrap_or(now_ms + THIRTY_DAYS_MS);
             let nonce = nonce.unwrap_or(now_ms);
+            // The signed domain follows the target the registration is *for*,
+            // not a constant: a custom network on another chain would otherwise
+            // be handed a signature that is valid somewhere else.
+            let chain_id = chain_id.unwrap_or_else(|| target.signing_chain_id());
 
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;

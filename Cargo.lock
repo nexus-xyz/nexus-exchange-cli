@@ -1147,9 +1147,9 @@ dependencies = [
 
 [[package]]
 name = "nexus-exchange"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f2aae6f6582c6c011cde7b669a3f486eb64a399dbdca0563ad9d3411f488b28"
+checksum = "83f7e948ff6679ac78d63bf171bc78e556ee0aee6be1581904466291bac6f62f"
 dependencies = [
  "backon",
  "futures-core",

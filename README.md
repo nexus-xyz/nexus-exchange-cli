@@ -347,19 +347,21 @@ be a network that moves real money.
 ```sh
 nexus markets                                    # testnet (the default)
 nexus --network local markets
+nexus --network dev markets                      # a custom network you declared
 nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 ```
 
 | Flag | Env | Default |
 |---|---|---|
-| `--network <mainnet\|testnet\|local>` | `NEXUS_NETWORK` | `testnet` |
+| `--network <mainnet\|testnet\|local\|LABEL>` | `NEXUS_NETWORK` | `testnet` |
 | `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
 
 | Network | Funds | Notes |
 |---|---|---|
-| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet, and its base uses a different path layout than the one the SDK signs. Use `--base-url` to target a host you control. |
+| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet, and its base uses a different path layout than the one the SDK signs. Use a [custom network](#custom-networks) to target a host you control. |
 | `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
 | `local` | play | A locally run indexer. A developer convenience, never a fallback. |
+| *`LABEL`* | declared | A [custom network](#custom-networks) you describe in the config file — your own environment, a preview host, a sandbox. |
 
 > **`stable` and `beta` were retired** in `nexus-exchange` 0.8.0 and are no
 > longer accepted. They named *release channels*, which is how a play-funds host
@@ -379,6 +381,70 @@ Credentials are minted **per network** and are invalid on any other, so an API
 key configured for one network will not authenticate against another. The CLI
 stores them per network too — see [Per-network credentials](#per-network-credentials).
 
+#### Custom networks
+
+A deployment this CLI does not name still has to be reachable from it. Enumerating
+such hosts in a published binary would put them in the package permanently and
+discoverably, and the list would need extending every time one was added — so
+**you supply the URL and the CLI ships none**.
+
+Declare each one under `custom_networks` in the config file, keyed by a label,
+then select it by that label:
+
+```jsonc
+{
+  "network": "dev",
+  "custom_networks": {
+    "dev": {
+      "base_url": "https://exchange.example.com/api/exchange",
+      "funds": "play",          // required: "real" | "play" | "unknown"
+      "faucet": true,           // optional, assumed absent
+      "ws_url": "wss://stream.example.com/ws",  // optional, never derived
+      "direct_base_url": "...", // optional, defaults to base_url
+      "chain_id": 393           // optional EIP-712 domain, never guessed
+    }
+  },
+  "networks": {
+    "dev": { "api_key": "nx_...", "api_secret": "..." }
+  }
+}
+```
+
+```sh
+nexus --network dev markets
+```
+
+A custom network is **client-side only**: it is never a value the server accepts,
+and nothing about it is transmitted.
+
+- **`funds` is required and has no default.** Both booleans are wrong — `play`
+  makes every guardrail lie in the direction that costs money, `real` makes
+  development unusable — so the classification is a third thing the caller
+  declares. A missing or unreadable value warns and resolves to **unknown**,
+  which *fails closed*: reads still work, and anything that moves or mints funds
+  is refused rather than assumed safe.
+- **The label, not the URL, is the credential namespace.** Two stages on one host
+  keep separate credentials, and a stage keeps its credentials across a host
+  move. Labels are limited to `A-Za-z0-9._-`, capped at 64 characters, and may
+  not be `.`, `..`, or a built-in network's name — a label is a storage key, so
+  one that could address another network's credentials is refused outright.
+- **Nothing is inferred from the URL.** The WebSocket origin is a separate host
+  and is never derived from the REST base, so `nexus ws` refuses rather than
+  connecting to a guess. The EIP-712 signing domain is likewise absent until
+  declared: a signature made under the wrong domain may be *valid on a different
+  network*. Read `chain_id` off that host's `GET /metadata`.
+- **URLs are validated** — `http(s)` scheme, a host, no `user:pass@` userinfo, no
+  query or fragment, no whitespace. Each rejection is a URL that would otherwise
+  build a *wrong* request rather than merely fail. The host itself is never
+  checked against any list, which is the entire point.
+
+`--base-url` still works and is unchanged for selecting a host: it takes
+precedence over `--network` and keeps presenting the selected network's
+credentials. What it cannot do is carry the safety metadata, so its funds are
+**unknown** and the guarded commands are refused. Declare the stage under
+`custom_networks` to get a validated URL, its own credential namespace, and a
+funds classification.
+
 #### Real-funds guardrails
 
 Three things stand between you and an accidental real-funds action. They are
@@ -386,9 +452,15 @@ local: each one fires before a request is built.
 
 | Guardrail | Behavior |
 |---|---|
-| Active-network banner | Selecting `mainnet` prints a real-funds warning to **stderr** before the command runs. Play-funds networks stay silent, so the banner keeps meaning something. |
-| Faucet refusal | `nexus account credit` claims synthetic USDX and is **refused outright** on mainnet — there is no faucet for real funds. Use `nexus account deposit <amount>`. |
-| First-trade acknowledgement | The first `order place` / `order batch` on mainnet asks for a one-time confirmation, recorded in the config as `mainnet_acknowledged` so it is asked once, not on every order. |
+| Active-network banner | Selecting a **real-funds** network prints a warning to **stderr** before the command runs, naming the network. Play-funds networks stay silent, so the banner keeps meaning something. |
+| Faucet refusal | `nexus account credit` claims synthetic USDX and is **refused** anywhere it is not known to mint play funds: on a real-funds network (use `nexus account deposit <amount>`), on a target whose funds are undeclared, and on a play-funds stage that declares no faucet. |
+| First-trade acknowledgement | The first `order place` / `order batch` on a real-funds network asks for a one-time confirmation, recorded per network in the config's `acknowledged_networks` so it is asked once per network, not on every order. |
+
+These key off the target's declared **funds**, not off the name `mainnet`: a
+custom network can declare `"funds": "real"`, so each guard matches *play funds
+positively* rather than negating the real case — which is how an unclassified
+target would otherwise slip through as safe. Acknowledging one real-funds network
+says nothing about another.
 
 The banner goes to stderr, so `--output json` stays machine-parseable.
 
@@ -455,15 +527,17 @@ owner-read/write only (`0600`).
 #### Per-network credentials
 
 A key is valid on **exactly one network**, so the config file stores credentials
-under a `networks` map rather than one flat slot. Testnet and mainnet keys
-coexist, and the CLI presents only the section for the network you selected:
+under a `networks` map rather than one flat slot. Testnet, mainnet and any
+[custom network](#custom-networks) keys coexist, and the CLI presents only the
+section for the network you selected:
 
 ```json
 {
   "network": "testnet",
   "networks": {
     "testnet": { "api_key": "nx_test...", "api_secret": "..." },
-    "mainnet": { "api_key": "nx_main...", "api_secret": "..." }
+    "mainnet": { "api_key": "nx_main...", "api_secret": "..." },
+    "dev": { "api_key": "nx_dev...", "api_secret": "..." }
   }
 }
 ```
@@ -484,9 +558,13 @@ default (`testnet`). Some consequences worth knowing:
   configured, `--network mainnet` runs *unauthenticated* rather than sending a
   testnet key to a real-funds host. You get the "no credentials are configured"
   error, not a signature failure from the server.
+- **A custom network is keyed by its label**, so two stages sharing one host
+  still get separate slots. That is the collision the label exists to prevent,
+  and it would be between environments with different funds semantics.
 - **`--base-url` does not change the namespace.** It redirects the request; it
   does not change who you are. Pointing at a proxy or a tunnel in front of a
-  network still presents that network's credentials.
+  network still presents that network's credentials. It *does* change what the
+  target is known to move — see [Custom networks](#custom-networks).
 - **Flags and env are not namespaced.** `--api-key` / `NEXUS_API_KEY` (and the
   session-token equivalents) apply to whichever network is selected — they are a
   per-invocation override you just typed. Only the persisted layer, the one that
@@ -593,7 +671,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.7.2`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.8.0`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.9.0`**.
 
 <!-- api-version-sync:end -->
 

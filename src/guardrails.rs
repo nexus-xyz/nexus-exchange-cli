@@ -1,10 +1,19 @@
 //! Real-funds guardrails (ENG-6462).
 //!
 //! Three checks stand between an invocation and real money: an active-network
-//! banner, a hard refusal of the testnet faucet on mainnet, and a one-time
-//! acknowledgement before the first mainnet trade. They are collected here
-//! rather than spread through `main` so the rules read as a set — the CLI's
-//! answer to "what stops me losing money by accident" is one file.
+//! banner, a hard refusal of the faucet anywhere it is not known to mint
+//! synthetic funds, and a one-time acknowledgement before the first trade on a
+//! real-funds target. They are collected here rather than spread through `main`
+//! so the rules read as a set — the CLI's answer to "what stops me losing money
+//! by accident" is one file.
+//!
+//! # They key off a `Funds`, not off a network name
+//!
+//! Since ENG-9827 a caller-declared stage can be real funds under a label this
+//! crate has never heard of, so "is this mainnet" is no longer the question. Each
+//! guard reads [`Target::funds`] and matches [`Funds::Play`] **positively**:
+//! negating the real case is how an unclassified target quietly becomes a safe
+//! one, and unclassified is the common case for a private stage.
 //!
 //! # These run ahead of the SDK, not instead of it
 //!
@@ -18,60 +27,107 @@
 //! One of them is not merely early. `fund()` refuses on mainnet inside the SDK,
 //! but the CLI's faucet command calls `claim_credit()`, which carries **no**
 //! per-network guard of its own — it is covered only by the blanket gate that
-//! the cutover deletes. [`refuse_faucet_on_real_funds`] is therefore a real
-//! guard rather than a duplicated one.
+//! the cutover deletes. [`refuse_faucet_without_play_funds`] is therefore a real
+//! guard rather than a duplicated one — and it is the only one of the three that
+//! also covers a `Custom` target, which the SDK's blanket mainnet gate never
+//! did.
 
 use anyhow::Result;
+use nexus_exchange::Funds;
 
-use crate::cli::NetworkArg;
+use crate::cli::Target;
 use crate::credentials::{self, real_funds_notice, FileConfig};
 
 /// Announce the active network on stderr when it moves real money.
 ///
-/// Only real-funds networks say anything. A banner on every `nexus markets`
+/// Only real-funds targets say anything. A banner on every `nexus markets`
 /// would be noise on the default (testnet) and noise is how a warning stops
-/// being read — the signal worth spending is "this one is different".
+/// being read — the signal worth spending is "this one is different". An
+/// undeclared-funds target is deliberately quiet here too: it is reported at the
+/// point of refusal, where it is actionable, rather than on every read command.
 ///
 /// stderr, not stdout, so `--output json` stays machine-parseable; the same
 /// split the stale-network warning already uses.
-pub fn announce_network(network: NetworkArg, base_url_override: Option<&str>) {
-    if !network.is_real_funds() {
+pub fn announce_network(target: &Target) {
+    if !target.touches_real_funds() {
         return;
     }
-    // A base-URL override changes the destination but not the credential
-    // namespace, so "you are on mainnet" would be an overstatement — say what is
-    // actually true, which is that mainnet's key is being presented to a host the
-    // user chose. `{url:?}` because the value can come from the config file.
-    match base_url_override {
+    match target.base_url_override() {
+        // An override changes the destination but not the credential namespace,
+        // so "you are on mainnet" would be an overstatement — say what is
+        // actually true, which is that a real-funds network's key is being
+        // presented to a host the user chose. `{url:?}` because the value can
+        // come from the config file, and `Debug` escapes control bytes.
         Some(url) => eprintln!(
             "{}",
-            real_funds_notice(&format!(
-                "Using mainnet credentials against the overridden base URL {url:?}."
-            ))
+            real_funds_notice(
+                target.namespace(),
+                &format!(
+                    "Using {} credentials against the overridden base URL {url:?}, whose funds \
+                     are undeclared.",
+                    target.namespace()
+                )
+            )
         ),
         None => eprintln!(
             "{}",
-            real_funds_notice("Every order, deposit and transfer settles for real.")
+            real_funds_notice(
+                target.namespace(),
+                "Every order, deposit and transfer settles for real."
+            )
         ),
     }
 }
 
-/// Refuse the testnet faucet on a real-funds network.
+/// Refuse the faucet anywhere it is not known to mint *synthetic* funds.
 ///
-/// The faucet mints synthetic collateral; on mainnet the equivalent is a real
-/// deposit of real money, and the two must never be one command away from each
-/// other. Naming `account deposit` in the error is the point — a refusal that
-/// leaves the user guessing gets worked around.
-pub fn refuse_faucet_on_real_funds(network: NetworkArg) -> Result<()> {
-    if network.is_real_funds() {
-        anyhow::bail!(
-            "`account credit` claims synthetic USDX from the testnet faucet and is refused on \
-             {}: there is no faucet for real funds. To add real collateral, deposit it \
-             explicitly with `nexus account deposit <amount>`.",
-            network.as_str()
-        );
+/// The faucet mints play collateral; on a real-funds network the equivalent is a
+/// real deposit of real money, and the two must never be one command away from
+/// each other. Naming the alternative in each error is the point — a refusal
+/// that leaves the user guessing gets worked around.
+///
+/// Three refusals, because there are three ways this can be wrong:
+///
+///   - **Real funds.** There is no faucet; `account deposit` is the real thing.
+///   - **Undeclared funds.** Matched positively on [`Funds::Play`] rather than by
+///     negating `Real`, so an unclassified target fails closed. Negating the real
+///     case is precisely how "unknown" silently becomes "safe".
+///   - **Play funds with no faucet.** "Not real money" does not imply "has a
+///     faucet" — a private stage may be seeded by other means, and claiming
+///     credit from one that is not there is a confusing 404 rather than a refusal
+///     that says why.
+pub fn refuse_faucet_without_play_funds(target: &Target) -> Result<()> {
+    let network = target.namespace();
+    match target.funds() {
+        Funds::Play if target.has_faucet() => Ok(()),
+        Funds::Play => anyhow::bail!(
+            "`account credit` claims synthetic USDX from the faucet, and {network} does not \
+             declare one. Set \"faucet\": true for it under \"custom_networks\" if the \
+             deployment has a faucet; otherwise fund the account the way that stage is seeded."
+        ),
+        Funds::Real => anyhow::bail!(
+            "`account credit` claims synthetic USDX from the faucet and is refused on \
+             {network}: there is no faucet for real funds. To add real collateral, deposit it \
+             explicitly with `nexus account deposit <amount>`."
+        ),
+        // Includes every future classification: `Funds` is `#[non_exhaustive]`,
+        // and the wildcard arm is the safe one on purpose.
+        _ => anyhow::bail!(
+            "`account credit` mints funds, and this target does not declare whether it moves \
+             real ones, so it is refused rather than assumed safe. {}",
+            match target.base_url_override() {
+                Some(url) => format!(
+                    "The base URL {url:?} overrides {network}, and a bare URL carries no funds \
+                     classification: declare the stage under \"custom_networks\" with a \
+                     \"funds\" value and select it with `--network <label>`."
+                ),
+                None => format!(
+                    "Set \"funds\" to \"real\", \"play\" or \"unknown\" for {network} under \
+                     \"custom_networks\" in the config file."
+                ),
+            }
+        ),
     }
-    Ok(())
 }
 
 /// One-time acknowledgement before the first trade on a real-funds network.
@@ -87,8 +143,12 @@ pub fn refuse_faucet_on_real_funds(network: NetworkArg) -> Result<()> {
 /// the escape hatch users would reach for instead is worse than the one we
 /// document. It does **not** record the acknowledgement, so a later interactive
 /// trade still gets the prompt once.
-pub fn acknowledge_real_funds(network: NetworkArg, file: &FileConfig, yes: bool) -> Result<bool> {
-    if !network.is_real_funds() || file.mainnet_acknowledged {
+///
+/// Recorded **per network** (ENG-9827): a custom stage can declare real funds,
+/// so acknowledging mainnet must not disarm the prompt for a private real-funds
+/// stage the user has never traded on.
+pub fn acknowledge_real_funds(target: &Target, file: &FileConfig, yes: bool) -> Result<bool> {
+    if !target.touches_real_funds() || file.acknowledged(target.namespace()) {
         return Ok(true);
     }
     // Neither message repeats the real-funds prefix: `announce_network` has
@@ -111,24 +171,54 @@ pub fn acknowledge_real_funds(network: NetworkArg, file: &FileConfig, yes: bool)
     }
     // Persisted only on the way through: a decline leaves no trace, so the next
     // attempt asks again.
-    credentials::save_mainnet_acknowledged()?;
+    credentials::save_acknowledged(target.namespace())?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Cli, CustomNetworkConfig};
+    use clap::Parser;
+
+    /// Resolve a target the way `main` does — through the real flag parser and
+    /// the real config file — so a guardrail is never tested against a shape the
+    /// binary cannot actually produce.
+    fn target_for(args: &[&str], file: &FileConfig) -> Target {
+        let mut argv = vec!["nexus"];
+        argv.extend_from_slice(args);
+        argv.push("markets");
+        Cli::try_parse_from(argv)
+            .expect("the arguments should parse")
+            .target(file)
+            .expect("the target should resolve")
+    }
+
+    /// A config file declaring one stage. `example.com` is RFC 2606 reserved.
+    fn file_with(label: &str, funds: &str, faucet: bool) -> FileConfig {
+        let mut file = FileConfig::default();
+        file.custom_networks.insert(
+            label.to_string(),
+            CustomNetworkConfig {
+                base_url: Some("https://exchange.example.com/api/exchange".into()),
+                funds: Some(funds.into()),
+                faucet: Some(faucet),
+                ..Default::default()
+            },
+        );
+        file
+    }
 
     #[test]
-    fn the_faucet_is_refused_only_on_real_funds() {
-        for play in [NetworkArg::Testnet, NetworkArg::Local] {
+    fn the_faucet_works_only_on_declared_play_funds_with_a_faucet() {
+        let empty = FileConfig::default();
+        for play in ["testnet", "local"] {
             assert!(
-                refuse_faucet_on_real_funds(play).is_ok(),
-                "{} is play funds; the faucet must work",
-                play.as_str()
+                refuse_faucet_without_play_funds(&target_for(&["--network", play], &empty)).is_ok(),
+                "{play} is play funds with a faucet; the faucet must work"
             );
         }
-        let err = refuse_faucet_on_real_funds(NetworkArg::Mainnet)
+        let err = refuse_faucet_without_play_funds(&target_for(&["--network", "mainnet"], &empty))
             .expect_err("the faucet must be refused on a real-funds network")
             .to_string();
         assert!(
@@ -142,17 +232,75 @@ mod tests {
         );
     }
 
+    /// The tri-state rule, on the arm that a boolean could not express: a stage
+    /// nobody classified fails **closed**. Matching `Play` positively is what
+    /// makes this true — negating `Real` would let `Unknown` through as safe.
+    #[test]
+    fn undeclared_funds_refuse_the_faucet() {
+        for declared in ["unknown", "", "reel"] {
+            let file = file_with("dev", declared, true);
+            let err = refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file))
+                .expect_err("undeclared funds must refuse, not assume play funds")
+                .to_string();
+            assert!(
+                err.contains("does not declare whether it moves real ones"),
+                "funds {declared:?} should refuse as unclassified; got: {err}"
+            );
+            assert!(
+                err.contains("\"funds\""),
+                "the error must say which key to set; got: {err}"
+            );
+        }
+    }
+
+    /// A bare base URL is the same case reached the other way: it carries no
+    /// classification, so it cannot mint funds either — and the error says so in
+    /// terms of the override rather than of the network whose key it borrows.
+    #[test]
+    fn a_base_url_override_refuses_the_faucet() {
+        let err = refuse_faucet_without_play_funds(&target_for(
+            &["--network", "local", "--base-url", "http://127.0.0.1:9090"],
+            &FileConfig::default(),
+        ))
+        .expect_err("an override carries no funds classification")
+        .to_string();
+        assert!(
+            err.contains("--network <label>"),
+            "the error must point at the declared-stage path; got: {err}"
+        );
+    }
+
+    /// "Not real money" does not imply "has a faucet": a play-funds stage seeded
+    /// by other means must refuse rather than send a request to a faucet that is
+    /// not there.
+    #[test]
+    fn play_funds_without_a_faucet_still_refuse() {
+        let file = file_with("dev", "play", false);
+        let err = refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file))
+            .expect_err("a stage with no declared faucet must refuse")
+            .to_string();
+        assert!(
+            err.contains("does not declare one"),
+            "the error should say the faucet is undeclared; got: {err}"
+        );
+        // ...and declaring one lets it through.
+        let file = file_with("dev", "play", true);
+        assert!(
+            refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file)).is_ok()
+        );
+    }
+
     /// The prompt must never fire on play funds — not even non-interactively,
     /// where `confirm` would turn it into a hard error and break testnet
     /// scripting for everyone.
     #[test]
     fn play_funds_never_prompt() {
         let file = FileConfig::default();
-        for play in [NetworkArg::Testnet, NetworkArg::Local] {
+        for play in ["testnet", "local"] {
             assert!(
-                acknowledge_real_funds(play, &file, false).unwrap(),
-                "{} must not require an acknowledgement",
-                play.as_str()
+                acknowledge_real_funds(&target_for(&["--network", play], &file), &file, false)
+                    .unwrap(),
+                "{play} must not require an acknowledgement"
             );
         }
     }
@@ -161,11 +309,31 @@ mod tests {
     /// prompt is genuinely one-time rather than once-per-session.
     #[test]
     fn an_acknowledged_config_does_not_prompt_again() {
-        let file = FileConfig {
-            mainnet_acknowledged: true,
-            ..Default::default()
-        };
-        assert!(acknowledge_real_funds(NetworkArg::Mainnet, &file, false).unwrap());
+        let mut file = FileConfig::default();
+        file.acknowledged_networks.insert("mainnet".into());
+        let target = target_for(&["--network", "mainnet"], &file);
+        assert!(acknowledge_real_funds(&target, &file, false).unwrap());
+    }
+
+    /// The reason the acknowledgement is keyed per network (ENG-9827): a custom
+    /// stage can declare real funds, and consent given for mainnet says nothing
+    /// about a private stage the user has never traded on. With a single flag
+    /// this call would short-circuit and the first real trade there would
+    /// proceed unremarked.
+    #[test]
+    fn acknowledging_one_real_funds_network_does_not_cover_another() {
+        let mut file = file_with("dev", "real", false);
+        file.acknowledged_networks.insert("mainnet".into());
+        let target = target_for(&["--network", "dev"], &file);
+        assert!(target.touches_real_funds());
+        assert!(
+            !file.acknowledged(target.namespace()),
+            "mainnet's acknowledgement must not cover {:?}",
+            target.namespace()
+        );
+        // `--yes` is the non-interactive path through the prompt, so this
+        // exercises the branch without needing a terminal.
+        assert!(acknowledge_real_funds(&target, &file, true).unwrap());
     }
 
     /// `--yes` proceeds without touching the config file. If it recorded the
@@ -174,9 +342,10 @@ mod tests {
     #[test]
     fn yes_proceeds_without_recording() {
         let file = FileConfig::default();
-        assert!(acknowledge_real_funds(NetworkArg::Mainnet, &file, true).unwrap());
+        let target = target_for(&["--network", "mainnet"], &file);
+        assert!(acknowledge_real_funds(&target, &file, true).unwrap());
         assert!(
-            !file.mainnet_acknowledged,
+            file.acknowledged_networks.is_empty(),
             "--yes must not record the acknowledgement"
         );
     }
