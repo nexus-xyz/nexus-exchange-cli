@@ -30,10 +30,14 @@ variant automatically. The host itself lives in [`installer/`](./installer).
 
 Or pin the invocation to a specific GitHub release artifact:
 
-Prebuilt, checksummed, signed binaries are published for every tagged release
+Prebuilt, checksummed binaries are published for every tagged release
 (macOS arm64/x64, Linux x64/arm64, Windows x64) by
 [cargo-dist](https://opensource.axo.dev/cargo-dist/). A Windows `.msi` is also
-attached to each release.
+attached to each release. Every artifact carries a detached minisign signature
+and a GitHub build-provenance attestation — see
+[Verifying downloads](#verifying-downloads). Note that the binaries are **not**
+OS code-signed (no Apple Developer ID, no Windows Authenticode); on Windows this
+has a visible consequence, described [below](#windows-the-binaries-are-unsigned).
 
 **macOS / Linux** — shell installer:
 
@@ -47,6 +51,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/nexus-xyz/nexus-exchange-cli/releases/latest/download/nexus-exchange-cli-installer.ps1 | iex"
 ```
+
+Windows will warn that the binary is unsigned — see
+[Windows: the binaries are unsigned](#windows-the-binaries-are-unsigned).
 
 **Homebrew**:
 
@@ -68,6 +75,29 @@ cargo install --path .
 # or, from a checkout:
 cargo build --release   # binary at target/release/nexus
 ```
+
+### Windows: the binaries are unsigned
+
+The Windows `.exe` and `.msi` are **not Authenticode-signed**. Windows will say
+so, and what you see depends on how the machine is managed:
+
+- **Ordinary Windows.** SmartScreen shows *"Windows protected your PC —
+  Microsoft Defender SmartScreen prevented an unrecognized app from starting"*.
+  Click **More info → Run anyway**. Annoying, but dismissible.
+- **Managed or corporate Windows.** If WDAC or AppLocker is in enforcement, an
+  unsigned binary can be **blocked outright**, with no click-through. There is
+  no workaround on our side — it needs a policy exception from whoever
+  administers the machine.
+
+Unsigned is not unverifiable: both signatures under
+[Verifying downloads](#verifying-downloads) cover the Windows artifacts, and the
+minisign check in particular is a stronger guarantee of provenance than
+Authenticode is. Prefer verifying the download over clicking through the prompt.
+
+This is a deliberate, reversible choice — Windows is 0.2% of downloads and
+signing requires a purchased certificate; see the rationale in
+[`dist-workspace.toml`](./dist-workspace.toml). If a block affects you, please
+open an issue: that is the signal we are watching for.
 
 ### Verifying downloads
 
@@ -176,11 +206,19 @@ curl https://cli.nexus.xyz | sh && nexus --version
 
 #### Signing setup (maintainers)
 
-Configure these repository **secrets** before the first signed release. The
-minisign and Homebrew publish jobs fail closed — if their secret is missing they
-error rather than quietly shipping a release without the signatures/formula it
-promises. (dist's macOS/Windows code-signing steps are skipped when their
-secrets are absent; the artifacts are still produced, just unsigned.)
+Configure these repository **secrets** before the first signed release. Every
+signing-related job fails closed — if a secret is missing the job errors rather
+than quietly shipping a release without the signature/formula it promises.
+
+> Do not assume a code-signing step *skips* when its credential is absent.
+> `${{ secrets.X }}` expands a missing secret to the empty string, so dist sees
+> a credential that is present-and-empty and tries to use it: the macOS path
+> imports an empty certificate and fails the build. The Windows path behaved
+> that way too, and did not always — it silently skipped until 2026-07-17, then
+> began answering `invalid_grant` on every run with nothing in this repo having
+> changed, which looked exactly like a certificate expiring and was misdiagnosed
+> as one for a month (ENG-9357). Treat "absent credential" as "broken build",
+> and do not trust that a signing step is a no-op just because it was yesterday.
 
 | Secret | Used for |
 |---|---|
@@ -189,8 +227,7 @@ secrets are absent; the artifacts are still produced, just unsigned.)
 | `MINISIGN_SECRET_KEY` | minisign secret key contents (per-artifact `.minisig`) |
 | `MINISIGN_PASSWORD` | password for the minisign secret key |
 | `HOMEBREW_TAP_TOKEN` | push access to the `nexus-xyz/homebrew-tap` repo |
-| `CODESIGN_CERTIFICATE`, `CODESIGN_CERTIFICATE_PASSWORD`, `CODESIGN_IDENTITY` | Apple Developer ID code-signing (macOS) |
-| `SSLDOTCOM_USERNAME`, `SSLDOTCOM_PASSWORD`, `SSLDOTCOM_CREDENTIAL_ID`, `SSLDOTCOM_TOTP_SECRET` | SSL.com eSigner Windows Authenticode signing |
+| `CODESIGN_CERTIFICATE`, `CODESIGN_CERTIFICATE_PASSWORD`, `CODESIGN_IDENTITY` | Apple Developer ID code-signing (macOS) — only needed if `macos-sign` is turned on; see below |
 
 Set the `MINISIGN_PUBLIC_KEY` repository **variable** (public keys are not
 secret) to the published public key — the same one in "Verifying downloads"
@@ -213,6 +250,14 @@ minisign -G -p minisign.pub -s minisign.key
 > `macos-sign = true` in `dist-workspace.toml`. macOS **notarization** is a
 > separate, further step (dist signs but does not notarize, and a loose CLI
 > binary cannot be stapled), so it only matters behind a `.pkg`/`.dmg` installer.
+
+> **Windows Authenticode signing is off** — deliberately, and there is no secret
+> to configure for it. We never held an SSL.com eSigner credential, so enabling
+> it means buying a certificate, not restoring one. The Windows artifacts still
+> build and ship, with their `.minisig` and provenance attestation; what users
+> see instead is
+> [a SmartScreen prompt](#windows-the-binaries-are-unsigned). Full rationale and
+> re-enable steps are in [`dist-workspace.toml`](./dist-workspace.toml).
 
 ## Usage
 
