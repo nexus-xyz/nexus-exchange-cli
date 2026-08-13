@@ -762,3 +762,228 @@ fn a_pre_namespacing_config_still_authenticates() {
         out.stderr
     );
 }
+
+// ───────────────── custom networks (ENG-9827) ─────────────────
+//
+// End to end, through the real binary and a real config file, because the whole
+// point of a custom network is what the *file* can express — a unit test that
+// builds the struct in memory would skip the deserialization these entries have
+// to survive. `example.com` / `example.invalid` are RFC 2606 reserved: no
+// deployment of ours is named here, which is the reason the variant exists.
+
+/// A config declaring one play-funds stage with a faucet, plus its credentials.
+const DEV_STAGE: &str = r#"{
+    "custom_networks": {
+        "dev": {
+            "base_url": "http://127.0.0.1:1",
+            "funds": "play",
+            "faucet": true
+        }
+    },
+    "networks": {
+        "dev": { "api_key": "nx_dev", "api_secret": "shh" }
+    }
+}"#;
+
+/// The headline: a stage the CLI ships no knowledge of is selectable by label,
+/// and authenticates with the credentials stored under that label.
+#[test]
+fn a_declared_stage_is_selectable_and_authenticates() {
+    let out = run_with_config(DEV_STAGE, "custom-select", &["--network", "dev", "balance"]);
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "the stage's own key must authenticate it; got: {}",
+        out.stderr
+    );
+    // It is play funds, so nothing real-funds fires.
+    assert!(
+        !out.stderr.contains("REAL FUNDS"),
+        "a play-funds stage must stay quiet; got: {}",
+        out.stderr
+    );
+}
+
+/// The credential-namespace guarantee, from the outside: a key stored for one
+/// label is not offered to another, even when both point at the same host. This
+/// is the collision the ticket is about — with the URL as the key, these two
+/// would share a slot, and they have different funds semantics.
+#[test]
+fn two_stages_on_one_host_do_not_share_credentials() {
+    let config = r#"{
+        "custom_networks": {
+            "one": { "base_url": "http://127.0.0.1:1", "funds": "play" },
+            "two": { "base_url": "http://127.0.0.1:1", "funds": "play" }
+        },
+        "networks": {
+            "one": { "api_key": "nx_one", "api_secret": "shh" }
+        }
+    }"#;
+
+    let out = run_with_config(config, "ns-one", &["--network", "one", "balance"]);
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "`one`'s key must authenticate `one`; got: {}",
+        out.stderr
+    );
+
+    let out = run_with_config(config, "ns-two", &["--network", "two", "balance"]);
+    assert!(
+        out.stderr.contains("no credentials are configured"),
+        "`one`'s key must not authenticate `two`, same host or not; got: {}",
+        out.stderr
+    );
+}
+
+/// A stage that declares real funds gets the full real-funds treatment under its
+/// own name — the banner and the first-trade acknowledgement — even though the
+/// CLI has never heard of it. This is what `is_mainnet()` could not express.
+#[test]
+fn a_real_funds_stage_is_guarded_like_mainnet() {
+    let config = r#"{
+        "custom_networks": {
+            "dev": { "base_url": "http://127.0.0.1:1", "funds": "real" }
+        }
+    }"#;
+
+    let out = run_with_config(config, "custom-real", &["--network", "dev", "markets"]);
+    assert!(
+        out.stderr.contains("REAL FUNDS") && out.stderr.contains("dev"),
+        "a real-funds stage must announce itself under its own label; got: {}",
+        out.stderr
+    );
+
+    let out = run_with_config(
+        config,
+        "custom-real-trade",
+        &[
+            "--network",
+            "dev",
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "0.01",
+        ],
+    );
+    assert_ne!(out.code, Some(0));
+    assert!(
+        out.stderr.contains("--yes"),
+        "the first trade there must be gated; got: {}",
+        out.stderr
+    );
+}
+
+/// Acknowledging mainnet must not disarm the prompt for a private real-funds
+/// stage. The acknowledgement is keyed per network precisely so this cannot
+/// happen, and a single flag is what made it possible.
+#[test]
+fn a_mainnet_acknowledgement_does_not_cover_a_custom_stage() {
+    let config = r#"{
+        "mainnet_acknowledged": true,
+        "custom_networks": {
+            "dev": { "base_url": "http://127.0.0.1:1", "funds": "real" }
+        }
+    }"#;
+
+    let out = run_with_config(
+        config,
+        "ack-not-shared",
+        &[
+            "--network",
+            "dev",
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "0.01",
+        ],
+    );
+    assert_ne!(out.code, Some(0), "the stage's own prompt must still fire");
+    assert!(
+        out.stderr.contains("--yes"),
+        "mainnet's acknowledgement must not cover `dev`; got: {}",
+        out.stderr
+    );
+}
+
+/// A stage that declares nothing about its funds refuses to mint them, rather
+/// than assuming play funds. `Unknown` fails closed — that is the whole reason
+/// the classification is tri-state.
+#[test]
+fn an_undeclared_funds_stage_refuses_the_faucet() {
+    let config = r#"{
+        "custom_networks": {
+            "dev": { "base_url": "http://127.0.0.1:1", "faucet": true }
+        }
+    }"#;
+
+    let out = run_with_config(
+        config,
+        "custom-unknown",
+        &["--network", "dev", "account", "credit"],
+    );
+    assert_ne!(out.code, Some(0), "undeclared funds must refuse the faucet");
+    assert!(
+        out.stderr
+            .contains("does not declare whether it moves real ones"),
+        "the refusal must say why; got: {}",
+        out.stderr
+    );
+    // ...and it says so before the invocation runs, too.
+    assert!(
+        out.stderr.contains("does not declare \"funds\""),
+        "the missing declaration must be reported; got: {}",
+        out.stderr
+    );
+}
+
+/// Selecting a stage nothing declares stops the invocation and names what *is*
+/// declared. A silent fallback here would send a request somewhere the user did
+/// not ask for.
+#[test]
+fn an_undeclared_label_stops_the_invocation() {
+    let out = run_with_config(
+        DEV_STAGE,
+        "custom-missing",
+        &["--network", "other", "markets"],
+    );
+    assert_ne!(out.code, Some(0));
+    assert!(
+        out.stderr.contains(r#"declared: "dev""#),
+        "the error should list what is declared; got: {}",
+        out.stderr
+    );
+}
+
+/// A label that could address another target's stored credentials never reaches
+/// the credential store: it is refused by the flag parser, as a usage error.
+#[test]
+fn an_unsafe_label_is_refused_as_a_usage_error() {
+    for bad in ["../mainnet", "one/two", "custom"] {
+        let out = run_with_config(DEV_STAGE, "custom-unsafe", &["--network", bad, "markets"]);
+        assert_eq!(
+            out.code,
+            Some(2),
+            "--network {bad:?} should be a usage error; got: {}",
+            out.stderr
+        );
+    }
+}

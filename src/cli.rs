@@ -1,9 +1,11 @@
 //! Command-line argument parsing and config/credential resolution.
 
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use nexus_exchange::rest::{MAX_FILLS_LIMIT, MAX_PORTFOLIO_HISTORY_LIMIT};
 use nexus_exchange::types::{OrderType, PortfolioWindow, Side, TimeInForce};
-use nexus_exchange::{Config, Network};
+use nexus_exchange::{Config, CustomNetwork, Funds, Network, SigningDomain};
+use serde::{Deserialize, Serialize};
 
 use crate::credentials::FileConfig;
 
@@ -40,16 +42,28 @@ const LONG_VERSION: &str = concat!(
 #[derive(Debug, Parser)]
 #[command(name = "nexus", version = LONG_VERSION, about, long_about = None)]
 pub struct Cli {
-    /// Which network to target (default: testnet, or the `nexus setup` value).
+    /// Which network to target: `mainnet`, `testnet`, `local`, or the label of a
+    /// custom network declared under `custom_networks` in the config file
+    /// (default: testnet, or the `nexus setup` value).
     ///
     /// `stable` and `beta` named release channels, not networks, and were
     /// retired in `nexus-exchange` 0.8.0. `stable` pointed at a **play-funds**
     /// host, so its replacement is `testnet` — *not* `mainnet`, which is real
     /// funds and is not reachable in this release.
-    #[arg(long, value_enum, global = true, env = "NEXUS_NETWORK")]
+    #[arg(long, global = true, env = "NEXUS_NETWORK", value_parser = NetworkArg::from_flag)]
     pub network: Option<NetworkArg>,
 
     /// Override the API base URL (takes precedence over `--network`).
+    ///
+    /// Retained for compatibility, and now sugar for a custom network whose
+    /// funds are **undeclared**. It redirects the request without changing which
+    /// network's credentials are presented, so commands that move or mint funds
+    /// are refused rather than inheriting the named network's safety flags — a
+    /// bare URL says nothing about what its host moves.
+    ///
+    /// Declare the stage under `custom_networks` and select it with `--network
+    /// <label>` to get a validated URL, its own credential namespace, and a
+    /// funds classification.
     #[arg(long, global = true, env = "NEXUS_BASE_URL")]
     pub base_url: Option<String>,
 
@@ -116,7 +130,21 @@ impl std::fmt::Debug for Credentials {
 /// values named deployment channels, which is how a play-funds host came to be
 /// labelled "production" and how the SDK's real-funds guard ended up pointed at
 /// the wrong network (ENG-6452).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+///
+/// # Why this is not a `ValueEnum` any more
+///
+/// [`Custom`](Self::Custom) carries a caller-chosen label, and clap's derived
+/// `ValueEnum` can only produce unit variants. The cost is that `--help` no
+/// longer enumerates the values, so the help text and every rejection message
+/// spell them out by hand instead — see [`from_flag`](Self::from_flag).
+///
+/// # A label is only a *name*; whether it names anything is a separate question
+///
+/// A non-built-in value is syntactically indistinguishable from a typo
+/// (`mainet`), so this type does not try to tell them apart. It carries the
+/// label; [`Cli::target`] decides whether the config file declares it, and says
+/// so when it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkArg {
     /// **Real funds.** Not reachable in this release: the SDK refuses every
     /// request locally rather than guess a host or sign an unverifiable path.
@@ -125,6 +153,10 @@ pub enum NetworkArg {
     Testnet,
     /// A locally run indexer. Play funds, and never a fallback.
     Local,
+    /// A stage declared under `custom_networks` in the config file, named by its
+    /// label (ENG-9827). The label — not the URL — is the credential namespace
+    /// key, so two stages on the same host still keep separate credentials.
+    Custom(String),
 }
 
 /// Retired release-channel names, mapped to the network each actually pointed
@@ -137,25 +169,16 @@ pub enum NetworkArg {
 /// exactly backwards and is the mislabel this axis exists to correct.
 const RETIRED_NETWORKS: &[(&str, &str)] = &[("stable", "testnet"), ("beta", "testnet")];
 
-/// The CLI's name for an SDK network, for diagnostics.
-///
-/// The wildcard arm is not defensive padding: [`Network`] is `#[non_exhaustive]`,
-/// so a downstream crate *cannot* match it exhaustively, and a variant added
-/// upstream would otherwise have to be misreported as one of the three names the
-/// CLI knows. Falling back to the SDK's own `Debug` says something true about a
-/// network this build has no vocabulary for.
-fn network_name(n: Network) -> String {
-    match n {
-        Network::Mainnet => "mainnet".to_string(),
-        Network::Testnet => "testnet".to_string(),
-        Network::Local => "local".to_string(),
-        other => format!("{other:?}").to_ascii_lowercase(),
-    }
-}
+/// The vocabulary `--network` accepts, spelled once so the flag's help, the
+/// parse error and the stale-config warning cannot drift into three different
+/// answers. Needed by hand because [`NetworkArg`] is no longer a `ValueEnum`
+/// (see its docs).
+const NETWORK_VALUES: &str = "mainnet, testnet, local, or the label of a network declared under \
+     \"custom_networks\" in the config file";
 
-/// The diagnostic for a config-file `network` this build cannot parse, or `None`
-/// when there is nothing to report. Split out of [`Cli::config`] so the text —
-/// the part a user actually reads — is testable without capturing stderr.
+/// The diagnostic for a config-file `network` this build cannot resolve, or
+/// `None` when there is nothing to report. Split out of [`Cli::target`] so the
+/// text — the part a user actually reads — is testable without capturing stderr.
 ///
 /// `landing` is where the invocation really ends up, read from the *resolved*
 /// default config rather than restated from [`RETIRED_NETWORKS`]. Those are two
@@ -167,27 +190,28 @@ fn network_name(n: Network) -> String {
 /// A blank value reports nothing. `nexus setup` normalizes an empty answer to
 /// "no preference", and a hand-edited `"network": ""` means the same thing — it
 /// selects nothing, so there is nothing stale to fix.
-fn stale_network_warning(name: &str, landing: Option<&str>) -> Option<String> {
+///
+/// A label that *is* declared never reaches here; an undeclared one takes the
+/// "not a known network" branch, which is the honest reading — the file names a
+/// stage it does not describe.
+fn stale_network_warning(name: &str, landing: &str) -> Option<String> {
     if name.trim().is_empty() {
         return None;
     }
     // Every interpolation of `name` uses `{name:?}`, never `{name}`: the value
     // comes from a file and is echoed to a terminal, and `Debug` escapes control
     // bytes, so a config cannot smuggle ESC sequences into this line.
-    let landing = match landing {
-        Some(network) => format!("the default network ({network})"),
-        None => "the default network".to_string(),
-    };
     Some(match NetworkArg::retired_replacement(name) {
         Some(replacement) => format!(
             "warning: config-file network {name:?} was a release channel, not a network, and no \
-             longer exists; it named a play-funds host, which is now `{replacement}`. Using \
-             {landing}. Run `nexus setup`, or set \"network\": \"{replacement}\" in the config."
+             longer exists; it named a play-funds host, which is now `{replacement}`. Using the \
+             default network ({landing}). Run `nexus setup`, or set \"network\": \
+             \"{replacement}\" in the config."
         ),
         None => format!(
-            "warning: config-file network {name:?} is not a known network (valid: mainnet, \
-             testnet, local); using {landing}. Run `nexus setup`, or fix \"network\" in the \
-             config."
+            "warning: config-file network {name:?} is not a known network (valid: \
+             {NETWORK_VALUES}); using the default network ({landing}). Run `nexus setup`, or fix \
+             \"network\" in the config."
         ),
     })
 }
@@ -203,34 +227,77 @@ fn stale_network_warning(name: &str, landing: Option<&str>) -> Option<String> {
 /// is the failure mode ENG-6452 was.
 pub(crate) const DEFAULT_NETWORK: NetworkArg = NetworkArg::Testnet;
 
+/// Placeholder base URL used to run a label past the SDK's validator without
+/// describing a real deployment. RFC 2606 reserves `.invalid`, so it can never
+/// resolve, and the target built around it is dropped immediately — see
+/// [`validate_label`].
+const LABEL_PROBE_URL: &str = "https://example.invalid";
+
+/// Validate a custom-network label, returning it trimmed.
+///
+/// The rules — the character set, the length cap, the refusal of `.`/`..` and of
+/// the built-in network names — live in `nexus-exchange`, because that is where
+/// [`Network::label`] is documented as safe to key per-network credential
+/// storage on. So this does not transcribe them: it hands the label to the real
+/// constructor, against a placeholder URL, and keeps only the verdict.
+///
+/// Transcribing an upstream rule with nothing to notice when upstream moves is
+/// what pointed the real-funds guard at the wrong network to begin with
+/// (ENG-6452), and here the cost of drifting would be a label the CLI accepts as
+/// a credential key that the SDK would have refused.
+fn validate_label(label: &str) -> Result<String, String> {
+    CustomNetwork::new(label, LABEL_PROBE_URL, Funds::Unknown)
+        .map(|probe| probe.label().to_string())
+        .map_err(|e| e.to_string())
+}
+
 impl NetworkArg {
-    /// The canonical lowercase name, used as the config file's section key and
-    /// in diagnostics. Exhaustive, so a new network must choose its own name
-    /// rather than inherit a wrong one.
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The canonical name, used as the config file's section key and in
+    /// diagnostics. For a custom target this is the caller-supplied label, which
+    /// [`validate_label`] has already vetted as a storage key.
+    pub(crate) fn name(&self) -> &str {
         match self {
             Self::Mainnet => "mainnet",
             Self::Testnet => "testnet",
             Self::Local => "local",
+            Self::Custom(label) => label,
         }
     }
 
-    /// Whether this network moves real money — the one bit every guardrail keys
-    /// off. Asserted against the SDK's own `is_mainnet` by
-    /// `real_funds_matches_the_sdk`, rather than assumed to stay in sync.
-    pub(crate) fn is_real_funds(self) -> bool {
-        matches!(self, Self::Mainnet)
-    }
-
-    /// Parse a network name from the config file. Returns `None` for unknown
-    /// values so a stale config can't crash the CLI.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
+    /// Parse a **built-in** network name. Returns `None` for anything else,
+    /// including a custom label — resolving one needs the config file, so it
+    /// cannot happen here.
+    pub(crate) fn builtin(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "mainnet" => Some(Self::Mainnet),
             "testnet" => Some(Self::Testnet),
             "local" => Some(Self::Local),
             _ => None,
         }
+    }
+
+    /// clap's value parser for `--network`/`NEXUS_NETWORK`.
+    ///
+    /// Rejects a retired release-channel name here, at parse time, so no
+    /// invocation can keep using a name whose meaning was wrong — and rejects a
+    /// label that could not be a credential key, so a bad one fails before it is
+    /// ever used to select anything. What is *not* checked here is whether the
+    /// label names a declared stage: that needs the config file, which the parser
+    /// has no access to, and [`Cli::target`] reports it.
+    fn from_flag(s: &str) -> Result<Self, String> {
+        if let Some(builtin) = Self::builtin(s) {
+            return Ok(builtin);
+        }
+        if let Some(replacement) = Self::retired_replacement(s) {
+            return Err(format!(
+                "`{s}` was a release channel, not a network, and no longer exists; it named a \
+                 play-funds host, which is now `{replacement}`. Valid networks: {NETWORK_VALUES}"
+            ));
+        }
+        let label = validate_label(s).map_err(|why| {
+            format!("`{s}` is not a usable network. Valid networks: {NETWORK_VALUES}. {why}")
+        })?;
+        Ok(Self::Custom(label))
     }
 
     /// The current name for a retired release-channel value, if `s` is one.
@@ -336,80 +403,591 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.8.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.9.0";
 
-impl From<NetworkArg> for Network {
-    fn from(n: NetworkArg) -> Self {
-        // Exhaustive over `NetworkArg` — the CLI's own enum — so adding a value
-        // there without mapping it is a compile error. It is deliberately NOT a
-        // claim about the SDK's axis growing: see
-        // `NETWORK_AXIS_VERIFIED_AGAINST`, which is what notices that.
-        match n {
-            NetworkArg::Mainnet => Network::Mainnet,
-            NetworkArg::Testnet => Network::Testnet,
-            NetworkArg::Local => Network::Local,
+impl NetworkArg {
+    /// The SDK network for a built-in variant, or `None` for a custom label,
+    /// whose bundle lives in the config file (see
+    /// [`CustomNetworkConfig::to_network`]).
+    ///
+    /// Exhaustive over `NetworkArg` — the CLI's own enum — so adding a value
+    /// there without mapping it is a compile error. It is deliberately NOT a
+    /// claim about the SDK's axis growing: see [`NETWORK_AXIS_VERIFIED_AGAINST`],
+    /// which is what notices that.
+    pub(crate) fn builtin_network(&self) -> Option<Network> {
+        match self {
+            NetworkArg::Mainnet => Some(Network::Mainnet),
+            NetworkArg::Testnet => Some(Network::Testnet),
+            NetworkArg::Local => Some(Network::Local),
+            NetworkArg::Custom(_) => None,
         }
     }
 }
 
-impl Cli {
-    /// Resolve the SDK [`Config`], layering: `--base-url` > `--network`/env >
-    /// config-file `base_url` > config-file `network` > the SDK default
-    /// (testnet — play funds; the default must never be a real-funds network).
-    /// Every resolved config carries the CLI's [`USER_AGENT`].
-    pub fn config(&self, file: &FileConfig) -> Config {
-        let config = if let Some(url) = &self.base_url {
-            Config::with_base_url(url.clone())
-        } else if let Some(net) = self.network {
-            Config::new(net.into())
-        } else if let Some(url) = &file.base_url {
-            Config::with_base_url(url.clone())
-        } else if let Some(net) = file.network.as_deref().and_then(NetworkArg::parse) {
-            Config::new(net.into())
+/// A stage declared under `custom_networks` in the config file: the CLI's
+/// transcription of [`CustomNetwork`], which is the whole safety bundle rather
+/// than an address (ENG-9827).
+///
+/// # Every field is optional *here*, and required *there*
+///
+/// Not because any of them may be omitted, but because a malformed entry must
+/// not stop the config file from parsing: the file also holds credentials, and
+/// failing the whole load would break every command over a mistake in one stage
+/// nobody selected. Each field is therefore checked in [`to_network`], when the
+/// stage this describes is actually the one being used.
+///
+/// [`to_network`]: Self::to_network
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomNetworkConfig {
+    /// REST base URL. Required; validated by the SDK (scheme, host, no
+    /// userinfo/query/fragment).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Base for the direct `/api/v1` surface, when the deployment splits it from
+    /// the REST base. Defaults to `base_url`, which is where every deployment
+    /// that exists today mounts it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_base_url: Option<String>,
+    /// `"real"`, `"play"` or `"unknown"`. Required, with no default: see
+    /// [`parse_funds`] for why neither boolean answer is safe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funds: Option<String>,
+    /// WebSocket origin (`ws://` or `wss://`). Absent until declared: it is a
+    /// separate host from the REST base and is never derived from it, so `nexus
+    /// ws` refuses rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_url: Option<String>,
+    /// Whether the synthetic faucet exists here. Assumed **absent** until
+    /// declared, so `account credit` cannot route to a faucet that is not there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faucet: Option<bool>,
+    /// EIP-712 domain chain id, read from this host's `GET /metadata`. Absent
+    /// until declared — a signature made under the wrong domain may be *valid on
+    /// a different network*, so it is never guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
+}
+
+/// Read a config-file `funds` value, together with the diagnostic for one that
+/// cannot be read.
+///
+/// Fails **closed**: an absent or unrecognized value becomes [`Funds::Unknown`],
+/// which refuses the real-funds-guarded commands rather than assuming play
+/// funds. Both spellings of the mistake land there — `"funds": "reel"` is as
+/// likely a typo for `real` as for `play`, and only one of those guesses costs
+/// money.
+///
+/// A warning rather than a hard error, for the same reason
+/// [`stale_network_warning`] is one: reads against the stage still work, so
+/// refusing the whole invocation would be a bigger hammer than the mistake
+/// warrants. What it must not do is stay silent — an undeclared classification
+/// that quietly behaved like play funds is precisely the bug ENG-9823 exists to
+/// remove.
+///
+/// Trimmed and compared **case-insensitively**, matching how `--network` and
+/// `nexus setup` read a network name on the same axis: `"Play"` is the
+/// classification `play`, spelled by someone whose editor capitalized it.
+/// Reading it as unclassified would be a fail-closed answer to a question the
+/// file answered plainly. What case-folding does *not* do is widen what counts
+/// as an answer — `"reel"` and `"REEL"` alike land in [`Funds::Unknown`].
+fn parse_funds(label: &str, declared: Option<&str>) -> (Funds, Option<String>) {
+    // `{declared:?}`/`{label:?}` throughout: both come from a file and are
+    // echoed to a terminal, and `Debug` escapes control bytes.
+    let declared = declared.map(str::trim);
+    let folded = declared.map(str::to_ascii_lowercase);
+    match folded.as_deref() {
+        Some("real") => (Funds::Real, None),
+        Some("play") => (Funds::Play, None),
+        Some("unknown") => (Funds::Unknown, None),
+        None | Some("") => (
+            Funds::Unknown,
+            Some(format!(
+                "warning: custom network {label:?} does not declare \"funds\"; treating it as \
+                 unknown, so commands that move or mint funds are refused. Set \"funds\" to \
+                 \"real\", \"play\" or \"unknown\" in the config."
+            )),
+        ),
+        // Reported as written, not as folded: the user is looking for the value
+        // they typed.
+        Some(_) => {
+            let other = declared.unwrap_or_default();
+            (
+                Funds::Unknown,
+                Some(format!(
+                    "warning: custom network {label:?} declares \"funds\": {other:?}, which is \
+                     not \"real\", \"play\" or \"unknown\"; treating it as unknown, so commands \
+                     that move or mint funds are refused."
+                )),
+            )
+        }
+    }
+}
+
+impl CustomNetworkConfig {
+    /// Build the SDK target this describes, with the diagnostic for a `funds`
+    /// value that could not be read.
+    ///
+    /// Everything the SDK validates is left to the SDK: the label as a credential
+    /// key, and each URL's scheme, host, userinfo, query and fragment. This adds
+    /// only what the SDK cannot see — that the entry declared a base URL at all.
+    ///
+    /// Note what is deliberately absent: no hostname is inspected, defaulted or
+    /// interpolated anywhere on this path. The URL is the caller's, verbatim.
+    pub fn to_network(&self, label: &str) -> Result<(Network, Option<String>)> {
+        let base_url = self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "custom network {label:?} declares no \"base_url\"; a custom network is a \
+                     caller-supplied deployment, so there is no host to fall back to"
+                )
+            })?;
+
+        let (funds, warning) = parse_funds(label, self.funds.as_deref());
+        let mut custom = CustomNetwork::new(label, base_url, funds)
+            .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
+        if let Some(direct) = self.direct_base_url.as_deref() {
+            custom = custom
+                .with_direct_base_url(direct)
+                .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
+        }
+        if let Some(ws) = self.ws_url.as_deref() {
+            custom = custom
+                .with_ws_url(ws)
+                .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
+        }
+        // Absent means absent, not false-by-omission — but the SDK's default is
+        // already "no faucet", so declaring it explicitly here changes nothing
+        // and keeps the mapping one-to-one with the file.
+        custom = custom.with_faucet(self.faucet.unwrap_or(false));
+        if let Some(chain_id) = self.chain_id {
+            custom = custom.with_signing_domain(SigningDomain::new(chain_id));
+        }
+        Ok((Network::Custom(custom), warning))
+    }
+}
+
+/// Where one invocation is pointed, and what that place moves.
+///
+/// Resolved once, in [`Cli::target`], and then read by everything that needs to
+/// know: the SDK [`Config`], the credential namespace, and every guardrail. One
+/// resolution rather than three means the network the request goes to, the key it
+/// presents, and the guard that vets it cannot disagree — they did not use to be
+/// derived from the same place, and `--base-url` is exactly where they diverged.
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// The **declared** target: a built-in network, or a stage from
+    /// `custom_networks`. Not necessarily where the request goes — see
+    /// [`base_url_override`](Self::base_url_override).
+    network: Network,
+    /// A `--base-url`/`NEXUS_BASE_URL`/config-file `base_url` redirect, if one is
+    /// in effect.
+    base_url_override: Option<String>,
+}
+
+impl Target {
+    /// The declared target.
+    pub fn network(&self) -> &Network {
+        &self.network
+    }
+
+    /// The key this invocation's stored credentials are namespaced under.
+    ///
+    /// Deliberately **not** affected by `--base-url`. A base-URL override
+    /// changes where the request goes, not who you are — pointing at a proxy, a
+    /// tunnel or a staging host in front of a network should still present that
+    /// network's key, and an override carries no label to namespace by anyway.
+    /// So the namespace is always well-defined, and `--base-url` callers keep the
+    /// credentials they had before namespacing existed.
+    ///
+    /// For a custom stage this is its **label**, not its URL, which is the point:
+    /// two stages sharing a host still get separate credential slots, and one
+    /// stage keeps its slot across a host move.
+    pub fn namespace(&self) -> &str {
+        self.network.label()
+    }
+
+    /// The base-URL override in effect, if any.
+    pub fn base_url_override(&self) -> Option<&str> {
+        self.base_url_override.as_deref()
+    }
+
+    /// What the **destination** moves.
+    ///
+    /// `Unknown` whenever a base-URL override is in effect, matching what the SDK
+    /// reports for the same config. Answering with the named network's funds here
+    /// would be the exact lie the bundle exists to stop: an override changes the
+    /// destination, and it is the destination whose funds are at stake. A bare
+    /// URL says nothing about what its host moves, so the honest answer is that
+    /// nobody declared it — and `Unknown` fails closed.
+    pub fn funds(&self) -> Funds {
+        match self.base_url_override {
+            Some(_) => Funds::Unknown,
+            None => self.network.funds(),
+        }
+    }
+
+    /// What the **named** target moves, ignoring any override. This is the
+    /// question to ask about the credentials, since they are namespaced by the
+    /// named target rather than by the destination.
+    pub fn credential_funds(&self) -> Funds {
+        self.network.funds()
+    }
+
+    /// Whether anything here touches real money — either the destination is a
+    /// declared real-funds target, or the key about to be presented belongs to
+    /// one.
+    ///
+    /// The union is deliberate: an override that redirects a *real-funds
+    /// credential* somewhere unclassified is not made safe by the destination
+    /// being unclassified, and neither half alone would have caught both.
+    pub fn touches_real_funds(&self) -> bool {
+        matches!(self.funds(), Funds::Real) || matches!(self.credential_funds(), Funds::Real)
+    }
+
+    /// Whether the synthetic faucet exists here. Always `false` under an
+    /// override: the flag belongs to the declared target, and the request would
+    /// go somewhere else.
+    pub fn has_faucet(&self) -> bool {
+        self.base_url_override.is_none() && self.network.has_faucet()
+    }
+
+    /// The EIP-712 domain chain id to sign an agent registration under, or the
+    /// reason there is none to sign under.
+    ///
+    /// A declared `chain_id` wins. Failing that, a **built-in** network falls
+    /// back to [`DEFAULT_CHAIN_ID`] — the SDK publishes no `chain_id` for them,
+    /// so the constant is the only answer there is and has always been the one
+    /// used — while a **custom** stage that declares none is refused.
+    ///
+    /// The asymmetry is the point. A custom target is the first place where "this
+    /// deployment is on a different chain" is expressible, so it is also the first
+    /// place where the constant is a *guess* rather than the only available
+    /// answer, and `393` is a real chain: signing under it would hand back a
+    /// signature that is valid on the exchange rather than one that fails. That is
+    /// the failure mode [`Network::signing_domain`] refuses to guess at one level
+    /// down, and substituting the constant here would put it back. `--chain-id`
+    /// is the escape hatch, and the error says so.
+    ///
+    /// A base-URL override does **not** discard the declared domain, for the same
+    /// reason it does not change the credential [`namespace`](Self::namespace): a
+    /// registration is signed for the target it names, and a tunnel or proxy in
+    /// front of that target does not move it to another chain. Discarding it would
+    /// silently sign a declared stage's registration under `393` the moment a
+    /// `--base-url` was added — a *wrong signature* rather than a failed request,
+    /// which is the one direction this must not fail in.
+    pub fn signing_chain_id(&self) -> Result<u64> {
+        if let Some(chain_id) = self
+            .network
+            .signing_domain()
+            .and_then(|domain| domain.chain_id)
+        {
+            return Ok(chain_id);
+        }
+        if let Network::Custom(_) = &self.network {
+            let label = self.network.label();
+            bail!(
+                "custom network {label:?} declares no \"chain_id\", so there is no EIP-712 \
+                 domain to sign this registration under. Read it from that deployment's \
+                 `GET /metadata` and set \"chain_id\" on its \"custom_networks\" entry, or pass \
+                 `--chain-id`. It is not defaulted to {DEFAULT_CHAIN_ID} (the exchange's own \
+                 chain) because a signature made under the wrong domain may be valid on a \
+                 different network."
+            );
+        }
+        Ok(DEFAULT_CHAIN_ID)
+    }
+}
+
+/// EIP-712 domain chain id used when a **built-in** network is selected — the
+/// exchange's own chain, and the value `agents register` has always defaulted to.
+///
+/// Kept as a fallback rather than a refusal because every built-in network
+/// reaches it: the SDK deliberately publishes no `chain_id` for them, so
+/// refusing here would break `agents register` on testnet. It is *not* extended
+/// to a custom stage, which can say better and is refused when it does not — see
+/// [`Target::signing_chain_id`].
+pub(crate) const DEFAULT_CHAIN_ID: u64 = 393;
+
+/// Whether `name` selects a network against `file`: a built-in name, or a label
+/// the file declares under `custom_networks`. `None` for anything else — a
+/// retired channel, a typo, or a label with no declaration.
+///
+/// The declaration check is what makes a label different from a typo. `mainet`
+/// and `dev` are the same shape, and only the file can say which of them names
+/// something.
+pub(crate) fn selectable_network(name: &str, file: &FileConfig) -> Option<NetworkArg> {
+    let name = name.trim();
+    if let Some(builtin) = NetworkArg::builtin(name) {
+        return Some(builtin);
+    }
+    // Declared *and* usable as a credential key. A declaration under a label the
+    // SDK would refuse is not a network this build can select, so it must not
+    // become one here either — `Cli::target` reports it rather than silently
+    // resolving it.
+    let label = validate_label(name).ok()?;
+    file.custom_networks
+        .contains_key(&label)
+        .then_some(NetworkArg::Custom(label))
+}
+
+/// Which network a config file names, as this build resolves it.
+///
+/// Shared by [`Cli::target`] and the legacy-credential migration so the two
+/// cannot disagree about which network a file belongs to; they answer different
+/// questions about the same string, and a file whose credentials migrate to one
+/// network while its requests go to another is the failure that would follow.
+pub(crate) fn declared_network(file: &FileConfig) -> Option<NetworkArg> {
+    selectable_network(file.network.as_deref()?, file)
+}
+
+/// The `custom_networks` key that names `name`, compared **case-insensitively**
+/// and after trimming.
+///
+/// Case-insensitively because that is how the SDK compares a label against the
+/// names it reserves (`eq_ignore_ascii_case`, see [`validate_label`]), and the
+/// two checks have to agree on what "claims this name" means. A case-sensitive
+/// lookup here leaves a gap between them that nothing reports: an entry keyed
+/// `"Mainnet"` is refused by the SDK — so nothing can ever select it, and the
+/// SDK never sees it — while a `contains_key("mainnet")` finds nothing, so the
+/// declaration is discarded in the silence this diagnostic exists to break.
+///
+/// Trimmed on both sides because a key is file-supplied text: `" dev"` and
+/// `"dev"` are the same stage as far as anyone reading the file is concerned,
+/// and [`selectable_network`] already trims the name it is asked about.
+fn declared_key<'a>(name: &str, file: &'a FileConfig) -> Option<&'a str> {
+    let name = name.trim();
+    file.custom_networks
+        .keys()
+        .find(|key| key.trim().eq_ignore_ascii_case(name))
+        .map(String::as_str)
+}
+
+/// The diagnostic for a `custom_networks` entry that claims a built-in
+/// network's name, or `None` when there is nothing to report.
+///
+/// The built-in wins, which is the safe resolution — `mainnet` keeps meaning
+/// mainnet, and the declaration cannot capture its credential slot. But it must
+/// not win *silently*: the user wrote a stage and would otherwise be pointed at
+/// a different host than the one they described, with the entry they can see in
+/// their own config file offering no hint as to why.
+///
+/// The SDK refuses these labels for the same reason, one level down — see
+/// [`validate_label`] — so this reports a declaration that could never have been
+/// selected rather than adding a rule of its own, and matches the way that
+/// refusal compares (see [`declared_key`]).
+fn shadowed_declaration_warning(name: &str, file: &FileConfig) -> Option<String> {
+    let declared = declared_key(name, file)?;
+    Some(format!(
+        "warning: the config file declares a custom network named {declared:?}, which is a \
+         built-in network's own name and is therefore ignored — per-network credentials are \
+         stored under that name, so a stage may not claim it. Using the built-in {name:?}. \
+         Rename the entry under \"custom_networks\" to select it."
+    ))
+}
+
+/// The diagnostic for a config-file `network` that names a stage the file
+/// **declares but cannot select** — because the SDK reserves the label
+/// (`custom`, the one a `--base-url` override carries) or refuses its shape, or
+/// because the entry is keyed under a label that does not match exactly.
+///
+/// Split from [`shadowed_declaration_warning`] because the resolution differs:
+/// there a built-in answers to the name, here nothing does, so the invocation
+/// lands on the default. What they share is the failure being *invisible from
+/// the config file* — and this is the half the generic "not a known network"
+/// text reads worst on, since it tells someone staring at a `custom_networks`
+/// entry named `custom` that no such network is declared.
+///
+/// The reason for a refused label is the SDK's own, not a transcription of its
+/// rules. Its messages quote the label with `Debug`, so they carry no raw
+/// control bytes, and `a_config_supplied_label_cannot_smuggle_control_bytes` is
+/// what notices if that ever stops being true.
+fn unselectable_declaration_warning(
+    name: &str,
+    file: &FileConfig,
+    landing: &str,
+) -> Option<String> {
+    let declared = declared_key(name, file)?;
+    Some(match validate_label(declared) {
+        Err(why) => format!(
+            "warning: the config file declares a custom network named {declared:?}, but that \
+             label cannot be selected: {why}. Using the default network ({landing}). Rename the \
+             entry under \"custom_networks\", and the \"network\" key with it."
+        ),
+        // The label is usable, so the only way it failed to select is that it is
+        // not the same string — `selectable_network` looks the key up exactly,
+        // and this is reached only when that lookup missed.
+        Ok(_) => format!(
+            "warning: config-file network {name:?} does not match the custom network the file \
+             declares, {declared:?} — a label is matched exactly, case included. Using the \
+             default network ({landing}). Make \"network\" and the \"custom_networks\" key agree."
+        ),
+    })
+}
+
+/// What a selected network moves, without building a [`Config`] for it.
+///
+/// For a custom stage this is the declared classification, defaulting closed to
+/// [`Funds::Unknown`] when the declaration is missing or unreadable — the same
+/// answer [`CustomNetworkConfig::to_network`] reaches, arrived at without the
+/// URL validation this caller has no use for.
+pub(crate) fn declared_funds(selected: &NetworkArg, file: &FileConfig) -> Funds {
+    match selected.builtin_network() {
+        Some(builtin) => builtin.funds(),
+        None => file
+            .custom_networks
+            .get(selected.name())
+            .map(|declared| parse_funds(selected.name(), declared.funds.as_deref()).0)
+            .unwrap_or(Funds::Unknown),
+    }
+}
+
+/// Turn a selected [`NetworkArg`] into an SDK network, reporting a `funds` value
+/// that could not be read.
+///
+/// A free function rather than a method: it reads only the selection and the
+/// file, so nothing else about the invocation can influence where it lands.
+fn resolve_selection(selected: &NetworkArg, file: &FileConfig) -> Result<Network> {
+    if let Some(builtin) = selected.builtin_network() {
+        if let Some(warning) = shadowed_declaration_warning(selected.name(), file) {
+            eprintln!("{warning}");
+        }
+        return Ok(builtin);
+    }
+    let (network, warning) = resolve_declaration(selected.name(), file)?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    Ok(network)
+}
+
+/// Build the network a declared label describes, with the diagnostic for a
+/// `funds` value that could not be read. Errors when the label is not declared,
+/// or is declared badly.
+///
+/// Separate from [`resolve_selection`] so that checking whether a stage is
+/// *usable* — which is what `nexus setup` needs, see [`check_selection`] — runs
+/// the same code that resolving it will, rather than a second opinion about the
+/// same entry.
+fn resolve_declaration(label: &str, file: &FileConfig) -> Result<(Network, Option<String>)> {
+    let Some(declared) = file.custom_networks.get(label) else {
+        // `{key:?}` on every declared name: they come from a file and are
+        // echoed to a terminal, and `Debug` escapes control bytes, so a
+        // config cannot smuggle ESC sequences into this list.
+        let mut known: Vec<String> = file
+            .custom_networks
+            .keys()
+            .map(|key| format!("{key:?}"))
+            .collect();
+        known.sort();
+        let declared = if known.is_empty() {
+            "the config file declares none".to_string()
         } else {
-            // Falling through with a *set* config-file network means it did not
-            // parse, whatever the reason: a retired release-channel name, or a
-            // typo like "mainet". Both get a diagnostic — a silent fallback on
-            // the network axis is the failure class this change exists to remove,
-            // and the typo case is the durable one (`stable`/`beta` age out of
-            // configs; misspellings never will).
-            //
-            // Still a fallback rather than a hard error: the default is a
-            // play-funds network, so the request is safe to make — it is the
-            // stale name that needs fixing, not this invocation.
-            let config = Config::default();
-            if let Some(name) = file.network.as_deref() {
-                let landing = config.network().map(network_name);
-                if let Some(warning) = stale_network_warning(name, landing.as_deref()) {
-                    eprintln!("{warning}");
+            format!("declared: {}", known.join(", "))
+        };
+        bail!(
+            "no custom network named {label:?} is declared ({declared}). Add it under \
+             \"custom_networks\" in the config file with a \"base_url\" and a \"funds\" value \
+             of \"real\", \"play\" or \"unknown\"."
+        );
+    };
+    declared.to_network(label)
+}
+
+/// Check that a selection is not merely *declared* but **usable**: that a custom
+/// stage's entry actually builds a network. A built-in always does.
+///
+/// `contains_key` is not the same question. An entry with no `base_url`, or with
+/// one the SDK refuses, parses fine and is selectable — so `nexus setup` would
+/// accept it, write it to `network`, and leave every later command hard-erroring
+/// on a file the user has already been told is saved. Refusing here puts the
+/// failure one prompt away from the fix, which is the reason `setup` validates
+/// the name at all.
+///
+/// Any `funds` diagnostic is dropped: this answers a yes/no question, and its
+/// callers include a filter that must not print. The warning is not lost — it is
+/// emitted when the stage is actually resolved.
+pub(crate) fn check_selection(selected: &NetworkArg, file: &FileConfig) -> Result<()> {
+    if selected.builtin_network().is_some() {
+        return Ok(());
+    }
+    resolve_declaration(selected.name(), file).map(|_| ())
+}
+
+impl Cli {
+    /// Resolve where this invocation is pointed, layering: `--network`/env >
+    /// config-file `network` > the SDK default (testnet — play funds; the default
+    /// must never be a real-funds network). A base-URL override from either
+    /// `--base-url`/env or the config file is recorded on top, redirecting the
+    /// request without changing which network's credentials it presents.
+    ///
+    /// # What errors, and what falls back
+    ///
+    /// A config-file `network` this build cannot **resolve at all** — a retired
+    /// channel name, a typo, a label nothing declares — warns and falls back to
+    /// the default. The default is play funds, so the request is safe to make,
+    /// and it is the stale name that needs fixing rather than this invocation.
+    ///
+    /// Everything else errors. A `--network` typed on this command line is
+    /// honoured or refused, never quietly redirected. And a label that *is*
+    /// declared but declared badly — no base URL, a URL the SDK refuses — errors
+    /// from either source: the stage exists, so falling back would send the
+    /// request to testnet while the user believes they are on their own
+    /// deployment. That is worse than the stale-name case, where nothing was
+    /// described at all.
+    ///
+    /// What it never does is fall back *silently* — that is the failure class
+    /// ENG-6455 removed, and the typo case is the durable one (`stable`/`beta`
+    /// age out of configs; misspellings never will).
+    pub fn target(&self, file: &FileConfig) -> Result<Target> {
+        let network = match &self.network {
+            // Typed on this command line: honour it or fail. Falling back here
+            // would send the request somewhere the user did not ask for.
+            Some(selected) => resolve_selection(selected, file)?,
+            None => match declared_network(file) {
+                Some(selected) => resolve_selection(&selected, file)?,
+                None => {
+                    let fallback = Config::default().network().clone();
+                    if let Some(name) = file.network.as_deref() {
+                        // A stage the file *declares* but cannot select reports
+                        // that first: the generic "not a known network" text is
+                        // read while looking straight at the entry it says is
+                        // not there.
+                        let warning =
+                            unselectable_declaration_warning(name, file, fallback.label())
+                                .or_else(|| stale_network_warning(name, fallback.label()));
+                        if let Some(warning) = warning {
+                            eprintln!("{warning}");
+                        }
+                    }
+                    fallback
                 }
-            }
-            config
+            },
+        };
+        Ok(Target {
+            network,
+            base_url_override: self.base_url.clone().or_else(|| file.base_url.clone()),
+        })
+    }
+
+    /// Resolve the SDK [`Config`] for a [`Target`]. Every resolved config carries
+    /// the CLI's [`USER_AGENT`].
+    ///
+    /// A base-URL override still goes through [`Config::with_base_url`], which is
+    /// now itself sugar for a custom network with undeclared funds — so both
+    /// paths build the same shape and there is no second code path to drift.
+    pub fn config(&self, target: &Target) -> Config {
+        let config = match target.base_url_override() {
+            Some(url) => Config::with_base_url(url),
+            None => Config::new(target.network().clone()),
         };
         config.with_user_agent(USER_AGENT)
     }
-
-    /// Which network's stored credentials this invocation uses:
-    /// `--network`/`NEXUS_NETWORK` > config-file `network` > [`DEFAULT_NETWORK`].
-    ///
-    /// Deliberately **not** affected by `--base-url`. A base-URL override
-    /// changes where the request goes, not who you are — pointing at a proxy,
-    /// a tunnel or a staging host in front of a network should still present
-    /// that network's key, and an override cannot be mapped back to a network
-    /// name anyway. So the namespace is always well-defined, and `--base-url`
-    /// callers keep the credentials they had before namespacing existed.
-    ///
-    /// An unparseable config-file network resolves to the default, matching
-    /// where [`Cli::config`] sends the traffic; that path is also what prints
-    /// the diagnostic, so this stays silent rather than warning twice.
-    pub fn credential_network(&self, file: &FileConfig) -> NetworkArg {
-        self.network
-            .or_else(|| file.network.as_deref().and_then(NetworkArg::parse))
-            .unwrap_or(DEFAULT_NETWORK)
-    }
-
     /// Resolve an API key/secret pair, layering flags/env over the config file's
-    /// section for the resolved network. Returns `None` when no usable pair is
+    /// section for the resolved target. Returns `None` when no usable pair is
     /// configured. Warns (and still returns `None`) when only one half is
     /// present, since that is almost always a mistake.
     ///
@@ -421,8 +999,8 @@ impl Cli {
     ///
     /// The pair is handed to [`Config::api_key`] so the SDK signs authenticated
     /// requests; the CLI never touches the secret beyond passing it through.
-    pub fn credentials(&self, file: &FileConfig) -> Option<(String, String)> {
-        let stored = file.credentials_for(self.credential_network(file));
+    pub fn credentials(&self, file: &FileConfig, target: &Target) -> Option<(String, String)> {
+        let stored = file.credentials_for(target.namespace());
         let key = self
             .credentials
             .api_key
@@ -453,13 +1031,13 @@ impl Cli {
     }
 
     /// Resolve a wallet session token, layering flag/env over the config file's
-    /// section for the resolved network (the same precedence, and the same
+    /// section for the resolved target (the same precedence, and the same
     /// namespacing, as the HMAC pair). Returns `None` when none is configured.
     /// Handed to [`Config::session_token`] only when no HMAC key pair is
     /// present, so the HMAC pair takes precedence as the request signer.
-    pub fn session_token(&self, file: &FileConfig) -> Option<String> {
+    pub fn session_token(&self, file: &FileConfig, target: &Target) -> Option<String> {
         self.credentials.session_token.clone().or_else(|| {
-            file.credentials_for(self.credential_network(file))
+            file.credentials_for(target.namespace())
                 .and_then(|c| c.session_token.clone())
         })
     }
@@ -885,8 +1463,16 @@ pub enum AgentsCommand {
         nonce: Option<u64>,
         /// EIP-712 domain chain id (the exchange's chain id). Part of the signed
         /// payload, so it must match what the server verifies against.
-        #[arg(long, default_value_t = 393)]
-        chain_id: u64,
+        ///
+        /// Defaults to the selected network's declared signing domain — a custom
+        /// network's `chain_id` — and to [`DEFAULT_CHAIN_ID`] on a built-in
+        /// network, for which the SDK publishes none. A custom network that
+        /// declares no `chain_id` is **refused** rather than defaulted, and this
+        /// flag is how you answer it. Read it off that target's `GET /metadata`
+        /// rather than assuming: a signature made under the wrong domain either
+        /// fails verification or, worse, is *valid on a different network*.
+        #[arg(long)]
+        chain_id: Option<u64>,
         /// Optional human-readable label for the agent.
         #[arg(long)]
         label: Option<String>,
@@ -978,10 +1564,38 @@ mod tests {
     use clap::CommandFactory;
     use nexus_exchange::Client;
 
+    /// Resolve a target against an empty config file. Panics on a selection the
+    /// file cannot honour — the tests that exercise those assert on the error.
+    fn target(cli: &Cli) -> Target {
+        cli.target(&FileConfig::default())
+            .expect("a resolvable target")
+    }
+
+    fn base_url_with(cli: &Cli, file: &FileConfig) -> String {
+        let target = cli.target(file).expect("a resolvable target");
+        Client::new(cli.config(&target)).base_url().to_string()
+    }
+
     fn base_url(cli: &Cli) -> String {
-        Client::new(cli.config(&FileConfig::default()))
-            .base_url()
-            .to_string()
+        base_url_with(cli, &FileConfig::default())
+    }
+
+    /// A play-funds stage with a faucet, declared the way a config file would.
+    /// `example.com` is RFC 2606 reserved, so no real deployment is named here.
+    fn declared_stage(funds: &str) -> CustomNetworkConfig {
+        CustomNetworkConfig {
+            base_url: Some("https://exchange.example.com/api/exchange".into()),
+            funds: Some(funds.into()),
+            faucet: Some(true),
+            ..Default::default()
+        }
+    }
+
+    /// A config file declaring one custom stage under `label`.
+    fn file_declaring(label: &str, declared: CustomNetworkConfig) -> FileConfig {
+        let mut file = FileConfig::default();
+        file.custom_networks.insert(label.to_string(), declared);
+        file
     }
 
     /// Catches conflicting flags, bad arg specs, etc. at test time.
@@ -1002,13 +1616,11 @@ mod tests {
     #[test]
     fn the_default_network_is_not_real_funds() {
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
-        let network = cli
-            .config(&FileConfig::default())
-            .network()
-            .expect("the default config targets a named network, not a bare base URL");
-        assert!(
-            !network.is_mainnet(),
-            "the default network must be play funds, got {network:?}"
+        let funds = target(&cli).funds();
+        assert_eq!(
+            funds,
+            Funds::Play,
+            "the default network must be *known* play funds, got {funds:?}"
         );
     }
 
@@ -1034,16 +1646,10 @@ mod tests {
         };
         // No flag → file network wins.
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
-        assert_eq!(
-            Client::new(cli.config(&file)).base_url(),
-            Network::Local.base_url()
-        );
+        assert_eq!(base_url_with(&cli, &file), Network::Local.base_url());
         // Flag beats the file.
         let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
-        assert_eq!(
-            Client::new(cli.config(&file)).base_url(),
-            Network::Testnet.base_url()
-        );
+        assert_eq!(base_url_with(&cli, &file), Network::Testnet.base_url());
     }
 
     /// ENG-6455. `stable`/`beta` were release channels, not networks; the axis is
@@ -1081,7 +1687,7 @@ mod tests {
             };
             let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
             assert_eq!(
-                Client::new(cli.config(&file)).base_url(),
+                base_url_with(&cli, &file),
                 Network::Testnet.base_url(),
                 "a config naming {retired:?} should land on the default network"
             );
@@ -1102,12 +1708,17 @@ mod tests {
     #[test]
     fn every_retired_name_maps_to_a_play_funds_network() {
         for (retired, replacement) in RETIRED_NETWORKS {
-            let mapped = NetworkArg::parse(replacement)
+            let mapped = NetworkArg::builtin(replacement)
                 .unwrap_or_else(|| panic!("{retired}'s replacement {replacement:?} must parse"));
-            assert!(
-                !Network::from(mapped).is_mainnet(),
-                "{retired:?} named a play-funds host, so its replacement must not be real \
-                 funds, got {replacement:?}"
+            let funds = mapped
+                .builtin_network()
+                .expect("a built-in replacement")
+                .funds();
+            assert_eq!(
+                funds,
+                Funds::Play,
+                "{retired:?} named a play-funds host, so its replacement must be known play \
+                 funds, got {replacement:?} ({funds:?})"
             );
         }
     }
@@ -1145,7 +1756,7 @@ mod tests {
     #[test]
     fn an_unparseable_config_network_is_always_reported() {
         for name in ["mainet", "prod", "Testnet2", "main net"] {
-            let warning = stale_network_warning(name, Some("testnet"))
+            let warning = stale_network_warning(name, "testnet")
                 .unwrap_or_else(|| panic!("{name:?} must produce a warning, not silence"));
             assert!(
                 warning.contains(name),
@@ -1174,7 +1785,7 @@ mod tests {
     #[test]
     fn a_retired_config_network_keeps_its_migration_hint() {
         for retired in ["stable", "beta", "STABLE", "  beta  "] {
-            let warning = stale_network_warning(retired, Some("testnet"))
+            let warning = stale_network_warning(retired, "testnet")
                 .unwrap_or_else(|| panic!("{retired:?} must produce a warning"));
             assert!(
                 warning.contains("release channel"),
@@ -1193,25 +1804,14 @@ mod tests {
     /// two take different branches.
     #[test]
     fn the_stale_network_warning_names_where_it_actually_lands() {
-        let default_network = Config::default()
-            .network()
-            .expect("the SDK default targets a named network");
-        let landing = network_name(default_network);
+        let landing = Config::default().network().label().to_string();
         for name in ["stable", "mainet"] {
-            let warning = stale_network_warning(name, Some(&landing)).expect("a warning");
+            let warning = stale_network_warning(name, &landing).expect("a warning");
             assert!(
                 warning.contains(&format!("the default network ({landing})")),
                 "the warning should name the resolved default {landing:?}; got: {warning}"
             );
         }
-        // With no named default (a base-URL-only config) the claim is dropped
-        // rather than guessed.
-        let warning = stale_network_warning("mainet", None).expect("a warning");
-        assert!(
-            warning.contains("using the default network;")
-                || warning.contains("using the default network."),
-            "with no named default the warning should not invent one; got: {warning}"
-        );
     }
 
     /// A blank value selects nothing, which is not a stale name — `nexus setup`
@@ -1221,7 +1821,7 @@ mod tests {
     fn a_blank_config_network_is_not_reported_as_stale() {
         for blank in ["", "   ", "\t"] {
             assert!(
-                stale_network_warning(blank, Some("testnet")).is_none(),
+                stale_network_warning(blank, "testnet").is_none(),
                 "a blank network ({blank:?}) should be silent, not a warning"
             );
         }
@@ -1231,26 +1831,39 @@ mod tests {
     /// the vocabulary `--network` accepts — otherwise the CLI would suggest a
     /// value it cannot parse.
     #[test]
-    fn network_name_round_trips_through_the_flag_vocabulary() {
+    fn the_sdk_label_round_trips_through_the_flag_vocabulary() {
         for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
-            let name = network_name(arg.into());
+            let label = arg.builtin_network().expect("a built-in network");
+            let label = label.label();
             assert_eq!(
-                NetworkArg::parse(&name),
-                Some(arg),
-                "network_name produced {name:?}, which --network does not accept"
+                NetworkArg::from_flag(label).as_ref(),
+                Ok(&arg),
+                "the SDK labels this {label:?}, which --network does not accept"
             );
+            // And the CLI's own name for it agrees, since that is the credential
+            // key the SDK documents as safe.
+            assert_eq!(arg.name(), label);
         }
     }
 
     #[test]
     fn network_args_map_one_to_one_onto_the_sdk_axis() {
-        assert_eq!(Network::from(NetworkArg::Mainnet), Network::Mainnet);
-        assert_eq!(Network::from(NetworkArg::Testnet), Network::Testnet);
-        assert_eq!(Network::from(NetworkArg::Local), Network::Local);
-        // Only mainnet is real funds — the predicate the SDK guards `fund()` with.
-        assert!(Network::from(NetworkArg::Mainnet).is_mainnet());
-        assert!(!Network::from(NetworkArg::Testnet).is_mainnet());
-        assert!(!Network::from(NetworkArg::Local).is_mainnet());
+        assert_eq!(
+            NetworkArg::Mainnet.builtin_network(),
+            Some(Network::Mainnet)
+        );
+        assert_eq!(
+            NetworkArg::Testnet.builtin_network(),
+            Some(Network::Testnet)
+        );
+        assert_eq!(NetworkArg::Local.builtin_network(), Some(Network::Local));
+        // A custom label has no built-in mapping: its bundle comes from the file.
+        assert_eq!(NetworkArg::Custom("dev".into()).builtin_network(), None);
+        // Only mainnet is real funds — the classification the SDK guards
+        // `fund()` with, matched positively so `Unknown` can never pass for safe.
+        assert_eq!(Network::Mainnet.funds(), Funds::Real);
+        assert_eq!(Network::Testnet.funds(), Funds::Play);
+        assert_eq!(Network::Local.funds(), Funds::Play);
     }
 
     /// `--network mainnet` is accepted here and refused by the SDK at request
@@ -1284,11 +1897,11 @@ mod tests {
     fn credentials_require_both_halves() {
         let empty = FileConfig::default();
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "markets"]).unwrap();
-        assert!(cli.credentials(&empty).is_none());
+        assert!(cli.credentials(&empty, &target(&cli)).is_none());
 
         let cli = Cli::try_parse_from(["nexus", "--api-key", "k", "--api-secret", "s", "markets"])
             .unwrap();
-        assert!(cli.credentials(&empty).is_some());
+        assert!(cli.credentials(&empty, &target(&cli)).is_some());
     }
 
     #[test]
@@ -1311,27 +1924,32 @@ mod tests {
     #[test]
     fn credentials_fall_back_to_file() {
         let mut file = FileConfig::default();
-        *file.section_mut(DEFAULT_NETWORK) = NetworkCredentials {
+        *file.section_mut(DEFAULT_NETWORK.name()) = NetworkCredentials {
             api_key: Some("k".into()),
             api_secret: Some("s".into()),
             session_token: None,
         };
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
-        assert_eq!(cli.credentials(&file), Some(("k".into(), "s".into())));
+        let target = cli.target(&file).unwrap();
+        assert_eq!(
+            cli.credentials(&file, &target),
+            Some(("k".into(), "s".into()))
+        );
     }
 
     #[test]
     fn flag_overrides_file_credentials() {
         let mut file = FileConfig::default();
-        *file.section_mut(DEFAULT_NETWORK) = NetworkCredentials {
+        *file.section_mut(DEFAULT_NETWORK.name()) = NetworkCredentials {
             api_key: Some("file-key".into()),
             api_secret: Some("file-secret".into()),
             session_token: None,
         };
         // Flag key layers over the file secret, per-field.
         let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
+        let target = cli.target(&file).unwrap();
         assert_eq!(
-            cli.credentials(&file),
+            cli.credentials(&file, &target),
             Some(("flag-key".into(), "file-secret".into()))
         );
     }
@@ -1342,11 +1960,11 @@ mod tests {
 
         // Network path.
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
-        assert_eq!(cli.config(&FileConfig::default()).user_agent(), expected);
+        assert_eq!(cli.config(&target(&cli)).user_agent(), expected);
 
         // Explicit base-url path also carries the UA.
         let cli = Cli::try_parse_from(["nexus", "--base-url", "http://x:1", "markets"]).unwrap();
-        assert_eq!(cli.config(&FileConfig::default()).user_agent(), expected);
+        assert_eq!(cli.config(&target(&cli)).user_agent(), expected);
     }
 
     #[test]
@@ -1850,7 +2468,10 @@ mod tests {
                     },
             } => {
                 assert_eq!(agent, "0x1234567890abcdef1234567890abcdef12345678");
-                assert_eq!(chain_id, 393, "chain id defaults to the exchange chain");
+                assert_eq!(
+                    chain_id, None,
+                    "the chain id defaults from the target at call time, not at parse time"
+                );
                 assert_eq!(nonce, None, "nonce defaults at call time, not parse time");
                 assert_eq!(expires_at, None);
                 assert_eq!(label, None);
@@ -1862,17 +2483,27 @@ mod tests {
     #[test]
     fn session_token_resolves_flag_over_file() {
         let mut file = FileConfig::default();
-        file.section_mut(DEFAULT_NETWORK).session_token = Some("file-token".into());
+        file.section_mut(DEFAULT_NETWORK.name()).session_token = Some("file-token".into());
         // No flag -> file token.
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
-        assert_eq!(cli.session_token(&file).as_deref(), Some("file-token"));
+        let on_default = cli.target(&file).unwrap();
+        assert_eq!(
+            cli.session_token(&file, &on_default).as_deref(),
+            Some("file-token")
+        );
         // Flag wins.
         let cli =
             Cli::try_parse_from(["nexus", "--session-token", "flag-token", "balance"]).unwrap();
-        assert_eq!(cli.session_token(&file).as_deref(), Some("flag-token"));
+        assert_eq!(
+            cli.session_token(&file, &on_default).as_deref(),
+            Some("flag-token")
+        );
         // Neither set -> None.
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
-        assert_eq!(cli.session_token(&FileConfig::default()), None);
+        assert_eq!(
+            cli.session_token(&FileConfig::default(), &target(&cli)),
+            None
+        );
     }
 
     #[test]
@@ -1945,6 +2576,599 @@ mod tests {
         assert!(help.contains("cancel"));
     }
 
+    // ─────────────────── custom networks (ENG-9827) ───────────────────
+
+    /// The headline: a declared stage is selectable by flag, drives the base
+    /// URL, and namespaces its credentials under its **label**.
+    #[test]
+    fn a_declared_stage_is_selectable_by_flag() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let target = cli.target(&file).expect("a declared stage resolves");
+
+        assert_eq!(target.namespace(), "dev");
+        assert_eq!(target.funds(), Funds::Play);
+        assert!(target.has_faucet());
+        assert_eq!(
+            base_url_with(&cli, &file),
+            "https://exchange.example.com/api/exchange"
+        );
+    }
+
+    /// ...and by config file, on exactly the same terms. The two selection
+    /// routes resolve through one function, so this pins that they agree rather
+    /// than that a second code path happens to match.
+    #[test]
+    fn a_declared_stage_is_selectable_by_config_file() {
+        let mut file = file_declaring("dev", declared_stage("play"));
+        file.network = Some("dev".into());
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        let target = cli.target(&file).expect("a declared stage resolves");
+
+        assert_eq!(target.namespace(), "dev");
+        assert_eq!(target.funds(), Funds::Play);
+        // The flag still wins over the file, as it does for a built-in.
+        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
+        assert_eq!(cli.target(&file).unwrap().namespace(), "testnet");
+    }
+
+    /// The whole reason the label is the namespace key rather than the URL
+    /// (ENG-9827): two stages that share a host must not share credentials, and
+    /// with named stages that collision would be between environments with
+    /// different funds semantics.
+    #[test]
+    fn two_custom_labels_do_not_share_credentials() {
+        let mut file = file_declaring("one", declared_stage("play"));
+        // Deliberately the *same* base URL: if the namespace were derived from
+        // the URL rather than from the label, these two would collide.
+        file.custom_networks
+            .insert("two".into(), declared_stage("real"));
+        *file.section_mut("one") = NetworkCredentials {
+            api_key: Some("nx_one".into()),
+            api_secret: Some("one-secret".into()),
+            session_token: Some("one-token".into()),
+        };
+
+        let on_one = Cli::try_parse_from(["nexus", "--network", "one", "balance"]).unwrap();
+        let target = on_one.target(&file).unwrap();
+        assert_eq!(
+            on_one.credentials(&file, &target),
+            Some(("nx_one".into(), "one-secret".into()))
+        );
+        assert_eq!(
+            on_one.session_token(&file, &target).as_deref(),
+            Some("one-token")
+        );
+
+        let on_two = Cli::try_parse_from(["nexus", "--network", "two", "balance"]).unwrap();
+        let target = on_two.target(&file).unwrap();
+        assert_eq!(
+            on_two.credentials(&file, &target),
+            None,
+            "one stage's key must not authenticate another, even on the same host"
+        );
+        assert_eq!(on_two.session_token(&file, &target), None);
+        assert_eq!(target.namespace(), "two");
+    }
+
+    /// A label that could address another target's credentials is refused, and
+    /// refused at *parse* time, before it can select anything. The rules are the
+    /// SDK's — see `validate_label` — so this asserts the CLI actually applies
+    /// them rather than restating what they are.
+    #[test]
+    fn an_unsafe_label_is_rejected_by_the_flag() {
+        for bad in [
+            "../other", // traversal
+            "one/two",  // separator
+            "one:two",  // keyring separator
+            "one two",  // whitespace
+            ".",        // a directory, not a network
+            "..",
+            "d\u{e9}v", // non-ASCII: normalization makes keys ambiguous
+            "one\ntwo", // control character
+            "custom",   // the label `--base-url` targets carry
+            "",
+            &"x".repeat(65), // longer than a key has any reason to be
+        ] {
+            assert!(
+                NetworkArg::from_flag(bad).is_err(),
+                "--network {bad:?} must be rejected: it is used as a credential-storage key"
+            );
+        }
+        // A built-in's own name is not rejected — it selects the built-in, which
+        // is checked first, so it can never be read as a custom label and can
+        // never reach that network's credentials while pointing elsewhere.
+        for reserved in ["mainnet", "MAINNET", "  local  "] {
+            let parsed = NetworkArg::from_flag(reserved).expect("a built-in name still selects");
+            assert!(
+                parsed.builtin_network().is_some(),
+                "{reserved:?} must select the built-in, not become a label: {parsed:?}"
+            );
+        }
+        // A plausible stage name is still accepted, trimmed.
+        assert_eq!(
+            NetworkArg::from_flag("  dev-1_2.3  "),
+            Ok(NetworkArg::Custom("dev-1_2.3".into()))
+        );
+    }
+
+    /// The same refusal on the config-file side, where a label arrives as a map
+    /// key rather than through the flag parser. A declaration under a label the
+    /// SDK would refuse must not become selectable by the back door.
+    #[test]
+    fn an_unsafe_declared_label_is_not_selectable() {
+        for bad in ["../other", "one two", "d\u{e9}v"] {
+            let mut file = file_declaring(bad, declared_stage("play"));
+            file.network = Some(bad.into());
+            assert_eq!(
+                selectable_network(bad, &file),
+                None,
+                "a declaration under {bad:?} must not be selectable"
+            );
+            // The file naming it lands on the default with a diagnostic rather
+            // than silently.
+            let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+            assert_eq!(
+                cli.target(&file).unwrap().namespace(),
+                DEFAULT_NETWORK.name()
+            );
+            assert!(stale_network_warning(bad, "testnet").is_some());
+        }
+    }
+
+    /// A declaration that claims a built-in network's name loses to the built-in
+    /// — which is the safe resolution, since that name owns real credentials —
+    /// but it must not lose in silence, or the user is pointed at a different
+    /// host than the entry in front of them describes.
+    #[test]
+    fn a_declaration_may_not_claim_a_built_in_name() {
+        for reserved in ["mainnet", "testnet", "local"] {
+            let file = file_declaring(reserved, declared_stage("play"));
+            let cli = Cli::try_parse_from(["nexus", "--network", reserved, "markets"]).unwrap();
+            let target = cli.target(&file).expect("the built-in still resolves");
+
+            assert_eq!(target.namespace(), reserved);
+            assert_eq!(
+                target.network(),
+                &NetworkArg::builtin(reserved)
+                    .unwrap()
+                    .builtin_network()
+                    .unwrap(),
+                "the built-in must win over a declaration claiming its name"
+            );
+            let warning = shadowed_declaration_warning(reserved, &file)
+                .unwrap_or_else(|| panic!("{reserved:?} must be reported, not ignored silently"));
+            assert!(warning.contains(reserved));
+            assert!(
+                warning.contains("ignored"),
+                "the warning must say the entry does nothing: {warning}"
+            );
+        }
+        // Nothing to report when no declaration claims the name.
+        assert!(shadowed_declaration_warning("mainnet", &FileConfig::default()).is_none());
+    }
+
+    /// The same declaration in a different case is the same claim. The SDK
+    /// compares its reserved labels with `eq_ignore_ascii_case`, so `"Mainnet"`
+    /// can never be selected either — and a case-sensitive check here would let
+    /// it fall between the two: refused there, invisible here, while the user
+    /// believes they are pointed at the host they declared.
+    #[test]
+    fn a_declaration_claiming_a_built_in_name_is_reported_in_any_case() {
+        for claimed in ["Mainnet", "MAINNET", "MaInNeT"] {
+            let file = file_declaring(claimed, declared_stage("play"));
+            let cli = Cli::try_parse_from(["nexus", "--network", "mainnet", "markets"]).unwrap();
+            let target = cli.target(&file).expect("the built-in still resolves");
+
+            // The safe resolution is unchanged: the built-in wins.
+            assert_eq!(target.namespace(), "mainnet");
+            assert_eq!(target.network(), &Network::Mainnet);
+            assert_eq!(target.funds(), Funds::Real);
+
+            let warning = shadowed_declaration_warning("mainnet", &file).unwrap_or_else(|| {
+                panic!("{claimed:?} must be reported, not discarded in silence")
+            });
+            assert!(
+                warning.contains(claimed),
+                "the warning must quote the entry as written: {warning}"
+            );
+        }
+    }
+
+    /// A declaration under a label the SDK reserves for something else — here
+    /// `custom`, which is what a `--base-url` override answers to — is not
+    /// selectable, and saying "not a known network" to someone looking straight
+    /// at a `custom_networks` entry by that name explains nothing. Same root
+    /// cause as the built-in claim above, one case over.
+    #[test]
+    fn a_declaration_under_a_reserved_label_says_why_it_does_nothing() {
+        for reserved in ["custom", "Custom"] {
+            let mut file = file_declaring(reserved, declared_stage("play"));
+            file.network = Some(reserved.into());
+
+            let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+            // It still lands on the default, which is play funds and safe.
+            assert_eq!(
+                cli.target(&file).unwrap().namespace(),
+                DEFAULT_NETWORK.name()
+            );
+
+            let warning = unselectable_declaration_warning(reserved, &file, "testnet")
+                .unwrap_or_else(|| {
+                    panic!("{reserved:?} must be explained, not reported as absent")
+                });
+            assert!(
+                warning.contains(reserved) && warning.contains("reserved"),
+                "the warning must quote the entry and say why: {warning}"
+            );
+            // The generic text would be the confusing one, so it must not be
+            // what a reader gets.
+            assert!(
+                !warning.contains("is not a known network"),
+                "a declared entry must not be reported as unknown: {warning}"
+            );
+        }
+    }
+
+    /// A label is matched exactly, so an entry keyed `"Dev"` is not selected by
+    /// `"network": "dev"`. That resolution is right — the label is a credential
+    /// key and case is part of it — but the file names something it declares, so
+    /// the diagnostic has to point at the mismatch rather than deny the entry
+    /// exists.
+    #[test]
+    fn a_label_that_differs_only_in_case_names_the_declared_entry() {
+        let mut file = file_declaring("Dev", declared_stage("play"));
+        file.network = Some("dev".into());
+
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(
+            cli.target(&file).unwrap().namespace(),
+            DEFAULT_NETWORK.name(),
+            "an inexact label must not select the entry"
+        );
+
+        let warning = unselectable_declaration_warning("dev", &file, "testnet").expect("a warning");
+        assert!(
+            warning.contains("\"Dev\"") && warning.contains("exactly"),
+            "the warning must name the declared key and say matching is exact: {warning}"
+        );
+    }
+
+    /// Selecting a stage the file does not describe is an error, not a fallback:
+    /// the user named it on this command line, and quietly sending the request
+    /// somewhere else is the failure class ENG-6455 removed.
+    #[test]
+    fn an_undeclared_label_is_a_hard_error() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "other", "markets"]).unwrap();
+        let err = cli
+            .target(&file)
+            .expect_err("an undeclared label must not resolve")
+            .to_string();
+        assert!(
+            err.contains("other"),
+            "the error must quote the label: {err}"
+        );
+        // It names what *is* declared, so the fix is one line away.
+        assert!(
+            err.contains(r#"declared: "dev""#),
+            "the error should list the declared labels: {err}"
+        );
+        assert!(
+            err.contains("custom_networks"),
+            "the error should say where to declare it: {err}"
+        );
+    }
+
+    /// Config-file text reaches a terminal through these diagnostics, so it is
+    /// escaped rather than interpolated raw: a label carrying an ESC sequence
+    /// must not be able to rewrite the line reporting it. Every interpolation of
+    /// a file-supplied value uses `{:?}`, and this is what notices if one stops.
+    #[test]
+    fn a_config_supplied_label_cannot_smuggle_control_bytes() {
+        let hostile = "dev\u{1b}[2K\u{7}";
+        let mut file = file_declaring(hostile, declared_stage("play"));
+        file.network = Some(hostile.into());
+
+        // It is not selectable, so the file naming it warns...
+        assert_eq!(selectable_network(hostile, &file), None);
+        let warning = stale_network_warning(hostile, "testnet").expect("a warning");
+        assert!(!warning.contains('\u{1b}'), "raw ESC in: {warning:?}");
+        assert!(!warning.contains('\u{7}'), "raw BEL in: {warning:?}");
+
+        // ...and that is the warning a declared-but-unusable label gets, which
+        // quotes the SDK's own reason for refusing it. The SDK renders the label
+        // with `Debug` too; this is what notices if it stops.
+        let warning = unselectable_declaration_warning(hostile, &file, "testnet")
+            .expect("a declared entry must be explained rather than denied");
+        assert!(!warning.contains('\u{1b}'), "raw ESC in: {warning:?}");
+        assert!(!warning.contains('\u{7}'), "raw BEL in: {warning:?}");
+
+        // A near-miss key is not a claim on the name, so the shadow warning
+        // never echoes one: matching a built-in case-insensitively means the key
+        // *is* that word in ASCII letters, and nothing else can reach that line.
+        for near_miss in ["main\u{1b}net", "MAINNET\u{7}", "mainnet."] {
+            let shadow = file_declaring(near_miss, declared_stage("play"));
+            assert_eq!(
+                shadowed_declaration_warning("mainnet", &shadow),
+                None,
+                "{near_miss:?} does not claim the built-in's name"
+            );
+        }
+
+        // ...and naming a *different* label lists what is declared, which must
+        // escape it too.
+        let cli = Cli::try_parse_from(["nexus", "--network", "other", "markets"]).unwrap();
+        let err = cli.target(&file).expect_err("undeclared").to_string();
+        assert!(!err.contains('\u{1b}'), "raw ESC in: {err:?}");
+        assert!(!err.contains('\u{7}'), "raw BEL in: {err:?}");
+
+        // The same for an unreadable `funds` value, the other file-supplied
+        // string that is echoed back.
+        let (funds, warning) = parse_funds("dev", Some("re\u{1b}[2Kal"));
+        assert_eq!(funds, Funds::Unknown);
+        assert!(!warning.expect("a warning").contains('\u{1b}'));
+    }
+
+    /// A stage with no base URL cannot be pointed anywhere, and there is
+    /// deliberately no host to fall back to — that is the point of the variant.
+    #[test]
+    fn a_stage_without_a_base_url_is_refused() {
+        let file = file_declaring(
+            "dev",
+            CustomNetworkConfig {
+                funds: Some("play".into()),
+                ..Default::default()
+            },
+        );
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let err = cli.target(&file).expect_err("no base URL").to_string();
+        assert!(err.contains("base_url"), "got: {err}");
+    }
+
+    /// URL validation is the SDK's, and this asserts the CLI routes through it:
+    /// each of these would build a *wrong* request rather than merely fail.
+    #[test]
+    fn a_dangerous_url_is_refused() {
+        for bad in [
+            "https://user:pass@exchange.example.com", // credentials leak into logs
+            "https://exchange.example.com/?x=1",      // a query swallows the path
+            "https://exchange.example.com/#frag",
+            "file:///etc/passwd", // not a thing this client can talk to
+            "https://",           // no host
+            "exchange.example.com",
+        ] {
+            let file = file_declaring(
+                "dev",
+                CustomNetworkConfig {
+                    base_url: Some(bad.into()),
+                    funds: Some("play".into()),
+                    ..Default::default()
+                },
+            );
+            let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+            assert!(
+                cli.target(&file).is_err(),
+                "base_url {bad:?} must be refused"
+            );
+        }
+    }
+
+    /// Funds fail **closed**. An absent or unreadable classification is
+    /// `Unknown`, never `Play` — the guardrails match `Play` positively, so this
+    /// is what makes an unclassified stage refuse rather than pass.
+    #[test]
+    fn an_unreadable_funds_value_falls_closed_to_unknown() {
+        for declared in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("reel"),
+            Some("REEL"),
+            Some("true"),
+        ] {
+            let (funds, warning) = parse_funds("dev", declared);
+            assert_eq!(
+                funds,
+                Funds::Unknown,
+                "funds {declared:?} must not resolve to anything but Unknown"
+            );
+            let warning =
+                warning.unwrap_or_else(|| panic!("{declared:?} must warn, not be silent"));
+            assert!(
+                warning.contains("dev"),
+                "the warning must name the stage: {warning}"
+            );
+        }
+        // The three real values read cleanly and say nothing — trimmed, and
+        // case-folded like `--network`, so a capitalized classification is the
+        // classification rather than a silent `Unknown`.
+        for (declared, expected) in [
+            ("real", Funds::Real),
+            ("play", Funds::Play),
+            ("unknown", Funds::Unknown),
+            ("  play  ", Funds::Play),
+            ("Real", Funds::Real),
+            ("PLAY", Funds::Play),
+            ("Unknown", Funds::Unknown),
+        ] {
+            assert_eq!(parse_funds("dev", Some(declared)), (expected, None));
+        }
+    }
+
+    /// The rest of the bundle reaches the SDK: the WS origin, the split direct
+    /// base, and the signing domain. Each is absent until declared — the CLI
+    /// never derives one — so this pins that a declared one is not dropped.
+    #[test]
+    fn the_declared_bundle_reaches_the_sdk() {
+        let file = file_declaring(
+            "dev",
+            CustomNetworkConfig {
+                base_url: Some("https://exchange.example.com/api/exchange".into()),
+                direct_base_url: Some("https://direct.example.com".into()),
+                ws_url: Some("wss://stream.example.com/ws".into()),
+                funds: Some("play".into()),
+                faucet: Some(true),
+                chain_id: Some(393),
+            },
+        );
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let target = cli.target(&file).unwrap();
+        let network = target.network();
+
+        assert_eq!(
+            network.base_url(),
+            "https://exchange.example.com/api/exchange"
+        );
+        assert_eq!(network.direct_base_url(), "https://direct.example.com");
+        assert_eq!(network.ws_base(), Some("wss://stream.example.com/ws"));
+        assert_eq!(network.signing_domain().and_then(|d| d.chain_id), Some(393));
+        // ...and the resolved `Config` carries them too, since that is what the
+        // client actually reads.
+        let config = cli.config(&target);
+        assert_eq!(
+            config.base_url(),
+            "https://exchange.example.com/api/exchange"
+        );
+        assert_eq!(config.ws_url(), Some("wss://stream.example.com/ws"));
+    }
+
+    /// A registration is signed under the target's own domain when it declares
+    /// one. Falling back to the constant for a stage on another chain would
+    /// produce a signature that is valid somewhere else — the failure mode the
+    /// never-guess rule exists for.
+    #[test]
+    fn the_signing_chain_id_follows_the_declared_domain() {
+        let mut declared = declared_stage("play");
+        declared.chain_id = Some(31337);
+        let file = file_declaring("dev", declared);
+
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        assert_eq!(
+            cli.target(&file).unwrap().signing_chain_id().unwrap(),
+            31337
+        );
+
+        // Every built-in falls back to the exchange's own chain — the SDK
+        // publishes no chain id for them, so the constant is the only answer
+        // there is, and `agents register` has always used it.
+        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
+        assert_eq!(target(&cli).signing_chain_id().unwrap(), DEFAULT_CHAIN_ID);
+    }
+
+    /// A custom stage that declares no domain is **refused**, not defaulted.
+    /// `393` is a real chain, and a custom target is the first one for which
+    /// "somewhere else" is expressible — so substituting the constant would hand
+    /// back a signature valid on the exchange rather than a request that failed.
+    #[test]
+    fn an_undeclared_domain_refuses_to_pick_a_chain_id() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let err = cli
+            .target(&file)
+            .unwrap()
+            .signing_chain_id()
+            .expect_err("an undeclared domain must not resolve to a chain id")
+            .to_string();
+        assert!(err.contains("dev"), "the error must name the stage: {err}");
+        assert!(
+            err.contains("chain_id") && err.contains("--chain-id"),
+            "the error must say how to answer it: {err}"
+        );
+    }
+
+    /// A base-URL override keeps the declared domain, exactly as it keeps the
+    /// credential namespace: a tunnel in front of a stage does not move it to
+    /// another chain. Substituting the constant here would silently sign under
+    /// `393` the moment a `--base-url` was added — a wrong signature rather than
+    /// a failed request.
+    #[test]
+    fn an_override_does_not_change_the_signing_domain() {
+        let mut declared = declared_stage("play");
+        declared.chain_id = Some(31337);
+        let file = file_declaring("dev", declared);
+
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "dev",
+            "--base-url",
+            "http://127.0.0.1:9090",
+            "markets",
+        ])
+        .unwrap();
+        let resolved = cli.target(&file).unwrap();
+        assert_eq!(resolved.base_url_override(), Some("http://127.0.0.1:9090"));
+        assert_eq!(resolved.signing_chain_id().unwrap(), 31337);
+
+        // ...and an override over a built-in still reaches the constant, which
+        // is the pre-existing behaviour for every target that declares nothing.
+        let cli = Cli::try_parse_from(["nexus", "--base-url", "http://127.0.0.1:9090", "markets"])
+            .unwrap();
+        assert_eq!(target(&cli).signing_chain_id().unwrap(), DEFAULT_CHAIN_ID);
+    }
+
+    /// An undeclared WS origin stays `None` rather than being derived from the
+    /// REST base: it is a separate host, so `nexus ws` must refuse instead of
+    /// connecting to a guessed one.
+    #[test]
+    fn an_undeclared_ws_origin_is_not_derived() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let target = cli.target(&file).unwrap();
+        assert_eq!(target.network().ws_base(), None);
+        assert_eq!(cli.config(&target).ws_url(), None);
+    }
+
+    /// An undeclared signing domain stays `None`, which means **refuse to sign**
+    /// rather than fall back to a constant: a signature made under the wrong
+    /// domain may be valid on a *different* network.
+    #[test]
+    fn an_undeclared_signing_domain_is_not_guessed() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        assert_eq!(cli.target(&file).unwrap().network().signing_domain(), None);
+    }
+
+    /// No hostname is hardcoded for a custom target. The variant exists so this
+    /// public artifact ships none, and the one URL literal on the path is the
+    /// RFC 2606 placeholder the label validator probes with.
+    #[test]
+    fn no_hostname_is_shipped_for_a_custom_target() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let target = cli.target(&file).unwrap();
+        // Verbatim from the file: nothing appended, rewritten or inferred.
+        assert_eq!(
+            target.network().base_url(),
+            file.custom_networks["dev"].base_url.as_deref().unwrap()
+        );
+        assert!(
+            LABEL_PROBE_URL.ends_with(".invalid"),
+            "the label probe must use a name that can never resolve, got {LABEL_PROBE_URL:?}"
+        );
+    }
+
+    /// `--base-url` keeps working, unchanged, for anyone upgrading: same
+    /// precedence over `--network`, same credential namespace.
+    #[test]
+    fn the_base_url_override_still_wins_over_a_custom_network() {
+        let file = file_declaring("dev", declared_stage("play"));
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "dev",
+            "--base-url",
+            "http://127.0.0.1:9090",
+            "markets",
+        ])
+        .unwrap();
+        let target = cli.target(&file).unwrap();
+        assert_eq!(base_url_with(&cli, &file), "http://127.0.0.1:9090");
+        assert_eq!(target.namespace(), "dev", "the label still owns the key");
+        assert_eq!(target.base_url_override(), Some("http://127.0.0.1:9090"));
+    }
+
     // ───────────────── per-network credentials (ENG-6462) ─────────────────
 
     /// [`DEFAULT_NETWORK`] transcribes the SDK's default so credential sections
@@ -1953,12 +3177,10 @@ mod tests {
     /// stored key while sending the request to another.
     #[test]
     fn the_default_network_matches_the_sdk() {
-        let sdk_default = Config::default()
-            .network()
-            .expect("the SDK default targets a named network, not a bare base URL");
+        let sdk_default = Config::default().network().clone();
         assert_eq!(
-            Network::from(DEFAULT_NETWORK),
-            sdk_default,
+            DEFAULT_NETWORK.builtin_network(),
+            Some(sdk_default.clone()),
             "DEFAULT_NETWORK is {:?} but the SDK now defaults to {sdk_default:?}; credentials \
              would be read from one network's section and sent to another",
             DEFAULT_NETWORK
@@ -1981,79 +3203,73 @@ mod tests {
     /// the SDK — the point is to fail rather than to follow.
     #[test]
     fn the_default_network_is_play_funds() {
-        assert!(
-            !DEFAULT_NETWORK.is_real_funds(),
-            "DEFAULT_NETWORK is {:?}, which moves real funds; a legacy config naming no network \
-             would have its credentials migrated onto a real-funds section, and an unnamed \
-             invocation would send requests there. Both need a deliberate decision, not a \
-             constant change",
+        let funds = declared_funds(&DEFAULT_NETWORK, &FileConfig::default());
+        assert_eq!(
+            funds,
+            Funds::Play,
+            "DEFAULT_NETWORK is {:?}, whose funds are {funds:?}; a legacy config naming no \
+             network would have its credentials migrated onto that section, and an unnamed \
+             invocation would send requests there. Anything but known play funds needs a \
+             deliberate decision, not a constant change",
             DEFAULT_NETWORK
         );
     }
 
-    /// `is_real_funds` is what every guardrail keys off, so it must agree with
-    /// the SDK's own notion rather than with a hardcoded list that can rot.
+    /// The CLI no longer keeps its own real-funds predicate: every guardrail
+    /// reads [`Funds`] off the resolved target, which is the SDK's own answer.
+    /// This pins that there is nothing left to drift — a built-in's funds come
+    /// from the SDK and from nowhere else.
     #[test]
-    fn real_funds_matches_the_sdk() {
+    fn built_in_funds_come_from_the_sdk() {
+        let file = FileConfig::default();
         for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
             assert_eq!(
-                arg.is_real_funds(),
-                Network::from(arg).is_mainnet(),
-                "{} disagrees with the SDK about whether it moves real funds",
-                arg.as_str()
+                declared_funds(&arg, &file),
+                arg.builtin_network().expect("a built-in network").funds(),
+                "{} disagrees with the SDK about what it moves",
+                arg.name()
             );
         }
     }
 
-    /// Exactly one network moves real funds.
-    ///
-    /// `FileConfig::mainnet_acknowledged` is a single flag, but the prompt that
-    /// sets it is gated on `is_real_funds()` rather than on mainnet by name.
-    /// That is 1:1 only while there is one such network. Add a second and
-    /// acknowledging the first would silently disarm the prompt for it — the
-    /// one-time gate would be one-time across *all* real-funds networks, which
-    /// is not what it promises. Splitting the flag per network at that point is
-    /// a schema change, so it wants to be a decision rather than a discovery.
+    /// A second real-funds target is now expressible — that is the point of
+    /// ENG-9827 — so the one-time acknowledgement is keyed per network rather
+    /// than held as the single `mainnet_acknowledged` flag it used to be. This
+    /// is the assertion the old `exactly_one_network_moves_real_funds` deferred
+    /// to: it demanded the schema change before a second real-funds network
+    /// existed, and here it is.
     #[test]
-    fn exactly_one_network_moves_real_funds() {
-        let real: Vec<_> = [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local]
-            .into_iter()
-            .filter(|n| n.is_real_funds())
-            .map(|n| n.as_str())
-            .collect();
-        assert_eq!(
-            real,
-            ["mainnet"],
-            "the real-funds networks are {real:?}; `mainnet_acknowledged` is one flag shared by \
-             all of them, so a second one needs the acknowledgement split per network first"
-        );
+    fn a_real_funds_custom_stage_is_expressible() {
+        let file = file_declaring("dev", declared_stage("real"));
+        let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
+        let target = cli.target(&file).expect("a declared stage resolves");
+        assert_eq!(target.funds(), Funds::Real);
+        assert_eq!(target.namespace(), "dev");
+        assert!(target.touches_real_funds());
     }
 
     /// The section key is the name users type and hand-edit into the config
-    /// file, so it has to survive a round trip through `parse`.
+    /// file, so it has to survive a round trip through the flag parser.
     #[test]
-    fn section_keys_round_trip_through_parse() {
+    fn section_keys_round_trip_through_the_flag() {
         for arg in [NetworkArg::Mainnet, NetworkArg::Testnet, NetworkArg::Local] {
-            assert_eq!(NetworkArg::parse(arg.as_str()), Some(arg));
+            assert_eq!(NetworkArg::from_flag(arg.name()).as_ref(), Ok(&arg));
         }
     }
 
     #[test]
-    fn the_credential_network_follows_flag_then_file_then_default() {
+    fn the_credential_namespace_follows_flag_then_file_then_default() {
         let file = FileConfig {
             network: Some("local".into()),
             ..Default::default()
         };
 
         let cli = Cli::try_parse_from(["nexus", "--network", "mainnet", "markets"]).unwrap();
-        assert_eq!(cli.credential_network(&file), NetworkArg::Mainnet);
+        assert_eq!(cli.target(&file).unwrap().namespace(), "mainnet");
 
         let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
-        assert_eq!(cli.credential_network(&file), NetworkArg::Local);
-        assert_eq!(
-            cli.credential_network(&FileConfig::default()),
-            DEFAULT_NETWORK
-        );
+        assert_eq!(cli.target(&file).unwrap().namespace(), "local");
+        assert_eq!(target(&cli).namespace(), DEFAULT_NETWORK.name());
     }
 
     /// A base-URL override redirects the request but must not change *whose*
@@ -2068,7 +3284,33 @@ mod tests {
         };
         let cli = Cli::try_parse_from(["nexus", "--base-url", "http://127.0.0.1:9090", "markets"])
             .unwrap();
-        assert_eq!(cli.credential_network(&file), NetworkArg::Mainnet);
+        assert_eq!(cli.target(&file).unwrap().namespace(), "mainnet");
+    }
+
+    /// ...but it *does* change what the target is known to move. The named
+    /// network's classification describes the named network, and the request is
+    /// no longer going there. Reporting `Play` for a host nobody classified is
+    /// the exact failure ENG-9823 exists to remove.
+    #[test]
+    fn a_base_url_override_has_undeclared_funds() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "local",
+            "--base-url",
+            "http://x:1",
+            "markets",
+        ])
+        .unwrap();
+        let target = target(&cli);
+        assert_eq!(target.funds(), Funds::Unknown);
+        // The credential side still belongs to the named network, so the two
+        // questions have two answers rather than one that is wrong for both.
+        assert_eq!(target.credential_funds(), Funds::Play);
+        assert_eq!(target.namespace(), "local");
+        // And it matches what the SDK reports for the same config, so the CLI's
+        // guards and the SDK's cannot disagree about the same invocation.
+        assert_eq!(cli.config(&target).network().funds(), Funds::Unknown);
     }
 
     /// The core guarantee of ENG-6462: a key stored for one network is never
@@ -2078,30 +3320,32 @@ mod tests {
     #[test]
     fn a_stored_key_is_never_offered_to_another_network() {
         let mut file = FileConfig::default();
-        *file.section_mut(NetworkArg::Testnet) = NetworkCredentials {
+        *file.section_mut("testnet") = NetworkCredentials {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("testnet-secret".into()),
             session_token: Some("testnet-token".into()),
         };
 
         let on_testnet = Cli::try_parse_from(["nexus", "--network", "testnet", "balance"]).unwrap();
+        let target = on_testnet.target(&file).unwrap();
         assert_eq!(
-            on_testnet.credentials(&file),
+            on_testnet.credentials(&file, &target),
             Some(("nx_testnet".into(), "testnet-secret".into()))
         );
         assert_eq!(
-            on_testnet.session_token(&file).as_deref(),
+            on_testnet.session_token(&file, &target).as_deref(),
             Some("testnet-token")
         );
 
         let on_mainnet = Cli::try_parse_from(["nexus", "--network", "mainnet", "balance"]).unwrap();
+        let target = on_mainnet.target(&file).unwrap();
         assert_eq!(
-            on_mainnet.credentials(&file),
+            on_mainnet.credentials(&file, &target),
             None,
             "a testnet key must not authenticate a mainnet invocation"
         );
         assert_eq!(
-            on_mainnet.session_token(&file),
+            on_mainnet.session_token(&file, &target),
             None,
             "a testnet session token must not authenticate a mainnet invocation"
         );
@@ -2113,7 +3357,7 @@ mod tests {
     #[test]
     fn flags_override_the_selected_networks_section() {
         let mut file = FileConfig::default();
-        *file.section_mut(NetworkArg::Mainnet) = NetworkCredentials {
+        *file.section_mut("mainnet") = NetworkCredentials {
             api_key: Some("stored".into()),
             api_secret: Some("stored-secret".into()),
             session_token: None,
@@ -2129,8 +3373,9 @@ mod tests {
             "balance",
         ])
         .unwrap();
+        let target = cli.target(&file).unwrap();
         assert_eq!(
-            cli.credentials(&file),
+            cli.credentials(&file, &target),
             Some(("flag".into(), "flag-secret".into()))
         );
     }
@@ -2140,19 +3385,20 @@ mod tests {
     #[test]
     fn two_networks_coexist() {
         let mut file = FileConfig::default();
-        *file.section_mut(NetworkArg::Testnet) = NetworkCredentials {
+        *file.section_mut("testnet") = NetworkCredentials {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("s1".into()),
             session_token: None,
         };
-        *file.section_mut(NetworkArg::Mainnet) = NetworkCredentials {
+        *file.section_mut("mainnet") = NetworkCredentials {
             api_key: Some("nx_mainnet".into()),
             api_secret: Some("s2".into()),
             session_token: None,
         };
         for (flag, expected) in [("testnet", "nx_testnet"), ("mainnet", "nx_mainnet")] {
             let cli = Cli::try_parse_from(["nexus", "--network", flag, "balance"]).unwrap();
-            assert_eq!(cli.credentials(&file).unwrap().0, expected);
+            let target = cli.target(&file).unwrap();
+            assert_eq!(cli.credentials(&file, &target).unwrap().0, expected);
         }
     }
 }
