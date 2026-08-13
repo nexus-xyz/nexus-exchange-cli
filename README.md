@@ -420,19 +420,26 @@ and nothing about it is transmitted.
 - **`funds` is required and has no default.** Both booleans are wrong — `play`
   makes every guardrail lie in the direction that costs money, `real` makes
   development unusable — so the classification is a third thing the caller
-  declares. A missing or unreadable value warns and resolves to **unknown**,
-  which *fails closed*: reads still work, and anything that moves or mints funds
-  is refused rather than assumed safe.
+  declares. It is read case-insensitively (`"Play"` is `play`); a missing or
+  unreadable value warns and resolves to **unknown**, which *fails closed*: reads
+  still work, and anything that moves or mints funds is refused rather than
+  assumed safe.
 - **The label, not the URL, is the credential namespace.** Two stages on one host
   keep separate credentials, and a stage keeps its credentials across a host
   move. Labels are limited to `A-Za-z0-9._-`, capped at 64 characters, and may
   not be `.`, `..`, or a built-in network's name — a label is a storage key, so
-  one that could address another network's credentials is refused outright.
+  one that could address another network's credentials is refused outright. A
+  label is matched **exactly**, case included, and an entry the file declares but
+  cannot select says so rather than reporting the network as unknown.
 - **Nothing is inferred from the URL.** The WebSocket origin is a separate host
   and is never derived from the REST base, so `nexus ws` refuses rather than
   connecting to a guess. The EIP-712 signing domain is likewise absent until
   declared: a signature made under the wrong domain may be *valid on a different
-  network*. Read `chain_id` off that host's `GET /metadata`.
+  network*, so `agents register` against a stage that declares no `chain_id` is
+  **refused** rather than signed under the exchange's own chain — pass
+  `--chain-id`, or read it off that host's `GET /metadata` and declare it. (The
+  built-in networks publish no `chain_id` either and still default to `393`,
+  which is theirs; the refusal is for a target that could genuinely be elsewhere.)
 - **URLs are validated** — `http(s)` scheme, a host, no `user:pass@` userinfo, no
   query or fragment, no whitespace. Each rejection is a URL that would otherwise
   build a *wrong* request rather than merely fail. The host itself is never

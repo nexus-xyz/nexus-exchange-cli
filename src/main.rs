@@ -803,8 +803,13 @@ async fn handle_agents(
             let nonce = nonce.unwrap_or(now_ms);
             // The signed domain follows the target the registration is *for*,
             // not a constant: a custom network on another chain would otherwise
-            // be handed a signature that is valid somewhere else.
-            let chain_id = chain_id.unwrap_or_else(|| target.signing_chain_id());
+            // be handed a signature that is valid somewhere else. A stage that
+            // declares no domain refuses rather than substituting one — see
+            // `Target::signing_chain_id` — and `--chain-id` answers it directly.
+            let chain_id = match chain_id {
+                Some(chain_id) => chain_id,
+                None => target.signing_chain_id()?,
+            };
 
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;

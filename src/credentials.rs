@@ -547,18 +547,29 @@ pub fn real_funds_notice(network: &str, context: &str) -> String {
 /// The network names `setup` offers, for the prompt. Built-ins first, then any
 /// declared custom labels, so the list is what this file can actually select.
 ///
-/// Filtered through `selectable_network` rather than listing the raw map keys:
-/// an entry under a label that cannot be selected would be an offer the next
-/// prompt rejects, and the keys are file-supplied text on its way to a terminal.
-/// A selectable label has passed the SDK's character check, so it carries no
+/// Filtered through the same check the next prompt applies rather than listing
+/// the raw map keys: an entry that cannot be selected — a label the SDK refuses,
+/// or a stage with no reachable base URL — would be an offer that prompt
+/// rejects. The keys are also file-supplied text on its way to a terminal, and a
+/// selectable label has passed the SDK's character check, so it carries no
 /// control bytes.
+///
+/// An entry claiming a built-in's name is skipped rather than listed a second
+/// time: it resolves to the built-in already above it in this list, and offering
+/// the same name twice would suggest the two are different choices.
 fn network_choices(existing: &FileConfig) -> String {
     let mut names: Vec<&str> = vec!["mainnet", "testnet", "local"];
     names.extend(
         existing
             .custom_networks
             .keys()
-            .filter(|label| crate::cli::selectable_network(label, existing).is_some())
+            .filter(|label| {
+                crate::cli::selectable_network(label, existing)
+                    .filter(|selected| selected.builtin_network().is_none())
+                    .is_some_and(|selected| {
+                        crate::cli::check_selection(&selected, existing).is_ok()
+                    })
+            })
             .map(String::as_str),
     );
     names.join("/")
@@ -593,13 +604,17 @@ fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
 /// play-funds host, so the reader needs `testnet`, and the intuitive guess
 /// (`mainnet`) is the one genuinely dangerous answer.
 ///
-/// A custom label is accepted only when this same file **declares** it. `setup`
-/// writes the `network` key, and a name nothing describes would select a stage
-/// that does not exist on every later invocation — the failure belongs here,
-/// where it is one prompt away from being fixed.
+/// A custom label is accepted only when this same file **declares** it, and
+/// declares it *usably*. `setup` writes the `network` key, and a name nothing
+/// describes — or describes with no `base_url`, or with one the SDK refuses —
+/// would select a stage that cannot be reached on every later invocation. The
+/// failure belongs here, where it is one prompt away from being fixed, rather
+/// than after a config the user has been told is saved.
 fn validate_network_name(name: &str, existing: &FileConfig) -> Result<()> {
-    if crate::cli::selectable_network(name, existing).is_some() {
-        return Ok(());
+    if let Some(selected) = crate::cli::selectable_network(name, existing) {
+        // Declared is not the same as usable: `selectable_network` answers only
+        // that the file has an entry under this label.
+        return crate::cli::check_selection(&selected, existing);
     }
     let hint = match NetworkArg::retired_replacement(name) {
         Some(replacement) => format!(
@@ -826,6 +841,70 @@ mod tests {
             !err.contains("release channel"),
             "unexpected retired-name hint for an unrelated value: {err}"
         );
+    }
+
+    /// A declared label is only a candidate. `setup` writes the `network` key,
+    /// so it has to know the stage is *reachable* — an entry with no `base_url`,
+    /// or one the SDK refuses, would otherwise be accepted here and then
+    /// hard-error on every command run against the config it just saved.
+    #[test]
+    fn setup_rejects_a_declared_but_unusable_stage() {
+        let usable = crate::cli::CustomNetworkConfig {
+            base_url: Some("https://exchange.example.com/api/exchange".into()),
+            funds: Some("play".into()),
+            ..Default::default()
+        };
+        let unusable = [
+            // Declared, funds and all, but with nowhere to send a request.
+            crate::cli::CustomNetworkConfig {
+                funds: Some("play".into()),
+                ..Default::default()
+            },
+            // A URL the SDK refuses: userinfo would leak into every log line.
+            crate::cli::CustomNetworkConfig {
+                base_url: Some("https://user:pass@exchange.example.com".into()),
+                funds: Some("play".into()),
+                ..Default::default()
+            },
+        ];
+
+        for declared in unusable {
+            let mut file = FileConfig::default();
+            file.custom_networks.insert("dev".into(), declared);
+            let err = validate_network_name("dev", &file)
+                .expect_err("a stage that cannot be reached must not be persisted")
+                .to_string();
+            assert!(err.contains("dev"), "the error must name the stage: {err}");
+            // ...and it is not offered as a choice either, since the prompt
+            // would only reject it.
+            assert!(
+                !network_choices(&file).contains("dev"),
+                "an unusable stage must not be offered: {}",
+                network_choices(&file)
+            );
+        }
+
+        // The same label, declared usably, is accepted and offered.
+        let mut file = FileConfig::default();
+        file.custom_networks.insert("dev".into(), usable);
+        assert!(validate_network_name("dev", &file).is_ok());
+        assert_eq!(network_choices(&file), "mainnet/testnet/local/dev");
+    }
+
+    /// An entry claiming a built-in's name resolves to the built-in, so offering
+    /// it twice would present one network as two choices.
+    #[test]
+    fn setup_offers_a_shadowing_declaration_once() {
+        let mut file = FileConfig::default();
+        file.custom_networks.insert(
+            "mainnet".into(),
+            crate::cli::CustomNetworkConfig {
+                base_url: Some("https://exchange.example.com/api/exchange".into()),
+                funds: Some("play".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(network_choices(&file), "mainnet/testnet/local");
     }
 
     #[test]

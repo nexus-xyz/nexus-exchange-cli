@@ -483,10 +483,19 @@ pub struct CustomNetworkConfig {
 /// warrants. What it must not do is stay silent — an undeclared classification
 /// that quietly behaved like play funds is precisely the bug ENG-9823 exists to
 /// remove.
+///
+/// Trimmed and compared **case-insensitively**, matching how `--network` and
+/// `nexus setup` read a network name on the same axis: `"Play"` is the
+/// classification `play`, spelled by someone whose editor capitalized it.
+/// Reading it as unclassified would be a fail-closed answer to a question the
+/// file answered plainly. What case-folding does *not* do is widen what counts
+/// as an answer — `"reel"` and `"REEL"` alike land in [`Funds::Unknown`].
 fn parse_funds(label: &str, declared: Option<&str>) -> (Funds, Option<String>) {
     // `{declared:?}`/`{label:?}` throughout: both come from a file and are
     // echoed to a terminal, and `Debug` escapes control bytes.
-    match declared.map(str::trim) {
+    let declared = declared.map(str::trim);
+    let folded = declared.map(str::to_ascii_lowercase);
+    match folded.as_deref() {
         Some("real") => (Funds::Real, None),
         Some("play") => (Funds::Play, None),
         Some("unknown") => (Funds::Unknown, None),
@@ -498,14 +507,19 @@ fn parse_funds(label: &str, declared: Option<&str>) -> (Funds, Option<String>) {
                  \"real\", \"play\" or \"unknown\" in the config."
             )),
         ),
-        Some(other) => (
-            Funds::Unknown,
-            Some(format!(
-                "warning: custom network {label:?} declares \"funds\": {other:?}, which is not \
-                 \"real\", \"play\" or \"unknown\"; treating it as unknown, so commands that move \
-                 or mint funds are refused."
-            )),
-        ),
+        // Reported as written, not as folded: the user is looking for the value
+        // they typed.
+        Some(_) => {
+            let other = declared.unwrap_or_default();
+            (
+                Funds::Unknown,
+                Some(format!(
+                    "warning: custom network {label:?} declares \"funds\": {other:?}, which is \
+                     not \"real\", \"play\" or \"unknown\"; treating it as unknown, so commands \
+                     that move or mint funds are refused."
+                )),
+            )
+        }
     }
 }
 
@@ -641,33 +655,61 @@ impl Target {
         self.base_url_override.is_none() && self.network.has_faucet()
     }
 
-    /// The EIP-712 domain chain id to sign an agent registration under.
+    /// The EIP-712 domain chain id to sign an agent registration under, or the
+    /// reason there is none to sign under.
     ///
-    /// A custom network's declared `chain_id` when it has one, and
-    /// [`DEFAULT_CHAIN_ID`] otherwise — which is what every built-in network
-    /// falls back to, since the SDK publishes no `chain_id` for them (it is
-    /// server-authoritative, read from `/metadata`).
+    /// A declared `chain_id` wins. Failing that, a **built-in** network falls
+    /// back to [`DEFAULT_CHAIN_ID`] — the SDK publishes no `chain_id` for them,
+    /// so the constant is the only answer there is and has always been the one
+    /// used — while a **custom** stage that declares none is refused.
     ///
-    /// Not applied under a base-URL override: the domain belongs to the declared
-    /// target and the registration would be signed for a different host.
-    pub fn signing_chain_id(&self) -> u64 {
-        if self.base_url_override.is_some() {
-            return DEFAULT_CHAIN_ID;
-        }
-        self.network
+    /// The asymmetry is the point. A custom target is the first place where "this
+    /// deployment is on a different chain" is expressible, so it is also the first
+    /// place where the constant is a *guess* rather than the only available
+    /// answer, and `393` is a real chain: signing under it would hand back a
+    /// signature that is valid on the exchange rather than one that fails. That is
+    /// the failure mode [`Network::signing_domain`] refuses to guess at one level
+    /// down, and substituting the constant here would put it back. `--chain-id`
+    /// is the escape hatch, and the error says so.
+    ///
+    /// A base-URL override does **not** discard the declared domain, for the same
+    /// reason it does not change the credential [`namespace`](Self::namespace): a
+    /// registration is signed for the target it names, and a tunnel or proxy in
+    /// front of that target does not move it to another chain. Discarding it would
+    /// silently sign a declared stage's registration under `393` the moment a
+    /// `--base-url` was added — a *wrong signature* rather than a failed request,
+    /// which is the one direction this must not fail in.
+    pub fn signing_chain_id(&self) -> Result<u64> {
+        if let Some(chain_id) = self
+            .network
             .signing_domain()
             .and_then(|domain| domain.chain_id)
-            .unwrap_or(DEFAULT_CHAIN_ID)
+        {
+            return Ok(chain_id);
+        }
+        if let Network::Custom(_) = &self.network {
+            let label = self.network.label();
+            bail!(
+                "custom network {label:?} declares no \"chain_id\", so there is no EIP-712 \
+                 domain to sign this registration under. Read it from that deployment's \
+                 `GET /metadata` and set \"chain_id\" on its \"custom_networks\" entry, or pass \
+                 `--chain-id`. It is not defaulted to {DEFAULT_CHAIN_ID} (the exchange's own \
+                 chain) because a signature made under the wrong domain may be valid on a \
+                 different network."
+            );
+        }
+        Ok(DEFAULT_CHAIN_ID)
     }
 }
 
-/// EIP-712 domain chain id used when the selected target declares none — the
+/// EIP-712 domain chain id used when a **built-in** network is selected — the
 /// exchange's own chain, and the value `agents register` has always defaulted to.
 ///
 /// Kept as a fallback rather than a refusal because every built-in network
 /// reaches it: the SDK deliberately publishes no `chain_id` for them, so
-/// refusing here would break `agents register` on testnet. A custom network can
-/// say better, and [`Target::signing_chain_id`] prefers what it says.
+/// refusing here would break `agents register` on testnet. It is *not* extended
+/// to a custom stage, which can say better and is refused when it does not — see
+/// [`Target::signing_chain_id`].
 pub(crate) const DEFAULT_CHAIN_ID: u64 = 393;
 
 /// Whether `name` selects a network against `file`: a built-in name, or a label
@@ -702,6 +744,28 @@ pub(crate) fn declared_network(file: &FileConfig) -> Option<NetworkArg> {
     selectable_network(file.network.as_deref()?, file)
 }
 
+/// The `custom_networks` key that names `name`, compared **case-insensitively**
+/// and after trimming.
+///
+/// Case-insensitively because that is how the SDK compares a label against the
+/// names it reserves (`eq_ignore_ascii_case`, see [`validate_label`]), and the
+/// two checks have to agree on what "claims this name" means. A case-sensitive
+/// lookup here leaves a gap between them that nothing reports: an entry keyed
+/// `"Mainnet"` is refused by the SDK — so nothing can ever select it, and the
+/// SDK never sees it — while a `contains_key("mainnet")` finds nothing, so the
+/// declaration is discarded in the silence this diagnostic exists to break.
+///
+/// Trimmed on both sides because a key is file-supplied text: `" dev"` and
+/// `"dev"` are the same stage as far as anyone reading the file is concerned,
+/// and [`selectable_network`] already trims the name it is asked about.
+fn declared_key<'a>(name: &str, file: &'a FileConfig) -> Option<&'a str> {
+    let name = name.trim();
+    file.custom_networks
+        .keys()
+        .find(|key| key.trim().eq_ignore_ascii_case(name))
+        .map(String::as_str)
+}
+
 /// The diagnostic for a `custom_networks` entry that claims a built-in
 /// network's name, or `None` when there is nothing to report.
 ///
@@ -713,15 +777,54 @@ pub(crate) fn declared_network(file: &FileConfig) -> Option<NetworkArg> {
 ///
 /// The SDK refuses these labels for the same reason, one level down — see
 /// [`validate_label`] — so this reports a declaration that could never have been
-/// selected rather than adding a rule of its own.
+/// selected rather than adding a rule of its own, and matches the way that
+/// refusal compares (see [`declared_key`]).
 fn shadowed_declaration_warning(name: &str, file: &FileConfig) -> Option<String> {
-    file.custom_networks.contains_key(name).then(|| {
-        format!(
-            "warning: the config file declares a custom network named {name:?}, which is a \
-             built-in network's own name and is therefore ignored — per-network credentials are \
-             stored under that name, so a stage may not claim it. Using the built-in {name:?}. \
-             Rename the entry under \"custom_networks\" to select it."
-        )
+    let declared = declared_key(name, file)?;
+    Some(format!(
+        "warning: the config file declares a custom network named {declared:?}, which is a \
+         built-in network's own name and is therefore ignored — per-network credentials are \
+         stored under that name, so a stage may not claim it. Using the built-in {name:?}. \
+         Rename the entry under \"custom_networks\" to select it."
+    ))
+}
+
+/// The diagnostic for a config-file `network` that names a stage the file
+/// **declares but cannot select** — because the SDK reserves the label
+/// (`custom`, the one a `--base-url` override carries) or refuses its shape, or
+/// because the entry is keyed under a label that does not match exactly.
+///
+/// Split from [`shadowed_declaration_warning`] because the resolution differs:
+/// there a built-in answers to the name, here nothing does, so the invocation
+/// lands on the default. What they share is the failure being *invisible from
+/// the config file* — and this is the half the generic "not a known network"
+/// text reads worst on, since it tells someone staring at a `custom_networks`
+/// entry named `custom` that no such network is declared.
+///
+/// The reason for a refused label is the SDK's own, not a transcription of its
+/// rules. Its messages quote the label with `Debug`, so they carry no raw
+/// control bytes, and `a_config_supplied_label_cannot_smuggle_control_bytes` is
+/// what notices if that ever stops being true.
+fn unselectable_declaration_warning(
+    name: &str,
+    file: &FileConfig,
+    landing: &str,
+) -> Option<String> {
+    let declared = declared_key(name, file)?;
+    Some(match validate_label(declared) {
+        Err(why) => format!(
+            "warning: the config file declares a custom network named {declared:?}, but that \
+             label cannot be selected: {why}. Using the default network ({landing}). Rename the \
+             entry under \"custom_networks\", and the \"network\" key with it."
+        ),
+        // The label is usable, so the only way it failed to select is that it is
+        // not the same string — `selectable_network` looks the key up exactly,
+        // and this is reached only when that lookup missed.
+        Ok(_) => format!(
+            "warning: config-file network {name:?} does not match the custom network the file \
+             declares, {declared:?} — a label is matched exactly, case included. Using the \
+             default network ({landing}). Make \"network\" and the \"custom_networks\" key agree."
+        ),
     })
 }
 
@@ -754,7 +857,22 @@ fn resolve_selection(selected: &NetworkArg, file: &FileConfig) -> Result<Network
         }
         return Ok(builtin);
     }
-    let label = selected.name();
+    let (network, warning) = resolve_declaration(selected.name(), file)?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    Ok(network)
+}
+
+/// Build the network a declared label describes, with the diagnostic for a
+/// `funds` value that could not be read. Errors when the label is not declared,
+/// or is declared badly.
+///
+/// Separate from [`resolve_selection`] so that checking whether a stage is
+/// *usable* — which is what `nexus setup` needs, see [`check_selection`] — runs
+/// the same code that resolving it will, rather than a second opinion about the
+/// same entry.
+fn resolve_declaration(label: &str, file: &FileConfig) -> Result<(Network, Option<String>)> {
     let Some(declared) = file.custom_networks.get(label) else {
         // `{key:?}` on every declared name: they come from a file and are
         // echoed to a terminal, and `Debug` escapes control bytes, so a
@@ -776,11 +894,27 @@ fn resolve_selection(selected: &NetworkArg, file: &FileConfig) -> Result<Network
              of \"real\", \"play\" or \"unknown\"."
         );
     };
-    let (network, warning) = declared.to_network(label)?;
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
+    declared.to_network(label)
+}
+
+/// Check that a selection is not merely *declared* but **usable**: that a custom
+/// stage's entry actually builds a network. A built-in always does.
+///
+/// `contains_key` is not the same question. An entry with no `base_url`, or with
+/// one the SDK refuses, parses fine and is selectable — so `nexus setup` would
+/// accept it, write it to `network`, and leave every later command hard-erroring
+/// on a file the user has already been told is saved. Refusing here puts the
+/// failure one prompt away from the fix, which is the reason `setup` validates
+/// the name at all.
+///
+/// Any `funds` diagnostic is dropped: this answers a yes/no question, and its
+/// callers include a filter that must not print. The warning is not lost — it is
+/// emitted when the stage is actually resolved.
+pub(crate) fn check_selection(selected: &NetworkArg, file: &FileConfig) -> Result<()> {
+    if selected.builtin_network().is_some() {
+        return Ok(());
     }
-    Ok(network)
+    resolve_declaration(selected.name(), file).map(|_| ())
 }
 
 impl Cli {
@@ -818,7 +952,14 @@ impl Cli {
                 None => {
                     let fallback = Config::default().network().clone();
                     if let Some(name) = file.network.as_deref() {
-                        if let Some(warning) = stale_network_warning(name, fallback.label()) {
+                        // A stage the file *declares* but cannot select reports
+                        // that first: the generic "not a known network" text is
+                        // read while looking straight at the entry it says is
+                        // not there.
+                        let warning =
+                            unselectable_declaration_warning(name, file, fallback.label())
+                                .or_else(|| stale_network_warning(name, fallback.label()));
+                        if let Some(warning) = warning {
                             eprintln!("{warning}");
                         }
                     }
@@ -1324,10 +1465,12 @@ pub enum AgentsCommand {
         /// payload, so it must match what the server verifies against.
         ///
         /// Defaults to the selected network's declared signing domain — a custom
-        /// network's `chain_id` — and to [`DEFAULT_CHAIN_ID`] when it declares
-        /// none. Read it off the target's `GET /metadata` rather than assuming:
-        /// a signature made under the wrong domain either fails verification or,
-        /// worse, is *valid on a different network*.
+        /// network's `chain_id` — and to [`DEFAULT_CHAIN_ID`] on a built-in
+        /// network, for which the SDK publishes none. A custom network that
+        /// declares no `chain_id` is **refused** rather than defaulted, and this
+        /// flag is how you answer it. Read it off that target's `GET /metadata`
+        /// rather than assuming: a signature made under the wrong domain either
+        /// fails verification or, worse, is *valid on a different network*.
         #[arg(long)]
         chain_id: Option<u64>,
         /// Optional human-readable label for the agent.
@@ -2605,6 +2748,92 @@ mod tests {
         assert!(shadowed_declaration_warning("mainnet", &FileConfig::default()).is_none());
     }
 
+    /// The same declaration in a different case is the same claim. The SDK
+    /// compares its reserved labels with `eq_ignore_ascii_case`, so `"Mainnet"`
+    /// can never be selected either — and a case-sensitive check here would let
+    /// it fall between the two: refused there, invisible here, while the user
+    /// believes they are pointed at the host they declared.
+    #[test]
+    fn a_declaration_claiming_a_built_in_name_is_reported_in_any_case() {
+        for claimed in ["Mainnet", "MAINNET", "MaInNeT"] {
+            let file = file_declaring(claimed, declared_stage("play"));
+            let cli = Cli::try_parse_from(["nexus", "--network", "mainnet", "markets"]).unwrap();
+            let target = cli.target(&file).expect("the built-in still resolves");
+
+            // The safe resolution is unchanged: the built-in wins.
+            assert_eq!(target.namespace(), "mainnet");
+            assert_eq!(target.network(), &Network::Mainnet);
+            assert_eq!(target.funds(), Funds::Real);
+
+            let warning = shadowed_declaration_warning("mainnet", &file).unwrap_or_else(|| {
+                panic!("{claimed:?} must be reported, not discarded in silence")
+            });
+            assert!(
+                warning.contains(claimed),
+                "the warning must quote the entry as written: {warning}"
+            );
+        }
+    }
+
+    /// A declaration under a label the SDK reserves for something else — here
+    /// `custom`, which is what a `--base-url` override answers to — is not
+    /// selectable, and saying "not a known network" to someone looking straight
+    /// at a `custom_networks` entry by that name explains nothing. Same root
+    /// cause as the built-in claim above, one case over.
+    #[test]
+    fn a_declaration_under_a_reserved_label_says_why_it_does_nothing() {
+        for reserved in ["custom", "Custom"] {
+            let mut file = file_declaring(reserved, declared_stage("play"));
+            file.network = Some(reserved.into());
+
+            let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+            // It still lands on the default, which is play funds and safe.
+            assert_eq!(
+                cli.target(&file).unwrap().namespace(),
+                DEFAULT_NETWORK.name()
+            );
+
+            let warning = unselectable_declaration_warning(reserved, &file, "testnet")
+                .unwrap_or_else(|| {
+                    panic!("{reserved:?} must be explained, not reported as absent")
+                });
+            assert!(
+                warning.contains(reserved) && warning.contains("reserved"),
+                "the warning must quote the entry and say why: {warning}"
+            );
+            // The generic text would be the confusing one, so it must not be
+            // what a reader gets.
+            assert!(
+                !warning.contains("is not a known network"),
+                "a declared entry must not be reported as unknown: {warning}"
+            );
+        }
+    }
+
+    /// A label is matched exactly, so an entry keyed `"Dev"` is not selected by
+    /// `"network": "dev"`. That resolution is right — the label is a credential
+    /// key and case is part of it — but the file names something it declares, so
+    /// the diagnostic has to point at the mismatch rather than deny the entry
+    /// exists.
+    #[test]
+    fn a_label_that_differs_only_in_case_names_the_declared_entry() {
+        let mut file = file_declaring("Dev", declared_stage("play"));
+        file.network = Some("dev".into());
+
+        let cli = Cli::try_parse_from(["nexus", "markets"]).unwrap();
+        assert_eq!(
+            cli.target(&file).unwrap().namespace(),
+            DEFAULT_NETWORK.name(),
+            "an inexact label must not select the entry"
+        );
+
+        let warning = unselectable_declaration_warning("dev", &file, "testnet").expect("a warning");
+        assert!(
+            warning.contains("\"Dev\"") && warning.contains("exactly"),
+            "the warning must name the declared key and say matching is exact: {warning}"
+        );
+    }
+
     /// Selecting a stage the file does not describe is an error, not a fallback:
     /// the user named it on this command line, and quietly sending the request
     /// somewhere else is the failure class ENG-6455 removed.
@@ -2646,6 +2875,26 @@ mod tests {
         let warning = stale_network_warning(hostile, "testnet").expect("a warning");
         assert!(!warning.contains('\u{1b}'), "raw ESC in: {warning:?}");
         assert!(!warning.contains('\u{7}'), "raw BEL in: {warning:?}");
+
+        // ...and that is the warning a declared-but-unusable label gets, which
+        // quotes the SDK's own reason for refusing it. The SDK renders the label
+        // with `Debug` too; this is what notices if it stops.
+        let warning = unselectable_declaration_warning(hostile, &file, "testnet")
+            .expect("a declared entry must be explained rather than denied");
+        assert!(!warning.contains('\u{1b}'), "raw ESC in: {warning:?}");
+        assert!(!warning.contains('\u{7}'), "raw BEL in: {warning:?}");
+
+        // A near-miss key is not a claim on the name, so the shadow warning
+        // never echoes one: matching a built-in case-insensitively means the key
+        // *is* that word in ASCII letters, and nothing else can reach that line.
+        for near_miss in ["main\u{1b}net", "MAINNET\u{7}", "mainnet."] {
+            let shadow = file_declaring(near_miss, declared_stage("play"));
+            assert_eq!(
+                shadowed_declaration_warning("mainnet", &shadow),
+                None,
+                "{near_miss:?} does not claim the built-in's name"
+            );
+        }
 
         // ...and naming a *different* label lists what is declared, which must
         // escape it too.
@@ -2715,7 +2964,7 @@ mod tests {
             Some(""),
             Some("  "),
             Some("reel"),
-            Some("Real"),
+            Some("REEL"),
             Some("true"),
         ] {
             let (funds, warning) = parse_funds("dev", declared);
@@ -2731,12 +2980,17 @@ mod tests {
                 "the warning must name the stage: {warning}"
             );
         }
-        // The three real values read cleanly and say nothing.
+        // The three real values read cleanly and say nothing — trimmed, and
+        // case-folded like `--network`, so a capitalized classification is the
+        // classification rather than a silent `Unknown`.
         for (declared, expected) in [
             ("real", Funds::Real),
             ("play", Funds::Play),
             ("unknown", Funds::Unknown),
             ("  play  ", Funds::Play),
+            ("Real", Funds::Real),
+            ("PLAY", Funds::Play),
+            ("Unknown", Funds::Unknown),
         ] {
             assert_eq!(parse_funds("dev", Some(declared)), (expected, None));
         }
@@ -2790,18 +3044,68 @@ mod tests {
         let file = file_declaring("dev", declared);
 
         let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
-        assert_eq!(cli.target(&file).unwrap().signing_chain_id(), 31337);
+        assert_eq!(
+            cli.target(&file).unwrap().signing_chain_id().unwrap(),
+            31337
+        );
 
-        // A stage that declares none, and every built-in, fall back to the
-        // exchange's own chain — the SDK publishes no chain id for them.
+        // Every built-in falls back to the exchange's own chain — the SDK
+        // publishes no chain id for them, so the constant is the only answer
+        // there is, and `agents register` has always used it.
+        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
+        assert_eq!(target(&cli).signing_chain_id().unwrap(), DEFAULT_CHAIN_ID);
+    }
+
+    /// A custom stage that declares no domain is **refused**, not defaulted.
+    /// `393` is a real chain, and a custom target is the first one for which
+    /// "somewhere else" is expressible — so substituting the constant would hand
+    /// back a signature valid on the exchange rather than a request that failed.
+    #[test]
+    fn an_undeclared_domain_refuses_to_pick_a_chain_id() {
         let file = file_declaring("dev", declared_stage("play"));
         let cli = Cli::try_parse_from(["nexus", "--network", "dev", "markets"]).unwrap();
-        assert_eq!(
-            cli.target(&file).unwrap().signing_chain_id(),
-            DEFAULT_CHAIN_ID
+        let err = cli
+            .target(&file)
+            .unwrap()
+            .signing_chain_id()
+            .expect_err("an undeclared domain must not resolve to a chain id")
+            .to_string();
+        assert!(err.contains("dev"), "the error must name the stage: {err}");
+        assert!(
+            err.contains("chain_id") && err.contains("--chain-id"),
+            "the error must say how to answer it: {err}"
         );
-        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "markets"]).unwrap();
-        assert_eq!(target(&cli).signing_chain_id(), DEFAULT_CHAIN_ID);
+    }
+
+    /// A base-URL override keeps the declared domain, exactly as it keeps the
+    /// credential namespace: a tunnel in front of a stage does not move it to
+    /// another chain. Substituting the constant here would silently sign under
+    /// `393` the moment a `--base-url` was added — a wrong signature rather than
+    /// a failed request.
+    #[test]
+    fn an_override_does_not_change_the_signing_domain() {
+        let mut declared = declared_stage("play");
+        declared.chain_id = Some(31337);
+        let file = file_declaring("dev", declared);
+
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "dev",
+            "--base-url",
+            "http://127.0.0.1:9090",
+            "markets",
+        ])
+        .unwrap();
+        let resolved = cli.target(&file).unwrap();
+        assert_eq!(resolved.base_url_override(), Some("http://127.0.0.1:9090"));
+        assert_eq!(resolved.signing_chain_id().unwrap(), 31337);
+
+        // ...and an override over a built-in still reaches the constant, which
+        // is the pre-existing behaviour for every target that declares nothing.
+        let cli = Cli::try_parse_from(["nexus", "--base-url", "http://127.0.0.1:9090", "markets"])
+            .unwrap();
+        assert_eq!(target(&cli).signing_chain_id().unwrap(), DEFAULT_CHAIN_ID);
     }
 
     /// An undeclared WS origin stays `None` rather than being derived from the
