@@ -22,7 +22,9 @@
 //!    which is the point.
 //! 2. **Distribution invariants** — `tag_shape_stays_binstall_compatible`,
 //!    `release_starts_as_draft_for_the_dist_handoff`,
-//!    `release_as_is_never_committed`, and `cargo_toml_and_release_manifest_agree`.
+//!    `release_as_is_never_committed`, `cargo_toml_and_release_manifest_agree`,
+//!    and `windows_target_keeps_shipping` (the one guard here that reads
+//!    `dist-workspace.toml` rather than the release-please config).
 //!    These have nothing to do with being pre-1.0 and stay correct at every
 //!    version. Do not delete them along with the pre-1.0 pair.
 //!
@@ -267,6 +269,69 @@ fn cargo_toml_version() -> String {
         }
     }
     panic!("could not find `version` in Cargo.toml's [package] section");
+}
+
+/// The whole `targets = [...]` value from `dist-workspace.toml`, brackets included.
+///
+/// Spans lines instead of matching one. The array is single-line today only by
+/// accident of width — it is already 140 characters in a file whose every comment
+/// stops at 80 — and the likeliest reason to edit it is *adding* a target, which
+/// is precisely what tips it over into being wrapped. A line-scoped match would
+/// then see `targets = [`, and the guard below would report the Windows target as
+/// missing at the moment someone added a second Windows one.
+fn dist_targets_array(text: &str) -> String {
+    let mut lines = text.lines().skip_while(|line| {
+        let line = line.trim_start();
+        !(line.starts_with("targets") && line["targets".len()..].trim_start().starts_with('='))
+    });
+
+    let mut array = lines
+        .next()
+        .expect("could not find a `targets = [...]` key in dist-workspace.toml")
+        .trim()
+        .to_string();
+
+    while !array.contains(']') {
+        let next = lines
+            .next()
+            .expect("`targets` in dist-workspace.toml opens an array that never closes");
+        array.push(' ');
+        array.push_str(next.trim());
+    }
+
+    array
+}
+
+/// The Windows target keeps shipping even though it is no longer signed.
+///
+/// ENG-9357 removed `ssldotcom-windows-sign` from `dist-workspace.toml` and left
+/// `x86_64-pc-windows-msvc` in `targets` on purpose: signing went, the platform
+/// stayed. Those two lines now sit ~20 lines apart in the same file, under a
+/// comment block explaining why Windows is not worth a purchased certificate —
+/// which is exactly the reading that makes dropping the target look like
+/// finishing the job.
+///
+/// Guarded because that mistake is *silent*. Every other way to break a release
+/// turns CI red; this one leaves the pipeline green and simply stops producing
+/// Windows artifacts, and nobody is watching a platform at 0.2% of downloads.
+/// The same lapse in `Release` itself sat unnoticed for ten days.
+///
+/// Re-enabling signing later does not conflict with this — it adds a key back,
+/// it does not remove the target. Dropping Windows deliberately means deleting
+/// this test, which is the point.
+#[test]
+fn windows_target_keeps_shipping() {
+    let targets = dist_targets_array(&read("dist-workspace.toml"));
+
+    assert!(
+        targets.contains("x86_64-pc-windows-msvc"),
+        "dist-workspace.toml no longer builds `x86_64-pc-windows-msvc`. ENG-9357 \
+         removed Authenticode *signing* while keeping the artifact: Windows users \
+         still download a .zip and .msi, now carrying only a .minisig and a build \
+         provenance attestation. Dropping the target ships nothing at all for \
+         Windows, and does it quietly — no job fails, the release just comes out \
+         short. Found: {targets}"
+    );
 }
 
 /// release-please bumps `Cargo.toml` and `.release-please-manifest.json`

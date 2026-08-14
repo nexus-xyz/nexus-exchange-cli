@@ -52,11 +52,13 @@ install-updater = false
 
 # --- macOS code signing ------------------------------------------------------
 # Code-signing the macOS binaries with an Apple Developer ID certificate is
-# supported, but DISABLED until a real certificate secret is configured. Unlike
-# the Windows/SSL.com path, dist's macOS path does NOT skip when the cert is
-# absent — it tries to import an empty certificate and the build fails. Since we
-# now build on every PR (pr-run-mode = upload), leaving this on with no cert
-# would break every build, not just releases.
+# supported, but DISABLED until a real certificate secret is configured. dist's
+# macOS path does NOT skip when the cert is absent — it tries to import an empty
+# certificate and the build fails. Since we now build on every PR
+# (pr-run-mode = upload), leaving this on with no cert would break every build,
+# not just releases. (This once said "unlike the Windows/SSL.com path". That was
+# wrong in the same way the Windows comment below was: neither path skips a
+# missing credential — see ENG-9357.)
 #
 # To enable: add the CODESIGN_CERTIFICATE / CODESIGN_CERTIFICATE_PASSWORD /
 # CODESIGN_IDENTITY secrets (see README) and set this to `true`.
@@ -65,9 +67,46 @@ install-updater = false
 # only adds value for a stapled bundle (.pkg/.dmg) — a loose CLI binary can't be
 # stapled — so it's deferred until/unless we ship a .pkg installer.
 macos-sign = false
-# Authenticode-sign the Windows binaries and .msi via SSL.com's eSigner using
-# the production CA; credentials come from CI secrets (skipped if absent).
-ssldotcom-windows-sign = "prod"
+# --- Windows code signing ----------------------------------------------------
+# Authenticode signing of the Windows binaries and .msi (dist's
+# `ssldotcom-windows-sign = "prod"`, via SSL.com eSigner) is DELIBERATELY OFF.
+# Absence of the key is the off state — dist rejects a boolean here ("wanted
+# string or table"), so do not "disable" it by writing `false`.
+#
+# Why it is off, so this does not get read as an oversight and "fixed":
+#   * We never held an SSL.com eSigner credential. The four SSLDOTCOM_* secrets
+#     exist in no scope (repo, org, or environment), and the env dump on the
+#     LAST GREEN run (2026-07-17) already shows all four empty — so this was
+#     never a certificate that lapsed. Turning signing back on is not a
+#     rotation: it means buying a certificate.
+#   * The behaviour changed underneath us, which is why it looked like an
+#     expiry. `${{ secrets.X }}` expands a missing secret to the empty string,
+#     so dist saw present-and-empty credentials throughout. Until 2026-07-17 it
+#     skipped signing on those (no SSL.com call appears in that job's log, and
+#     the .msi shipped unsigned). From 2026-07-18 every run instead attempted
+#     the OAuth exchange and SSL.com answered `invalid_grant`. Nothing in this
+#     repo changed between the two — dist is pinned at 0.31.0 and this file was
+#     untouched from 06-25 to 08-13. The timing read as a credential expiring
+#     and was misfiled as one three times (ENG-7534 / ENG-9607 / ENG-9357).
+#   * The Windows target is 12 of 6,268 all-time downloads (0.2%), and GitHub's
+#     counter is not deduplicated — CI, crawlers and mirrors included — so 12 is
+#     an upper bound. It cost every release: no `Release` run has gone green
+#     since 2026-07-17 (ENG-9357).
+#
+# What this does NOT change: the Windows target stays in `targets` above and the
+# archive/.msi ship exactly as before, with their .minisig and their GitHub
+# build-provenance attestation. Only Authenticode — the signature SmartScreen
+# checks — is gone. Windows users get a dismissible SmartScreen prompt; a
+# managed host running WDAC/AppLocker in enforcement may block the binary
+# outright. README documents both.
+#
+# To re-enable: buy an SSL.com eSigner certificate, add SSLDOTCOM_USERNAME /
+# SSLDOTCOM_PASSWORD / SSLDOTCOM_CREDENTIAL_ID / SSLDOTCOM_TOTP_SECRET as
+# *repository* secrets (this job declares no `environment:`, so environment
+# secrets are unreadable to it), restore `ssldotcom-windows-sign = "prod"` here,
+# and regenerate. Note that `pr-run-mode = "upload"` runs this on pull requests
+# too, so doing so re-couples every contributor's PR status to a production
+# secret — decide that deliberately rather than inheriting it.
 
 # Grant the custom minisign publish job exactly the scope it needs and nothing
 # more: write access to release assets so it can attach .minisig files, and read
