@@ -271,6 +271,37 @@ fn cargo_toml_version() -> String {
     panic!("could not find `version` in Cargo.toml's [package] section");
 }
 
+/// The whole `targets = [...]` value from `dist-workspace.toml`, brackets included.
+///
+/// Spans lines instead of matching one. The array is single-line today only by
+/// accident of width — it is already 140 characters in a file whose every comment
+/// stops at 80 — and the likeliest reason to edit it is *adding* a target, which
+/// is precisely what tips it over into being wrapped. A line-scoped match would
+/// then see `targets = [`, and the guard below would report the Windows target as
+/// missing at the moment someone added a second Windows one.
+fn dist_targets_array(text: &str) -> String {
+    let mut lines = text.lines().skip_while(|line| {
+        let line = line.trim_start();
+        !(line.starts_with("targets") && line["targets".len()..].trim_start().starts_with('='))
+    });
+
+    let mut array = lines
+        .next()
+        .expect("could not find a `targets = [...]` key in dist-workspace.toml")
+        .trim()
+        .to_string();
+
+    while !array.contains(']') {
+        let next = lines
+            .next()
+            .expect("`targets` in dist-workspace.toml opens an array that never closes");
+        array.push(' ');
+        array.push_str(next.trim());
+    }
+
+    array
+}
+
 /// The Windows target keeps shipping even though it is no longer signed.
 ///
 /// ENG-9357 removed `ssldotcom-windows-sign` from `dist-workspace.toml` and left
@@ -290,12 +321,7 @@ fn cargo_toml_version() -> String {
 /// this test, which is the point.
 #[test]
 fn windows_target_keeps_shipping() {
-    let text = read("dist-workspace.toml");
-    let targets = text
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("targets") && line[7..].trim_start().starts_with('='))
-        .expect("could not find a `targets = [...]` line in dist-workspace.toml");
+    let targets = dist_targets_array(&read("dist-workspace.toml"));
 
     assert!(
         targets.contains("x86_64-pc-windows-msvc"),
