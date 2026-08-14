@@ -50,6 +50,83 @@ fn help_lists_commands_and_exits_zero() {
     assert!(out.stdout.contains("Usage:"));
 }
 
+/// `--base-url` is marked deprecated in the help, and the help names the
+/// replacement (ENG-10956).
+///
+/// Asserted on both `-h` and `--help`: clap renders the first line as short help
+/// and the whole comment as long help, so a marker written only into the body
+/// would be invisible to `-h` — which is the one most people type.
+#[test]
+fn help_marks_base_url_deprecated_and_names_the_replacement() {
+    for flag in ["-h", "--help"] {
+        let out = run(&[flag]);
+        assert_eq!(out.code, Some(0), "`{flag}` should exit 0");
+
+        let line = out
+            .stdout
+            .lines()
+            .skip_while(|l| !l.contains("--base-url"))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            line.contains("[deprecated]"),
+            "`{flag}` must mark --base-url deprecated, got: {line}"
+        );
+        assert!(
+            line.contains("--network"),
+            "`{flag}` must name the replacement, got: {line}"
+        );
+    }
+}
+
+/// The deprecation notice goes to stderr and never to stdout — including under
+/// `--output json`, where stdout is a document something else parses.
+///
+/// The notice is deliberately *not* suppressed for JSON callers: they are the
+/// ones with a pinned invocation to migrate. Keeping it off stdout is what makes
+/// that safe, so this asserts the split rather than the presence alone.
+#[test]
+fn a_base_url_override_warns_on_stderr_and_never_on_stdout() {
+    // Port 1 is unroutable, so the command fails after the notice is printed.
+    // What is under test is the notice and the stream it lands on, not the fetch.
+    let out = run(&[
+        "--base-url",
+        "http://127.0.0.1:1",
+        "--output",
+        "json",
+        "markets",
+    ]);
+
+    assert!(
+        out.stderr.contains("deprecated"),
+        "stderr should carry the notice, got: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("--base-url"),
+        "the notice should name the flag that was passed, got: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("deprecated"),
+        "the notice must never reach stdout, got: {}",
+        out.stdout
+    );
+}
+
+/// The ordinary path stays silent. A deprecation notice on every invocation is
+/// how warnings stop being read.
+#[test]
+fn no_base_url_override_emits_no_deprecation_notice() {
+    let out = run(&["--network", "testnet", "--help"]);
+    assert!(
+        !out.stderr.contains("ENG-10956"),
+        "nothing should warn without an override, got: {}",
+        out.stderr
+    );
+}
+
 #[test]
 fn version_flag_works() {
     let out = run(&["--version"]);

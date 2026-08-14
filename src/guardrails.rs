@@ -57,7 +57,10 @@ pub fn announce_network(target: &Target) {
         // so "you are on mainnet" would be an overstatement — say what is
         // actually true, which is that a real-funds network's key is being
         // presented to a host the user chose. `{url:?}` because the value can
-        // come from the config file, and `Debug` escapes control bytes.
+        // come from the config file, and `Debug` escapes control bytes; and
+        // `redact_userinfo` because the legacy override path never rejected a
+        // `user:pass@`, so this line could otherwise print a password into a CI
+        // log (ENG-10956).
         Some(url) => eprintln!(
             "{}",
             real_funds_notice(
@@ -65,7 +68,8 @@ pub fn announce_network(target: &Target) {
                 &format!(
                     "Using {} credentials against the overridden base URL {url:?}, whose funds \
                      are undeclared.",
-                    target.namespace()
+                    target.namespace(),
+                    url = crate::cli::redact_userinfo(url),
                 )
             )
         ),

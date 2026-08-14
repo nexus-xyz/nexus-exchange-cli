@@ -89,6 +89,16 @@ impl std::fmt::Debug for NetworkCredentials {
 pub struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// **Deprecated** (ENG-10956) in favour of a `custom_networks` entry selected
+    /// by `network` above. Still read, with unchanged precedence — it beats
+    /// `network` — and still written by nothing, since `nexus setup` has never
+    /// emitted it.
+    ///
+    /// This is the quieter half of the deprecation and the reason the notice
+    /// exists at runtime rather than only in `--help`: a `--base-url` on the
+    /// command line is at least visible in the command that used it, whereas this
+    /// key keeps redirecting every invocation long after whoever added it has
+    /// forgotten, while declaring neither funds nor a credential namespace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 

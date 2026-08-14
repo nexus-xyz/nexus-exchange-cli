@@ -75,6 +75,14 @@ async fn main() -> Result<()> {
     // warning about.
     guardrails::announce_network(&target);
 
+    // The base-URL deprecation (ENG-10956). Emitted here and nowhere else:
+    // `target` is resolved once above, so this is once per invocation without a
+    // flag, a `Once`, or any shared state to race on. stderr keeps it out of the
+    // `--output json` document on stdout.
+    if let Some(notice) = target.base_url_deprecation_notice() {
+        eprintln!("{notice}");
+    }
+
     match cli.command {
         // ── public market data ──
         Command::Markets => {

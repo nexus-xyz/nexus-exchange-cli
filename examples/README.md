@@ -29,8 +29,10 @@ credentials from `nexus setup`, from `--api-key`/`--api-secret`, or from the
 | [`batch_orders.json`](./batch_orders.json) | Sample input for `nexus order batch` | — |
 
 > Every command takes a global `--output json` flag for machine-readable output,
-> and `--network <mainnet\|testnet\|local>` / `--base-url <url>` to choose the
-> target. These examples run against the default **testnet** (play funds), so a
-> copy-paste run cannot move real money.
+> and `--network <mainnet\|testnet\|local\|LABEL>` to choose the target — where
+> `LABEL` is a stage you declared under `custom_networks`. (`--base-url` still
+> works but is deprecated; see the
+> [README](../README.md#the-base-url-override-is-deprecated).) These examples run against the
+> default **testnet** (play funds), so a copy-paste run cannot move real money.
 > `north_star.sh` is the one script meant to run end to end unedited; the others
 > are recipes with `<PLACEHOLDER>` ids to run a line at a time.
