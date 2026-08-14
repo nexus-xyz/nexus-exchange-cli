@@ -283,6 +283,7 @@ nexus health                        # indexer health snapshot
 nexus market summary                       # 24h volume + halt state per market
 nexus market status BTC-USDX-PERP          # lifecycle / halt status
 nexus market mark-price BTC-USDX-PERP      # current mark price
+nexus market adl-events BTC-USDX-PERP --limit 50   # ADL settlements (needs credentials)
 
 # Authenticated account (see Credentials below)
 nexus balance                       # balance, collateral, equity, margin
@@ -302,10 +303,15 @@ nexus withdrawals                   # withdrawal history
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
 # By-id order commands are routed per market, so they require --market.
+# (By-client-id commands are account-scoped and do not.)
 nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
+nexus order get-by-client-id <CLIENT_ORDER_ID>   # …or by your own id
 nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
+nexus order cancel-by-client-id <CLIENT_ORDER_ID>
+nexus order cancel-batch <ORDER_ID> <ORDER_ID>   # several ids, one request
+nexus order cancel --market BTC-USDX-PERP        # flatten one market
 nexus order cancel --all
 
 # Account management (see Credentials below)
@@ -317,6 +323,7 @@ nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account leverage BTC-USDX-PERP 10
+nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
 # Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
 # withdrawn (ENG-7740): no endpoint accepts a margin-mode change, so the command
 # could only ever fail. Tracking: ENG-7614.
@@ -775,16 +782,18 @@ in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
 The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **36 of 98** spec operations (**36.7%**). The denominator carries both
-stacks (gateway + `/api/v1`) plus the admin/stats surfaces the CLI does not
-target; it grew again in `v0.7.2` with the portfolio-parity, order-preview, and
-history endpoints. Four of those — the portfolio summary, consolidated state,
-fee schedule, and portfolio history — are what the `nexus account` commands added
-in [ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover. The
-thirty-sixth is a **correction**, not new delivery: `order amend` was exempted as
-ahead-of-spec while mapped to the wrong verb (`PUT`, where the SDK issues
-`PATCH`), so it went covered but uncounted until invariant 3 rejected the stale
-exemption. Run it locally with a fetched spec:
+exercises **38 of 98** spec operations (**38.8%**) — measured by running the
+check against the pinned `v0.7.2` spec on the merged tree, not carried over from
+either side of the rebase. The denominator carries both stacks (gateway +
+`/api/v1`) plus the admin/stats surfaces the CLI does not target; it grew again
+in `v0.7.2` with the portfolio-parity, order-preview and history endpoints.
+`main` alone reads 36: four are what the `nexus account` commands added in
+[ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover, and the
+thirty-sixth is a correction rather than new
+delivery — `order amend` was exempted as ahead-of-spec while mapped to the wrong
+verb (`PUT`, where the SDK issues `PATCH`), so it went covered but uncounted
+until invariant 3 rejected the stale exemption. The two beyond that are this
+branch's own additions. Run it locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json
@@ -794,7 +803,7 @@ python3 scripts/test_sdk_parity.py         # no network needed
 ```
 
 Coverage is **structurally capped by the SDK**: the CLI is a thin layer over
-`nexus_exchange::Client` and issues no path of its own, so its 36 is a subset of
+`nexus_exchange::Client` and issues no path of its own, so its 38 is a subset of
 what that crate wraps, not an independent number. Two consequences worth knowing
 before reading the figure as a CLI decision: the CLI cannot reach an operation the
 crate has no wrapper for (bridge deposits, for instance, are wrapped by the SDK
@@ -802,6 +811,8 @@ but have no CLI command yet — a real gap, and one the drift check cannot see,
 since it can only flag a *mismatched* manifest, never a *missing* one), and a
 spec bump that needs new operations can't be satisfied here until
 `nexus-exchange-rs` ships them.
+
+See [`examples/`](./examples) for copy-pasteable recipes covering each flow.
 
 ### Keeping the pin current
 

@@ -110,6 +110,9 @@ METHOD_OP = {
     "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
     "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
     "health_check": ("GET", "/status"),  # v0.7.1 replaced /health with /status
+    # ADL reads (HMAC-gated server-side despite the market scope)
+    "fetch_market_adl_events": ("GET", "/markets/{market_id}/adl-events"),  # no /api/v1 variant yet
+    "fetch_account_adl_history": ("GET", "/account/{address}/adl-history"),  # no /api/v1 variant yet
     # authenticated account (read)
     "fetch_balance": ("GET", "/api/v1/account"),
     # portfolio-parity reads (ENG-6460), added to the spec in v0.7.2
@@ -130,6 +133,9 @@ METHOD_OP = {
     "create_orders": ("POST", "/api/v1/orders/batch"),
     "cancel_order": ("DELETE", "/api/v1/orders/{order_id}"),
     "cancel_all_orders": ("DELETE", "/api/v1/orders"),
+    # Per-market flatten: the same DELETE-orders op as cancel_all_orders, scoped
+    # by a `market_id` query parameter (queries don't change the spec op).
+    "cancel_orders_for_market": ("DELETE", "/api/v1/orders"),
     "deposit": ("POST", "/account/deposit"),  # no /api/v1 variant yet
     "claim_credit": ("POST", "/api/v1/account/credit"),
     "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
@@ -154,6 +160,9 @@ METHOD_OP = {
     "fetch_transfers": ("GET", "/transfers"),
     "create_sub_account": ("POST", "/sub-accounts"),
     "fetch_sub_accounts": ("GET", "/sub-accounts"),
+    "cancel_orders": ("POST", "/orders/batch-cancel"),
+    "fetch_order_by_client_id": ("GET", "/orders/by-client-id/{client_order_id}"),
+    "cancel_order_by_client_id": ("DELETE", "/orders/by-client-id/{client_order_id}"),
 }
 
 # Why a row can be absent from the pinned spec. The distinction is the entire
@@ -194,6 +203,18 @@ CODE_ONLY_OPS = {
     ("GET", "/transfers"): ("transfers list", ROUTE_INVISIBLE, "ENG-7800"),
     ("POST", "/sub-accounts"): ("sub-accounts create", ROUTE_INVISIBLE, "ENG-7800"),
     ("GET", "/sub-accounts"): ("sub-accounts list", ROUTE_INVISIBLE, "ENG-7800"),
+    # ENG-5487's three, converted from bare tuples when #46 (ENG-7927) turned this
+    # set into an attributed mapping. SERVED_UNSPECIFIED rather than
+    # ROUTE_INVISIBLE: unlike /transfers and /sub-accounts, these paths are not
+    # absent from the served surface as a category — the spec simply does not name
+    # these three operations, while the SDK ships the methods this PR wires up.
+    ("POST", "/orders/batch-cancel"): ("order cancel-batch", SERVED_UNSPECIFIED, "ENG-5487"),
+    ("GET", "/orders/by-client-id/{}"): ("order get-by-client-id", SERVED_UNSPECIFIED, "ENG-5487"),
+    ("DELETE", "/orders/by-client-id/{}"): (
+        "order cancel-by-client-id",
+        SERVED_UNSPECIFIED,
+        "ENG-5487",
+    ),
 }
 
 # Well-formed tracking reference, e.g. ENG-7800.
@@ -219,8 +240,6 @@ NON_REST_TARGETS = {
 # here so the exclusion is intentional, not an oversight:
 #   POST /auth/login, POST /agents/register — wallet-signed auth flows owned by a
 #     separate in-flight PR (ENG-4046); their endpoints.txt lines land with it.
-#   GET  /account/{address}/adl-history, GET /markets/{market_id}/adl-events —
-#     ADL history/events; no CLI command yet.
 #   PUT/GET/DELETE /admin/tiers* — admin-only tier management; out of CLI scope.
 #   POST /ws-tokens — deprecated; superseded by POST /ws/token (which we use).
 #   GET  /stream — deprecated SSE stream; superseded by the /ws upgrade.
