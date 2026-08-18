@@ -614,31 +614,55 @@ pub struct Target {
 /// masking it would turn a narrow leak into a routine one, in exactly the CI
 /// logs that outlive the shell.
 ///
-/// Deliberately not a URL parser. It masks one thing, never panics, and leaves
-/// anything it does not understand untouched — a display helper that rejected
+/// Deliberately not a URL parser. It masks one thing, never panics, and passes
+/// through anything with no userinfo to find — a display helper that rejected
 /// input would be worse than one that passes it through, since the caller is a
 /// warning that must still print.
+///
+/// Where it cannot tell, it masks. The input is unvalidated, so "not sure which
+/// part is the authority" has to resolve towards hiding a password rather than
+/// printing one; over-masking a malformed URL costs a confusing warning, and
+/// under-masking one costs the secret.
 pub(crate) fn redact_userinfo(url: &str) -> String {
-    // No `//`, no authority, so nowhere for userinfo to hide.
-    let Some(marker) = url.find("//") else {
-        return url.to_string();
-    };
-    let authority_start = marker + 2;
-    let after = &url[authority_start..];
+    // Candidate authority starts, most specific first: after a `scheme://`, after
+    // any other `//`, and finally offset zero. The last one is not a fallback for
+    // tidiness — a schemeless `user:pw@host` has no `//` at all, and the legacy
+    // path accepts it, so without that candidate the password would print in
+    // full. Trying them in order means a well-formed URL is judged on its real
+    // authority and the degenerate shapes still get masked.
+    let candidates = [
+        url.find("://").map(|scheme_end| scheme_end + 3),
+        url.find("//").map(|marker| marker + 2),
+        Some(0),
+    ];
+    for authority_start in candidates.into_iter().flatten() {
+        if let Some(masked) = mask_userinfo_at(url, authority_start) {
+            return masked;
+        }
+    }
+    url.to_string()
+}
+
+/// Mask the userinfo of the authority beginning at `authority_start`, or `None`
+/// when there is none there.
+///
+/// Split out so [`redact_userinfo`] can try more than one anchor. `get` rather
+/// than a slice index: every caller passes a boundary today, and a helper whose
+/// contract is "never panics" should not depend on that staying true.
+fn mask_userinfo_at(url: &str, authority_start: usize) -> Option<String> {
+    let after = url.get(authority_start..)?;
     // The authority ends at the first `/`, `?` or `#`; a later `@` belongs to the
     // path or query and is not userinfo.
     let authority_len = after.find(['/', '?', '#']).unwrap_or(after.len());
     let (authority, tail) = after.split_at(authority_len);
     // `rfind`: userinfo may contain an encoded `@`, so the *last* one in the
     // authority is the separator.
-    match authority.rfind('@') {
-        Some(at) => format!(
-            "{}***@{}{tail}",
-            &url[..authority_start],
-            &authority[at + 1..]
-        ),
-        None => url.to_string(),
-    }
+    let at = authority.rfind('@')?;
+    Some(format!(
+        "{}***@{}{tail}",
+        &url[..authority_start],
+        &authority[at + 1..]
+    ))
 }
 
 /// Which deprecated surface supplied a base-URL override.
@@ -2013,6 +2037,19 @@ mod tests {
             ("https://example.com/?q=a@b", "https://example.com/?q=a@b"),
             // Encoded `@` inside userinfo: the last one separates.
             ("https://us%40er:pw@example.com", "https://***@example.com"),
+            // No `//` to anchor on. The legacy path accepts these too, so
+            // anchoring only on `//` would print the password in full.
+            ("alice:pw@example.com", "***@example.com"),
+            ("alice:pw@example.com/api", "***@example.com/api"),
+            // A scheme with no `//` at all. Masking swallows the scheme, which is
+            // the right trade: an unparseable URL is worth garbling, a password
+            // is not worth printing.
+            ("https:alice:pw@example.com", "***@example.com"),
+            // A `//` that is not a scheme separator still anchors an authority.
+            ("foo//alice:pw@example.com", "foo//***@example.com"),
+            // ...and an `@` in a path is still not userinfo, with or without a
+            // scheme.
+            ("example.com/p@th", "example.com/p@th"),
             // Degenerate shapes the legacy path accepts without complaint. The
             // helper must pass them through rather than panic or mangle them.
             ("", ""),
@@ -2023,6 +2060,33 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(redact_userinfo(input), expected, "input: {input:?}");
+        }
+    }
+
+    /// A URL with no `//` still gets masked.
+    ///
+    /// Anchoring the authority on `//` alone is the tempting shortcut, and it
+    /// fails open: `--base-url alice:pw@host` has no `//`, is accepted by the
+    /// legacy path without complaint, and would reach stderr with the password
+    /// intact. Failing open is the one direction a redaction helper must not
+    /// fail, so it is pinned separately from the table above.
+    #[test]
+    fn redact_userinfo_masks_a_url_with_no_scheme_separator() {
+        for input in [
+            "alice:hunter2@example.com",
+            "alice:hunter2@example.com/api",
+            "https:alice:hunter2@example.com",
+            "foo//alice:hunter2@example.com",
+        ] {
+            let masked = redact_userinfo(input);
+            assert!(
+                !masked.contains("hunter2") && !masked.contains("alice"),
+                "userinfo survived in {input:?}: {masked}"
+            );
+            assert!(
+                masked.contains("***@"),
+                "the mask should be visible in {input:?}: {masked}"
+            );
         }
     }
 
@@ -2037,6 +2101,11 @@ mod tests {
             "日本語",
             "//日本@語",
             "https://例え.example.com/?q=日本",
+            // No `//`, so these are masked from offset zero — the anchor with the
+            // least structure to lean on, and the one where a byte-index slip
+            // would land mid-character.
+            "üser:pw@例え.example.com",
+            "日本@語",
         ] {
             let _ = redact_userinfo(input);
         }

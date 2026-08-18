@@ -238,7 +238,15 @@ impl std::fmt::Debug for FileConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileConfig")
             .field("network", &self.network)
-            .field("base_url", &self.base_url)
+            // Redacted like the secrets below, not printed like the plain fields
+            // above: the legacy `base_url` is never validated, so it can carry
+            // `user:pass@` userinfo (ENG-10956). Nothing `Debug`-prints a whole
+            // `FileConfig` today — this is so that whoever first logs one for
+            // diagnostics does not ship a password with it.
+            .field(
+                "base_url",
+                &self.base_url.as_deref().map(crate::cli::redact_userinfo),
+            )
             .field("networks", &self.networks)
             .field("custom_networks", &self.custom_networks)
             .field("acknowledged_networks", &self.acknowledged_networks)
@@ -935,6 +943,30 @@ mod tests {
         assert!(!dbg.contains("topsecret"), "secret leaked: {dbg}");
         assert!(dbg.contains("<redacted>"));
         assert!(dbg.contains("nx_visible"));
+    }
+
+    /// `Debug` masks a password in the legacy `base_url` too.
+    ///
+    /// The impl is hand-written so that a config can be logged without shipping a
+    /// secret, and `base_url` is unvalidated — it can carry `user:pass@` where
+    /// the declared `custom_networks` path would have rejected it. Pinned now
+    /// because the leak would arrive with whoever first adds a diagnostic log,
+    /// long after this line was written.
+    #[test]
+    fn debug_redacts_userinfo_in_the_legacy_base_url() {
+        let cfg = FileConfig {
+            base_url: Some("https://alice:hunter2@exchange.example.com".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("hunter2") && !dbg.contains("alice"),
+            "userinfo leaked via Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("exchange.example.com"),
+            "the host should survive so the field stays useful: {dbg}"
+        );
     }
 
     #[test]
