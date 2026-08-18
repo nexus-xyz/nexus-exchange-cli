@@ -702,5 +702,128 @@ class TestCaughtUpCheckNormalisesBothSides(unittest.TestCase):
         self.assertIn("no longer called by any command", out)
 
 
+class TestCanonicalOpCollapsesDualMounts(unittest.TestCase):
+    """ENG-10035: the coverage denominator must count operations, not path-ops.
+
+    The spec mounts most operations twice (host-root and `/api/v1`), and the CLI
+    targets one mount per operation. Counting both in the denominator made 100%
+    unreachable and understated this repo at `38 of 101 (37.6%)`.
+    """
+
+    def test_the_api_v1_prefix_collapses(self):
+        self.assertEqual(csd.canonical_op(("GET", "/api/v1/account")), ("GET", "/account"))
+        self.assertEqual(
+            csd.canonical_op(("DELETE", "/api/v1/orders/{order_id}")),
+            ("DELETE", "/orders/{order_id}"),
+        )
+
+    def test_a_host_root_op_is_unchanged(self):
+        self.assertEqual(csd.canonical_op(("GET", "/account")), ("GET", "/account"))
+
+    def test_both_mounts_share_one_canonical_label(self):
+        """The whole point: the twins must fold onto each other."""
+        self.assertEqual(
+            csd.canonical_op(("GET", "/api/v1/positions")),
+            csd.canonical_op(("GET", "/positions")),
+        )
+
+    def test_api_v1_alone_is_not_stripped(self):
+        """Only the `/api/v1/` PREFIX collapses. Pinned because the monorepo
+        collector pins it too, and a divergence between the two IS ENG-10035."""
+        self.assertEqual(csd.canonical_op(("GET", "/api/v1")), ("GET", "/api/v1"))
+
+    def test_the_method_is_upper_cased(self):
+        self.assertEqual(csd.canonical_op(("post", "/orders")), ("POST", "/orders"))
+
+    def test_a_path_containing_api_v1_deeper_is_untouched(self):
+        """The prefix is anchored, so an `/api/v1` appearing mid-path is not a
+        dual-stack mount and must not be rewritten."""
+        self.assertEqual(
+            csd.canonical_op(("GET", "/proxy/api/v1/thing")),
+            ("GET", "/proxy/api/v1/thing"),
+        )
+
+
+class TestCoverageRatioIsKeyedOnOperations(unittest.TestCase):
+    """The ratio collapses twins; existence never does."""
+
+    def _coverage_line(self, targeted, available):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            csd.check_targets_vs_spec(targeted, available)
+        return buf.getvalue()
+
+    def test_targeting_one_mount_of_every_operation_reads_100(self):
+        """The ceiling ENG-10035 says was unreachable. Before the fix this pair of
+        mounts made the best possible score 50%."""
+        available = {("GET", "/account"), ("GET", "/api/v1/account")}
+        out = self._coverage_line([("GET", "/account")], available)
+        self.assertIn("1 of 1 spec operations (100.0% coverage)", out)
+        self.assertIn("from 2 path-ops", out)
+
+    def test_a_covered_operation_is_not_listed_under_its_twin(self):
+        """The old list reported the untargeted mount of a covered operation, which
+        is a worklist item that does not exist."""
+        available = {("GET", "/account"), ("GET", "/api/v1/account")}
+        out = self._coverage_line([("GET", "/account")], available)
+        self.assertNotIn("Not covered", out)
+
+    def test_an_uncovered_operation_is_reported_as_literal_mounts(self):
+        """Never the canonical label: it can name a mount the spec does not
+        document, and acting on one ships a method that 404s (ENG-8463)."""
+        available = {("GET", "/stats"), ("GET", "/api/v1/stats")}
+        out = self._coverage_line([], available)
+        self.assertIn("Not covered by the CLI (1)", out)
+        # Sorted, matching the monorepo collector's `sorted(v)` over the mounts.
+        self.assertIn("GET /api/v1/stats, GET /stats", out)
+
+    def test_a_phantom_twin_is_not_credited(self):
+        """The load-bearing ordering. `/account/margin` has no `/api/v1` mount, so
+        targeting `POST /api/v1/account/margin` targets a route that 404s. Collapsing
+        before the literal intersection would fold it onto the real operation and
+        credit it — exactly ENG-8463.
+        """
+        available = {("POST", "/account/margin")}
+        out = self._coverage_line([("POST", "/api/v1/account/margin")], available)
+        self.assertIn("0 of 1 spec operations (0.0% coverage)", out)
+        # ...and existence still fails literally, which is the other half.
+        self.assertIn("are NOT in the spec", out)
+
+    def test_existence_stays_literal_after_the_change(self):
+        """A targeted mount the spec does not document must still be an ERROR, not
+        be rescued by having a documented twin."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = csd.check_targets_vs_spec(
+                [("GET", "/api/v1/account")], {("GET", "/account")}
+            )
+        self.assertEqual(errors, 1)
+        self.assertIn("GET /api/v1/account", buf.getvalue())
+
+
+class TestRealRepoCoverageAgreesWithTheDashboard(unittest.TestCase):
+    """The committed `endpoints.txt` must target one mount per operation.
+
+    If it ever targeted both mounts of the same operation, the numerator would
+    silently drop below the line count and the two numbers would stop meaning the
+    same thing.
+    """
+
+    def test_no_two_targets_are_twins_of_each_other(self):
+        targeted = csd.load_targeted(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "endpoints.txt")
+        )
+        canon = {}
+        for op in targeted:
+            canon.setdefault(csd.canonical_op(op), []).append(op)
+        collisions = {k: v for k, v in canon.items() if len(v) > 1}
+        self.assertEqual(
+            collisions, {},
+            "endpoints.txt targets both mounts of one operation; the coverage "
+            "numerator collapses them, so the count would understate the manifest",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

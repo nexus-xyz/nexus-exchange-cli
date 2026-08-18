@@ -251,6 +251,44 @@ def normalize_path(p):
     return re.sub(r"\{[^}]*\}", "{}", p)
 
 
+# The dual-stack prefix. The spec mounts most operations twice — `GET /account`
+# and `GET /api/v1/account` are one operation at two mounts — and the CLI, like
+# every other client surface, targets exactly one mount per operation.
+API_V1_PREFIX = "/api/v1"
+
+
+def canonical_op(op):
+    """Canonical form of a `(method, path)` op, collapsing the dual-stack `/api/v1`
+    twin so the coverage ratio can reach 100%.
+
+    A literal count puts both mounts in the denominator while the numerator can
+    only ever hold one, so a surface targeting every operation perfectly still
+    scored well under 100% and the tile could never read full (ENG-10035). This
+    repo had exactly that: `38 of 101 (37.6%)`, where 101 is path-ops, not
+    operations.
+
+    **Never use this to decide whether an operation EXISTS.** The twin is not
+    universal — the bridge domain is `/api/v1`-native and has no host-root mount at
+    all — so collapsing invents bare labels the spec never documents. Crediting one
+    would credit a route that 404s, which is ENG-8463. Collapse ONLY to key the
+    ratio; match literally for existence, and report uncovered operations as their
+    literal mounts.
+
+    Ported deliberately, not invented: the source of truth is
+    `normalise_op` in the monorepo's `.github/scripts/collect-interfaces-metrics.py`
+    (and its sibling `eng/ops/intelligence/interfaces/capability_coverage.py`),
+    which is what actually computes the interfaces dashboard from this repo's
+    `endpoints.txt`. Two collectors in one tree with opposite conventions is the
+    root cause ENG-10035 documents, so this agrees with them by construction:
+    `/api/v1` is stripped only as a **prefix** (a bare `/api/v1` path is left
+    alone), and the method is upper-cased.
+    """
+    method, path = op
+    if path.startswith(API_V1_PREFIX + "/"):
+        path = path[len(API_V1_PREFIX) :]
+    return (method.upper(), path)
+
+
 def load_targeted(path="endpoints.txt"):
     out = []
     seen = {}
@@ -510,19 +548,46 @@ def check_targets_vs_spec(targeted, available):
     """Invariant 1: every endpoints.txt op exists in the pinned spec. Also prints
     the coverage line the dashboard scrapes and the informational uncovered list.
     Returns the number of errors printed."""
+    # Existence stays LITERAL. A targeted op counts as real only if that exact
+    # mount is in the spec — collapsing here would let a `/api/v1/X` documented
+    # only as `/X` pass as present while 404ing in production (ENG-8463).
     missing = [op for op in targeted if op not in available]
-    uncovered = sorted(available - set(targeted))
 
-    pct = 100.0 * len(targeted) / len(available) if available else 0.0
+    # The ratio is keyed on CANONICAL operations, so the 100% ceiling is reachable.
+    #
+    # The numerator intersects literally FIRST and collapses only after. The order
+    # is the care point, not a style choice: `{canonical_op(o) for o in targeted}
+    # & canon_available` reads equivalent but is not, because collapsing is not
+    # injective over the mounts the spec documents. A phantom `/api/v1` twin of a
+    # host-root-only operation would fold onto the real one and be credited for a
+    # route that does not exist. Collapsing after the literal intersection keeps the
+    # rule ENG-10035 states: an operation counts as covered when the CLI targets a
+    # mount that literally exists.
+    canon_available = {canonical_op(op) for op in available}
+    canon_targeted = {canonical_op(op) for op in set(targeted) & available}
+
+    pct = 100.0 * len(canon_targeted) / len(canon_available) if canon_available else 0.0
     print(
-        f"CLI targets {len(targeted)} of {len(available)} spec endpoints "
-        f"({pct:.1f}% coverage)."
+        f"CLI targets {len(canon_targeted)} of {len(canon_available)} spec "
+        f"operations ({pct:.1f}% coverage), "
+        f"from {len(available)} path-ops with dual-stack mounts collapsed "
+        f"(ENG-10035)."
     )
+
+    # Keyed by canonical label so a covered operation cannot reappear under its
+    # twin, but printed as LITERAL mounts: the canonical label may name a mount the
+    # spec never documents, and a reader who acts on one ships a method that 404s.
+    uncovered = {}
+    for op in sorted(available):
+        canon = canonical_op(op)
+        if canon not in canon_targeted:
+            uncovered.setdefault(canon, []).append(op)
 
     if uncovered:
         print(f"\nNot covered by the CLI ({len(uncovered)}):")
-        for m, p in uncovered:
-            print(f"  - {m} {p}")
+        for canon in sorted(uncovered):
+            mounts = ", ".join(f"{m} {p}" for m, p in uncovered[canon])
+            print(f"  - {mounts}")
 
     if not missing:
         print("\nOK: every targeted endpoint exists in the pinned spec.")
@@ -615,6 +680,80 @@ def check_allowlist_is_honest():
     return errors
 
 
+# The README sentence this script is allowed to contradict nobody about. Kept as
+# one regex so a reworded paragraph fails loudly rather than silently unchecking
+# itself: a guard that stops matching is a guard that stops guarding.
+README_COVERAGE_RE = re.compile(
+    r"\*\*(?P<num>\d+) of (?P<den>\d+)\*\* *\n?spec operations "
+    r"\(\*\*(?P<pct>[\d.]+)%\*\*\), measured against the pinned "
+    r"`(?P<tag>v[\d.]+)` spec",
+    re.MULTILINE,
+)
+
+
+def check_readme_coverage_claim(targeted, available, readme="README.md",
+                                api_version_file=".api-version"):
+    """Invariant 5: the README's coverage sentence matches what this run computed.
+
+    Added because the numbers went stale in silence for two spec releases. The
+    README claimed `38 of 98 (38.8%)` against `v0.7.2` while the pin was `v0.8.1`
+    and the real ratio was different again — and every check stayed green, because
+    the checker *printed* a coverage number and nothing compared it to the one
+    committed next to it. AGENTS.md already promised this guard existed; this is it.
+
+    Fails on a claim that is wrong **or** absent. An unparseable paragraph is a
+    failure, not a skip: silently passing when the sentence has been reworded is
+    the exact hole being closed.
+    """
+    try:
+        with open(readme) as f:
+            text = f.read()
+    except OSError as e:
+        print(f"\nERROR: cannot read {readme}: {e}")
+        return 1
+
+    m = README_COVERAGE_RE.search(text)
+    if not m:
+        print(
+            f"\nERROR: {readme} has no parseable coverage claim. Expected a sentence "
+            f'like "**38 of 68** spec operations (**55.9%**), measured against the '
+            f'pinned `v0.8.1` spec". Reword the guard in '
+            f"check_spec_drift.py:README_COVERAGE_RE if the wording must change."
+        )
+        return 1
+
+    canon_available = {canonical_op(op) for op in available}
+    canon_targeted = {canonical_op(op) for op in set(targeted) & available}
+    num, den = len(canon_targeted), len(canon_available)
+    pct = f"{100.0 * num / den:.1f}" if den else "0.0"
+
+    try:
+        with open(api_version_file) as f:
+            pinned = f.read().strip()
+    except OSError as e:
+        print(f"\nERROR: cannot read {api_version_file}: {e}")
+        return 1
+
+    claimed = (m.group("num"), m.group("den"), m.group("pct"), m.group("tag"))
+    actual = (str(num), str(den), pct, pinned)
+    if claimed != actual:
+        print(
+            f"\nERROR: {readme}'s coverage claim is stale.\n"
+            f"  claims: {claimed[0]} of {claimed[1]} ({claimed[2]}%) "
+            f"against {claimed[3]}\n"
+            f"  actual: {actual[0]} of {actual[1]} ({actual[2]}%) "
+            f"against {actual[3]}\n"
+            f"  Update the sentence under '### API coverage'."
+        )
+        return 1
+
+    print(
+        f"\nOK: {readme}'s coverage claim ({num} of {den}, {pct}%, {pinned}) "
+        f"matches this run."
+    )
+    return 0
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(f"usage: {sys.argv[0]} <openapi.json>")
@@ -634,6 +773,8 @@ def main():
     # Invariant 3, attribution half (ENG-7927): every CODE_ONLY_OPS row names the
     # command it backs, why the op is absent, and a tracking issue.
     failures += check_allowlist_is_honest()
+    # Invariant 5: the README's committed coverage sentence is still true.
+    failures += check_readme_coverage_claim(targeted, available)
 
     if failures:
         sys.exit(1)

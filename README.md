@@ -823,19 +823,38 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints the coverage number the dashboard reads: the CLI currently
-exercises **38 of 98** spec operations (**38.8%**) — measured by running the
-check against the pinned `v0.7.2` spec on the merged tree, not carried over from
-either side of the rebase. The denominator carries both stacks (gateway +
-`/api/v1`) plus the admin/stats surfaces the CLI does not target; it grew again
-in `v0.7.2` with the portfolio-parity, order-preview and history endpoints.
-`main` alone reads 36: four are what the `nexus account` commands added in
-[ENG-6460](https://linear.app/nexus-labs/issue/ENG-6460) now cover, and the
-thirty-sixth is a correction rather than new
-delivery — `order amend` was exempted as ahead-of-spec while mapped to the wrong
-verb (`PUT`, where the SDK issues `PATCH`), so it went covered but uncounted
-until invariant 3 rejected the stale exemption. The two beyond that are this
-branch's own additions. Run it locally with a fetched spec:
+The check also prints a coverage number: the CLI currently exercises **38 of 68**
+spec operations (**55.9%**), measured against the pinned `v0.8.1` spec.
+
+**The denominator counts operations, not paths.** The spec dual-mounts most
+operations — `GET /account` and `GET /api/v1/account` are one operation at two
+mounts — and the CLI, like every other client surface, targets exactly one mount
+per operation. Counting both put 101 path-ops in the denominator while the
+numerator could only ever hold one of each, so a surface covering everything
+perfectly still scored well under 100% and the number could never read full. That
+is [ENG-10035](https://linear.app/nexus-labs/issue/ENG-10035); the twins are now
+collapsed, which is why this reads 55.9% rather than the 37.6% a literal path
+count gives. The 30 that remain are genuinely untargeted operations, not
+bookkeeping: the admin, stats, bridge and funding surfaces, plus `orders/preview`,
+`orders/history`, `positions/closed`, `cancel-on-disconnect` and the auth/token
+endpoints the CLI does not expose.
+
+Collapsing is used **only** to key the ratio. Existence is always matched
+literally, and uncovered operations are reported as their literal mounts, because
+a canonical label can name a mount the spec never documents — the bridge domain is
+`/api/v1`-native — and acting on one would ship a command that 404s
+([ENG-8463](https://linear.app/nexus-labs/issue/ENG-8463)).
+
+The interfaces dashboard does not scrape this line; it computes the same ratio
+independently from `endpoints.txt` and the spec, under the same rule, in the
+monorepo's `collect-interfaces-metrics.py`. `canonical_op` here is a deliberate
+port of that collector's `normalise_op`, and the self-tests pin the same edge cases
+that collector's own agreement test pins — `/api/v1` only as a prefix, method
+upper-cased — because two collectors with opposite conventions is the root cause
+ENG-10035 documents. The cross-check against the live collector is manual: this
+repo's CI has no monorepo checkout to import.
+
+Run it locally with a fetched spec:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/$(cat .api-version)/openapi.json -o openapi.pinned.json

@@ -266,5 +266,62 @@ class TestRealRepoParity(unittest.TestCase):
         )
 
 
+class TestReadmePinGuard(unittest.TestCase):
+    """ENG-10956: AGENTS.md promised this guard; nothing implemented it.
+
+    `check_pin` compares `.api-version` to the crate's own pin. Nothing compared
+    the README's *crate version* to `Cargo.lock`, so a hand-bump that skipped
+    `sync_sdk_version.py --write` shipped a README a release behind, green.
+    """
+
+    LINE = (
+        "Currently targets Exchange API spec **`{tag}`** — the version pinned and "
+        "sent as `X-Nexus-Api-Version` by `nexus-exchange` **`{crate}`**."
+    )
+
+    def _run(self, body, locked="0.9.1", our_tag="v0.8.1"):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "README.md")
+            with open(path, "w") as f:
+                f.write(body)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                errors = parity.check_readme_pin(locked, our_tag, readme=path)
+            return errors, buf.getvalue()
+
+    def test_an_agreeing_line_passes(self):
+        errors, out = self._run(self.LINE.format(tag="v0.8.1", crate="0.9.1"))
+        self.assertEqual(errors, 0)
+        self.assertIn("matches the tree", out)
+
+    def test_a_stale_crate_version_fails(self):
+        """The exact #60 shape: crate bumped, README left behind."""
+        errors, out = self._run(self.LINE.format(tag="v0.8.1", crate="0.9.0"))
+        self.assertEqual(errors, 1)
+        self.assertIn("disagrees with the tree", out)
+        self.assertIn("sync_sdk_version.py --write", out)
+
+    def test_a_stale_spec_tag_fails(self):
+        errors, out = self._run(self.LINE.format(tag="v0.7.2", crate="0.9.1"))
+        self.assertEqual(errors, 1)
+        self.assertIn("disagrees with the tree", out)
+
+    def test_a_missing_line_fails_rather_than_skips(self):
+        """A guard that stops matching must not silently stop guarding."""
+        errors, out = self._run("# README\n\nNo managed block here.\n")
+        self.assertEqual(errors, 1)
+        self.assertIn("no parseable api-version-sync line", out)
+
+    def test_the_real_readme_matches_the_real_tree(self):
+        """So the synthetic cases above cannot stay green while the tree drifts."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = parity.check_readme_pin(
+                sdk_crate.locked_version(),
+                open(os.path.join(parity.csd.REPO, ".api-version")).read().strip(),
+            )
+        self.assertEqual(errors, 0, buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
