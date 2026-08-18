@@ -57,7 +57,10 @@ pub fn announce_network(target: &Target) {
         // so "you are on mainnet" would be an overstatement — say what is
         // actually true, which is that a real-funds network's key is being
         // presented to a host the user chose. `{url:?}` because the value can
-        // come from the config file, and `Debug` escapes control bytes.
+        // come from the config file, and `Debug` escapes control bytes; and
+        // `redact_userinfo` because the legacy override path never rejected a
+        // `user:pass@`, so this line could otherwise print a password into a CI
+        // log (ENG-10956).
         Some(url) => eprintln!(
             "{}",
             real_funds_notice(
@@ -65,7 +68,8 @@ pub fn announce_network(target: &Target) {
                 &format!(
                     "Using {} credentials against the overridden base URL {url:?}, whose funds \
                      are undeclared.",
-                    target.namespace()
+                    target.namespace(),
+                    url = crate::cli::redact_userinfo(url),
                 )
             )
         ),
@@ -116,10 +120,16 @@ pub fn refuse_faucet_without_play_funds(target: &Target) -> Result<()> {
             "`account credit` mints funds, and this target does not declare whether it moves \
              real ones, so it is refused rather than assumed safe. {}",
             match target.base_url_override() {
+                // `redact_userinfo` for the same reason as `announce_network`
+                // above, and this is the arm most likely to be pasted into a bug
+                // report: an undeclared-funds refusal is what a caller hits
+                // *first* when pointing `--base-url` at a private stage, so it is
+                // the copy of the URL most likely to be shared (ENG-10956).
                 Some(url) => format!(
                     "The base URL {url:?} overrides {network}, and a bare URL carries no funds \
                      classification: declare the stage under \"custom_networks\" with a \
-                     \"funds\" value and select it with `--network <label>`."
+                     \"funds\" value and select it with `--network <label>`.",
+                    url = crate::cli::redact_userinfo(url),
                 ),
                 None => format!(
                     "Set \"funds\" to \"real\", \"play\" or \"unknown\" for {network} under \
@@ -267,6 +277,36 @@ mod tests {
         assert!(
             err.contains("--network <label>"),
             "the error must point at the declared-stage path; got: {err}"
+        );
+    }
+
+    /// The refusal echoes the override, so it must mask a password like every
+    /// other place that prints one.
+    ///
+    /// This is the arm a caller hits first when pointing `--base-url` at a
+    /// private stage, which makes it the copy of the URL most likely to end up in
+    /// a bug report or a CI log — the refusal is not a quieter surface than the
+    /// warning, it is a louder one.
+    #[test]
+    fn the_faucet_refusal_masks_a_password_in_the_override() {
+        let err = refuse_faucet_without_play_funds(&target_for(
+            &[
+                "--network",
+                "local",
+                "--base-url",
+                "https://alice:hunter2@exchange.example.com",
+            ],
+            &FileConfig::default(),
+        ))
+        .expect_err("an override carries no funds classification")
+        .to_string();
+        assert!(
+            !err.contains("hunter2") && !err.contains("alice"),
+            "userinfo must not reach the refusal: {err}"
+        );
+        assert!(
+            err.contains("exchange.example.com"),
+            "the host is the useful half and must survive: {err}"
         );
     }
 

@@ -53,17 +53,26 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEXUS_NETWORK", value_parser = NetworkArg::from_flag)]
     pub network: Option<NetworkArg>,
 
-    /// Override the API base URL (takes precedence over `--network`).
+    /// [deprecated] Override the API base URL — declare a `custom_networks`
+    /// entry and select it with `--network <label>` instead.
     ///
-    /// Retained for compatibility, and now sugar for a custom network whose
-    /// funds are **undeclared**. It redirects the request without changing which
-    /// network's credentials are presented, so commands that move or mint funds
-    /// are refused rather than inheriting the named network's safety flags — a
-    /// bare URL says nothing about what its host moves.
+    /// Still supported, and unchanged: it keeps taking precedence over
+    /// `--network`, and nothing about how it resolves has moved. Deprecated
+    /// (ENG-10956) because of two things a bare URL cannot do.
     ///
-    /// Declare the stage under `custom_networks` and select it with `--network
-    /// <label>` to get a validated URL, its own credential namespace, and a
-    /// funds classification.
+    /// It does not declare funds. A URL says nothing about what its host moves,
+    /// so the destination's funds are "unknown" and the commands that move or
+    /// mint money are refused rather than inheriting the named network's safety
+    /// flags.
+    ///
+    /// It does not namespace credentials. The override redirects the request
+    /// without changing which network's key is presented, so stored credentials
+    /// stay filed under whichever network was selected.
+    ///
+    /// A `custom_networks` entry fixes both: the URL is validated, the stage
+    /// gets its own credential namespace keyed by label, and `funds` is declared
+    /// rather than assumed. Credentials do not carry over — they are stored per
+    /// label, so run `nexus setup` for the new stage.
     #[arg(long, global = true, env = "NEXUS_BASE_URL")]
     pub base_url: Option<String>,
 
@@ -403,7 +412,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.9.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.9.1";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
@@ -585,7 +594,100 @@ pub struct Target {
     network: Network,
     /// A `--base-url`/`NEXUS_BASE_URL`/config-file `base_url` redirect, if one is
     /// in effect.
-    base_url_override: Option<String>,
+    base_url_override: Option<BaseUrlOverride>,
+}
+
+/// Mask `user:pass@` userinfo in a URL before it is echoed to a terminal or a
+/// log.
+///
+/// The base-URL override is the one URL in this CLI that reaches display
+/// **unvalidated**. The declared path (`CustomNetwork::new`) rejects userinfo
+/// outright — the SDK's own test names the reason as "userinfo leaks into logs"
+/// — but the legacy path (`Config::with_base_url` →
+/// `CustomNetwork::from_legacy_base_url`) does no validation at all and takes the
+/// string as given. So `--base-url https://user:pw@host` is accepted today, and
+/// anything that prints it prints the password.
+///
+/// That matters more now than it did: the deprecation notice echoes the override
+/// on *every* invocation that uses one, where the real-funds banner echoed it
+/// only on real-funds targets. Widening how often a URL is printed without
+/// masking it would turn a narrow leak into a routine one, in exactly the CI
+/// logs that outlive the shell.
+///
+/// Deliberately not a URL parser. It masks one thing, never panics, and passes
+/// through anything with no userinfo to find — a display helper that rejected
+/// input would be worse than one that passes it through, since the caller is a
+/// warning that must still print.
+///
+/// Where it cannot tell, it masks. The input is unvalidated, so "not sure which
+/// part is the authority" has to resolve towards hiding a password rather than
+/// printing one; over-masking a malformed URL costs a confusing warning, and
+/// under-masking one costs the secret.
+pub(crate) fn redact_userinfo(url: &str) -> String {
+    // Candidate authority starts, most specific first: after a `scheme://`, after
+    // any other `//`, and finally offset zero. The last one is not a fallback for
+    // tidiness — a schemeless `user:pw@host` has no `//` at all, and the legacy
+    // path accepts it, so without that candidate the password would print in
+    // full. Trying them in order means a well-formed URL is judged on its real
+    // authority and the degenerate shapes still get masked.
+    let candidates = [
+        url.find("://").map(|scheme_end| scheme_end + 3),
+        url.find("//").map(|marker| marker + 2),
+        Some(0),
+    ];
+    for authority_start in candidates.into_iter().flatten() {
+        if let Some(masked) = mask_userinfo_at(url, authority_start) {
+            return masked;
+        }
+    }
+    url.to_string()
+}
+
+/// Mask the userinfo of the authority beginning at `authority_start`, or `None`
+/// when there is none there.
+///
+/// Split out so [`redact_userinfo`] can try more than one anchor. `get` rather
+/// than a slice index: every caller passes a boundary today, and a helper whose
+/// contract is "never panics" should not depend on that staying true.
+fn mask_userinfo_at(url: &str, authority_start: usize) -> Option<String> {
+    let after = url.get(authority_start..)?;
+    // The authority ends at the first `/`, `?` or `#`; a later `@` belongs to the
+    // path or query and is not userinfo.
+    let authority_len = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let (authority, tail) = after.split_at(authority_len);
+    // `rfind`: userinfo may contain an encoded `@`, so the *last* one in the
+    // authority is the separator.
+    let at = authority.rfind('@')?;
+    Some(format!(
+        "{}***@{}{tail}",
+        &url[..authority_start],
+        &authority[at + 1..]
+    ))
+}
+
+/// Which deprecated surface supplied a base-URL override.
+///
+/// Recorded so the deprecation notice can name the thing to actually remove.
+/// Telling someone to stop passing `--base-url` when the value came from a
+/// config file they wrote months ago sends them looking for a flag that is not
+/// on their command line — the config-file case is the one that redirects
+/// silently, so it is the one the notice most needs to get right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseUrlSource {
+    /// `--base-url` on the command line, or `NEXUS_BASE_URL` in the environment.
+    /// Clap merges the two, and they are reported together because the fix is
+    /// the same for both.
+    Flag,
+    /// The config file's top-level `base_url`.
+    ConfigFile,
+}
+
+/// A base-URL override and where it came from, kept together so the two cannot
+/// drift apart: a notice naming the wrong source is worse than no notice.
+#[derive(Debug, Clone)]
+struct BaseUrlOverride {
+    url: String,
+    source: BaseUrlSource,
 }
 
 impl Target {
@@ -612,7 +714,61 @@ impl Target {
 
     /// The base-URL override in effect, if any.
     pub fn base_url_override(&self) -> Option<&str> {
-        self.base_url_override.as_deref()
+        self.base_url_override.as_ref().map(|o| o.url.as_str())
+    }
+
+    /// Which deprecated surface supplied that override, if one is in effect.
+    pub fn base_url_source(&self) -> Option<BaseUrlSource> {
+        self.base_url_override.as_ref().map(|o| o.source)
+    }
+
+    /// The one-line deprecation notice for a base-URL override, or `None` when
+    /// none is in effect (ENG-10956).
+    ///
+    /// Returns the string rather than printing it so the wording is unit-testable
+    /// and the caller owns the stream — the same shape as
+    /// [`stale_network_warning`]. It is emitted once, from `main`, next to the
+    /// real-funds banner: `main` resolves the target exactly once, so
+    /// "once per invocation" needs no flag, no `Once` and no shared mutable
+    /// state, and therefore has no way to race or deadlock.
+    ///
+    /// **stderr, always — including under `--output json`.** The rule is that the
+    /// notice stays off the *JSON document*, not that it disappears for JSON
+    /// users: stdout carries the parseable output and is untouched, which is the
+    /// same split [`stale_network_warning`] and the real-funds banner already
+    /// use. Suppressing it under `--output json` would hide the deprecation from
+    /// scripted callers, who are precisely the ones with a pinned invocation to
+    /// migrate before the override is eventually removed.
+    ///
+    /// The CLI has no compiler to carry a marker, so this notice is the whole of
+    /// its migration signal — see ENG-10950 for why that runway matters.
+    pub fn base_url_deprecation_notice(&self) -> Option<String> {
+        // `zip` rather than two `?`s: both halves come out of the same
+        // `Option<BaseUrlOverride>`, so this is total by construction.
+        let (url, source) = self.base_url_override().zip(self.base_url_source())?;
+        let (surface, fix) = match source {
+            BaseUrlSource::Flag => (
+                "`--base-url`/`NEXUS_BASE_URL`",
+                "drop the flag and pass `--network <label>`",
+            ),
+            BaseUrlSource::ConfigFile => (
+                "the config file's \"base_url\"",
+                "replace that key with a \"custom_networks\" entry and \"network\": \"<label>\"",
+            ),
+        };
+        // Two independent hardenings on one value, because it is unvalidated and
+        // terminal-bound: `redact_userinfo` masks a `user:pass@` the legacy path
+        // never rejected, and `{:?}` escapes control bytes so a stored URL cannot
+        // smuggle ESC into this line. Same `Debug` rule as every other
+        // file-sourced interpolation in this module.
+        Some(format!(
+            "warning: {surface} is deprecated (ENG-10956). It redirects to {url:?}, which \
+             declares neither what that host moves nor a credential namespace of its own, so \
+             fund-moving commands are refused and stored credentials stay filed under \
+             {namespace:?}. To fix, {fix}. Still supported — this invocation is unaffected.",
+            url = redact_userinfo(url),
+            namespace = self.namespace()
+        ))
     }
 
     /// What the **destination** moves.
@@ -967,9 +1123,24 @@ impl Cli {
                 }
             },
         };
+        // Same precedence as before — flag/env wins, then the config file — just
+        // recorded with its source rather than collapsed to a bare `Option`.
+        // Written as a match rather than `or_else` so adding a third source
+        // cannot forget to label itself.
+        let base_url_override = match (&self.base_url, &file.base_url) {
+            (Some(url), _) => Some(BaseUrlOverride {
+                url: url.clone(),
+                source: BaseUrlSource::Flag,
+            }),
+            (None, Some(url)) => Some(BaseUrlOverride {
+                url: url.clone(),
+                source: BaseUrlSource::ConfigFile,
+            }),
+            (None, None) => None,
+        };
         Ok(Target {
             network,
-            base_url_override: self.base_url.clone().or_else(|| file.base_url.clone()),
+            base_url_override,
         })
     }
 
@@ -981,6 +1152,15 @@ impl Cli {
     /// paths build the same shape and there is no second code path to drift.
     pub fn config(&self, target: &Target) -> Config {
         let config = match target.base_url_override() {
+            // `with_base_url` is `#[deprecated]` as of `nexus-exchange` 0.9.1
+            // (ENG-9824), the SDK half of the same deprecation this CLI is
+            // carrying. Silenced *here only*: ENG-10950's rule is to quiet
+            // internal call sites so the repo still builds clean under
+            // `clippy -D warnings`, and never to quiet it for callers — which is
+            // why the user-facing notice below exists instead. Keeping the call
+            // is deliberate: the override's behaviour must not change, and this
+            // is the one line that implements it.
+            #[allow(deprecated)]
             Some(url) => Config::with_base_url(url),
             None => Config::new(target.network().clone()),
         };
@@ -1682,6 +1862,286 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(base_url(&cli), "http://x:1");
+    }
+
+    // ── `--base-url` deprecation (ENG-10956) ────────────────────────────────
+    //
+    // None of these set `NEXUS_BASE_URL`. `std::env::set_var` mutates
+    // process-global state that every other test thread reads, and `cargo test`
+    // runs this module in parallel, so a test that set it could flip an
+    // unrelated test's resolved target. The flag path is exercised through
+    // `--base-url`, which clap resolves identically and which is what the notice
+    // reports for both.
+
+    /// No override, no notice. The notice must not fire for the ordinary path,
+    /// which is every invocation that is not deprecated.
+    #[test]
+    fn a_target_without_an_override_says_nothing() {
+        let cli = Cli::try_parse_from(["nexus", "--network", "testnet", "health"]).unwrap();
+        assert_eq!(target(&cli).base_url_deprecation_notice(), None);
+    }
+
+    /// The flag names the flag, and names the replacement.
+    #[test]
+    fn a_flag_override_names_the_flag_and_the_replacement() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--base-url",
+            "https://exchange.example.com",
+            "health",
+        ])
+        .unwrap();
+        let target = target(&cli);
+        assert_eq!(target.base_url_source(), Some(BaseUrlSource::Flag));
+
+        let notice = target
+            .base_url_deprecation_notice()
+            .expect("an override must produce a notice");
+        assert!(notice.starts_with("warning: "), "got: {notice}");
+        assert!(notice.contains("--base-url"), "got: {notice}");
+        assert!(notice.contains("NEXUS_BASE_URL"), "got: {notice}");
+        assert!(
+            notice.contains("--network <label>"),
+            "must name the replacement, got: {notice}"
+        );
+        assert!(
+            notice.contains("Still supported"),
+            "must say the invocation still works, got: {notice}"
+        );
+    }
+
+    /// The config-file key names *the config file*, not the flag.
+    ///
+    /// The whole reason the source is tracked: telling someone to drop a
+    /// `--base-url` they never typed sends them hunting for a flag that is not
+    /// on their command line.
+    #[test]
+    fn a_config_file_override_names_the_config_file_not_the_flag() {
+        let cli = Cli::try_parse_from(["nexus", "health"]).unwrap();
+        let file = FileConfig {
+            base_url: Some("https://exchange.example.com".into()),
+            ..Default::default()
+        };
+        let target = cli.target(&file).expect("a resolvable target");
+        assert_eq!(target.base_url_source(), Some(BaseUrlSource::ConfigFile));
+
+        let notice = target
+            .base_url_deprecation_notice()
+            .expect("an override must produce a notice");
+        assert!(notice.contains("config file"), "got: {notice}");
+        assert!(
+            !notice.contains("--base-url"),
+            "must not tell the user to drop a flag they never passed, got: {notice}"
+        );
+        assert!(
+            notice.contains("custom_networks"),
+            "must name the replacement, got: {notice}"
+        );
+    }
+
+    /// Precedence is unchanged by this PR, and the notice reports the source that
+    /// actually won rather than whichever it happened to check first.
+    #[test]
+    fn the_flag_still_beats_the_config_file_and_the_notice_says_so() {
+        let cli =
+            Cli::try_parse_from(["nexus", "--base-url", "https://flag.example.com", "health"])
+                .unwrap();
+        let file = FileConfig {
+            base_url: Some("https://file.example.com".into()),
+            ..Default::default()
+        };
+        let target = cli.target(&file).expect("a resolvable target");
+
+        assert_eq!(target.base_url_override(), Some("https://flag.example.com"));
+        assert_eq!(target.base_url_source(), Some(BaseUrlSource::Flag));
+        let notice = target.base_url_deprecation_notice().unwrap();
+        assert!(
+            notice.contains("flag.example.com") && !notice.contains("file.example.com"),
+            "the notice must quote the URL that won, got: {notice}"
+        );
+    }
+
+    /// A stored base URL cannot smuggle terminal control sequences into the
+    /// notice.
+    ///
+    /// The value is read from a file and echoed straight to a terminal, so a
+    /// `{url}` here would let a config file emit raw ESC — repainting the line,
+    /// or hiding the warning it is part of. `{url:?}` escapes it, the same rule
+    /// [`stale_network_warning`] follows for the same reason.
+    #[test]
+    fn the_notice_escapes_control_bytes_in_a_stored_url() {
+        let cli = Cli::try_parse_from(["nexus", "health"]).unwrap();
+        let file = FileConfig {
+            base_url: Some("https://exchange.example.com\u{1b}[2K\rmainnet".into()),
+            ..Default::default()
+        };
+        let notice = cli
+            .target(&file)
+            .expect("a resolvable target")
+            .base_url_deprecation_notice()
+            .expect("an override must produce a notice");
+
+        assert!(
+            !notice.contains('\u{1b}') && !notice.contains('\r'),
+            "raw control bytes reached the notice: {notice:?}"
+        );
+        assert!(
+            notice.contains("\\u{1b}") || notice.contains("\\x1b"),
+            "the escape should still be visible, escaped, got: {notice}"
+        );
+    }
+
+    /// A password in an override never reaches the notice.
+    ///
+    /// The legacy path does not reject userinfo the way the declared path does,
+    /// so this is the only thing standing between a `user:pass@` base URL and a
+    /// CI log.
+    #[test]
+    fn the_notice_masks_a_password_in_the_url() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--base-url",
+            "https://alice:hunter2@exchange.example.com",
+            "health",
+        ])
+        .unwrap();
+        let notice = target(&cli).base_url_deprecation_notice().unwrap();
+
+        assert!(
+            !notice.contains("hunter2") && !notice.contains("alice"),
+            "userinfo must not reach the notice: {notice}"
+        );
+        assert!(
+            notice.contains("exchange.example.com"),
+            "the host is the useful half and must survive: {notice}"
+        );
+    }
+
+    /// `redact_userinfo` masks exactly the userinfo, and never panics on input
+    /// the legacy path accepted without validating.
+    #[test]
+    fn redact_userinfo_masks_only_userinfo() {
+        // (input, expected)
+        let cases = [
+            // The thing it exists for.
+            (
+                "https://user:pw@example.com/api",
+                "https://***@example.com/api",
+            ),
+            ("https://user@example.com", "https://***@example.com"),
+            // No userinfo: untouched.
+            ("https://example.com/api", "https://example.com/api"),
+            ("http://127.0.0.1:9090", "http://127.0.0.1:9090"),
+            // An `@` after the authority is a path/query character, not userinfo.
+            ("https://example.com/p@th", "https://example.com/p@th"),
+            ("https://example.com/?q=a@b", "https://example.com/?q=a@b"),
+            // Encoded `@` inside userinfo: the last one separates.
+            ("https://us%40er:pw@example.com", "https://***@example.com"),
+            // No `//` to anchor on. The legacy path accepts these too, so
+            // anchoring only on `//` would print the password in full.
+            ("alice:pw@example.com", "***@example.com"),
+            ("alice:pw@example.com/api", "***@example.com/api"),
+            // A scheme with no `//` at all. Masking swallows the scheme, which is
+            // the right trade: an unparseable URL is worth garbling, a password
+            // is not worth printing.
+            ("https:alice:pw@example.com", "***@example.com"),
+            // A `//` that is not a scheme separator still anchors an authority.
+            ("foo//alice:pw@example.com", "foo//***@example.com"),
+            // ...and an `@` in a path is still not userinfo, with or without a
+            // scheme.
+            ("example.com/p@th", "example.com/p@th"),
+            // Degenerate shapes the legacy path accepts without complaint. The
+            // helper must pass them through rather than panic or mangle them.
+            ("", ""),
+            ("not-a-url", "not-a-url"),
+            ("https://", "https://"),
+            ("//example.com", "//example.com"),
+            ("https://example.com", "https://example.com"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_userinfo(input), expected, "input: {input:?}");
+        }
+    }
+
+    /// A URL with no `//` still gets masked.
+    ///
+    /// Anchoring the authority on `//` alone is the tempting shortcut, and it
+    /// fails open: `--base-url alice:pw@host` has no `//`, is accepted by the
+    /// legacy path without complaint, and would reach stderr with the password
+    /// intact. Failing open is the one direction a redaction helper must not
+    /// fail, so it is pinned separately from the table above.
+    #[test]
+    fn redact_userinfo_masks_a_url_with_no_scheme_separator() {
+        for input in [
+            "alice:hunter2@example.com",
+            "alice:hunter2@example.com/api",
+            "https:alice:hunter2@example.com",
+            "foo//alice:hunter2@example.com",
+        ] {
+            let masked = redact_userinfo(input);
+            assert!(
+                !masked.contains("hunter2") && !masked.contains("alice"),
+                "userinfo survived in {input:?}: {masked}"
+            );
+            assert!(
+                masked.contains("***@"),
+                "the mask should be visible in {input:?}: {masked}"
+            );
+        }
+    }
+
+    /// Multi-byte input must not panic. The value is unvalidated and arrives from
+    /// a hand-edited file, so slicing it on the wrong boundary would abort the
+    /// process from inside a *warning*.
+    #[test]
+    fn redact_userinfo_survives_multibyte_input() {
+        for input in [
+            "https://ünïcøde.example.com/päth",
+            "https://üser:pw@ünïcøde.example.com",
+            "日本語",
+            "//日本@語",
+            "https://例え.example.com/?q=日本",
+            // No `//`, so these are masked from offset zero — the anchor with the
+            // least structure to lean on, and the one where a byte-index slip
+            // would land mid-character.
+            "üser:pw@例え.example.com",
+            "日本@語",
+        ] {
+            let _ = redact_userinfo(input);
+        }
+    }
+
+    /// Deprecating the selector changed no behaviour — the point of the issue.
+    ///
+    /// Pinned because a later cleanup that "finishes" the deprecation by making
+    /// the override declare funds, or namespace credentials under `custom`,
+    /// would be a silent safety change: undeclared funds is what refuses the
+    /// fund-moving commands, and the namespace is where existing keys live.
+    #[test]
+    fn deprecation_did_not_change_what_an_override_resolves_to() {
+        let cli = Cli::try_parse_from([
+            "nexus",
+            "--network",
+            "testnet",
+            "--base-url",
+            "https://exchange.example.com",
+            "health",
+        ])
+        .unwrap();
+        let target = target(&cli);
+
+        assert_eq!(target.funds(), Funds::Unknown, "destination stays unknown");
+        assert_eq!(
+            target.credential_funds(),
+            Funds::Play,
+            "the named network's funds are unchanged"
+        );
+        assert_eq!(
+            target.namespace(),
+            "testnet",
+            "credentials stay namespaced by the named network, not by the URL"
+        );
+        assert!(!target.has_faucet(), "an override still has no faucet");
     }
 
     #[test]

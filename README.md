@@ -400,13 +400,12 @@ be a network that moves real money.
 nexus markets                                    # testnet (the default)
 nexus --network local markets
 nexus --network dev markets                      # a custom network you declared
-nexus --base-url http://127.0.0.1:9090 markets   # any custom base URL
 ```
 
 | Flag | Env | Default |
 |---|---|---|
 | `--network <mainnet\|testnet\|local\|LABEL>` | `NEXUS_NETWORK` | `testnet` |
-| `--base-url <URL>` | `NEXUS_BASE_URL` | — (overrides `--network`) |
+| `--base-url <URL>` | `NEXUS_BASE_URL` | — (**deprecated**, see [below](#the-base-url-override-is-deprecated); overrides `--network`) |
 
 | Network | Funds | Notes |
 |---|---|---|
@@ -497,12 +496,53 @@ and nothing about it is transmitted.
   build a *wrong* request rather than merely fail. The host itself is never
   checked against any list, which is the entire point.
 
-`--base-url` still works and is unchanged for selecting a host: it takes
-precedence over `--network` and keeps presenting the selected network's
-credentials. What it cannot do is carry the safety metadata, so its funds are
-**unknown** and the guarded commands are refused. Declare the stage under
-`custom_networks` to get a validated URL, its own credential namespace, and a
-funds classification.
+#### The base-URL override is deprecated
+
+`--base-url`, `NEXUS_BASE_URL` and the config file's top-level `base_url` are
+**deprecated** (ENG-10956) in favour of a `custom_networks` entry selected with
+`--network <label>`.
+
+**Nothing about them has changed, and nothing is removed.** They still work, they
+still take precedence over `--network`, and this release only adds a notice. A
+future release may remove them; that is a separate, breaking change.
+
+They are deprecated because a bare URL cannot carry the two things a declared
+stage does:
+
+- **It does not declare funds.** A URL says nothing about what its host moves, so
+  the destination's funds are `unknown` and the fund-moving commands are refused
+  rather than inheriting the named network's safety flags.
+- **It does not namespace credentials.** The override redirects the request
+  without changing which key is presented, so stored credentials stay filed under
+  whichever network was selected — not under the host you pointed at.
+
+Using any of the three prints a one-line notice on stderr naming which one
+resolved the target. It stays on stderr even under `--output json`, so stdout
+remains a clean document: scripted callers are exactly who needs to see it.
+
+Migrating is a config-file edit:
+
+```jsonc
+// before — deprecated
+{ "base_url": "https://exchange.example.com/api/exchange" }
+
+// after
+{
+  "network": "dev",
+  "custom_networks": {
+    "dev": {
+      "base_url": "https://exchange.example.com/api/exchange",
+      "funds": "play"
+    }
+  }
+}
+```
+
+> **Credentials do not carry over.** They are stored per label, so a stage that
+> was reached via `base_url` while `testnet` was selected has its key filed under
+> `testnet`, and the new `dev` label starts empty. Run `nexus setup` for the new
+> stage, or move the section by hand. This is the one part of the migration that
+> is not purely cosmetic — see [Per-network credentials](#per-network-credentials).
 
 #### Real-funds guardrails
 
@@ -623,7 +663,9 @@ default (`testnet`). Some consequences worth knowing:
 - **`--base-url` does not change the namespace.** It redirects the request; it
   does not change who you are. Pointing at a proxy or a tunnel in front of a
   network still presents that network's credentials. It *does* change what the
-  target is known to move — see [Custom networks](#custom-networks).
+  target is known to move — see [Custom networks](#custom-networks). This is one
+  of the two reasons it is [deprecated](#the-base-url-override-is-deprecated), and the reason
+  migrating to a label means re-running `nexus setup` for it.
 - **Flags and env are not namespaced.** `--api-key` / `NEXUS_API_KEY` (and the
   session-token equivalents) apply to whichever network is selected — they are a
   per-invocation override you just typed. Only the persisted layer, the one that
