@@ -127,6 +127,89 @@ fn release_as_is_never_committed() {
     );
 }
 
+/// `last-release-sha` is a STATIC floor, and a static floor goes stale the moment
+/// the next release ships.
+///
+/// It was added in #36 to stop phantom release PRs: the `v0.1.0` bootstrap cut an
+/// empty changelog, so with no recognised release boundary the note-collection walk
+/// ran to the repo root every run and manufactured a minor bump from commits that
+/// had already shipped. Pinning the floor to the `v0.3.0` release commit stopped
+/// that — until 0.4.0 actually shipped, at which point the pin named the
+/// release-before-last and release-please re-proposed all of 0.4.0's contents as
+/// 0.5.0 (#63). Same defect, one floor higher.
+///
+/// The boundary release-please should use is the `v<version>` tag, which moves on
+/// its own. That only works if the tag exists when the release PR is built, which
+/// is why `release-please.yml` creates the tag *between* its two invocations — a
+/// draft Release carries no tag, so a same-invocation `release-pr` sees an
+/// unreleased repo and reaches for exactly this kind of floor.
+///
+/// So: no static floor, anywhere in the config. If a bootstrap ever needs one
+/// again, it belongs in a single run, not in a committed file.
+#[test]
+fn no_static_release_floor_is_committed() {
+    let cfg = config();
+    // Both spellings the schema accepts, at the root and per-package: `packages`
+    // inherits root keys, so checking only one level would leave a hole.
+    let floors = ["last-release-sha", "bootstrap-sha"];
+    for key in floors {
+        assert!(
+            cfg.get(key).is_none(),
+            "`{key}` must not be committed: it pins the changelog boundary to one \
+             commit, which is correct only until the next release ships — then \
+             release-please re-proposes the release it just cut (#63). The \
+             `v<version>` tag is the boundary that moves on its own; \
+             release-please.yml creates it before building the release PR so \
+             discovery works without a floor."
+        );
+        for pkg in package_names(&cfg) {
+            assert!(
+                effective(&cfg, &pkg, key).is_none(),
+                "`{key}` must not be committed (found for package {pkg:?}) — see \
+                 the root-level assertion above for why."
+            );
+        }
+    }
+}
+
+/// The release PR must be built only after the git tag exists.
+///
+/// This is the other half of [`no_static_release_floor_is_committed`], and the
+/// reason the workflow calls the action twice. A draft Release does not
+/// materialise its git tag, so a `release-pr` that runs in the same invocation as
+/// the Release finds no `v<version>`, concludes the repo has never been released,
+/// and re-collects already-shipped commits. Asserting the *shape* of the workflow
+/// rather than trusting a comment, because collapsing the two invocations back
+/// into one would look like a tidy-up and would silently restore #63.
+#[test]
+fn the_release_pr_is_built_after_the_tag_exists() {
+    let wf = read(".github/workflows/release-please.yml");
+    let tag_step = wf.find("Create release tag").expect(
+        "release-please.yml must still create the tag itself: a draft \
+                 Release does not materialise one, and release.yml listens on tags",
+    );
+    let skip_pr = wf.find("skip-github-pull-request: true").expect(
+        "the release-cutting invocation must set \
+                 `skip-github-pull-request: true` so the release PR is not built \
+                 before the tag exists (#63)",
+    );
+    let skip_release = wf.find("skip-github-release: true").expect(
+        "the PR-opening invocation must set `skip-github-release: true` \
+                 so it only grooms the PR",
+    );
+
+    assert!(
+        skip_pr < tag_step,
+        "the release must be cut BEFORE the tag step; found the \
+         `skip-github-pull-request` invocation after it"
+    );
+    assert!(
+        tag_step < skip_release,
+        "the release PR must be opened AFTER the tag is created, or discovery \
+         finds no release and re-proposes already-shipped commits (#63)"
+    );
+}
+
 /// The ENG-7411 pair. Without both, stock semver applies and the first
 /// `BREAKING CHANGE:` footer proposes `1.0.0`:
 ///

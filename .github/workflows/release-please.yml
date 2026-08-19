@@ -49,7 +49,25 @@ jobs:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
-      - uses: googleapis/release-please-action@v4
+      # Split into two invocations, with the tag creation between them. A single
+      # invocation does the Release and the release PR back-to-back, and that
+      # ordering is what produced the phantom PRs (#63):
+      #
+      # `"draft": true` means the Release carries no git tag until it is published
+      # (see the tag step below). So a `release-pr` run in the same invocation
+      # looks for the release that was just cut, finds no `v<version>` tag, treats
+      # the repo as never released, and re-collects every commit above whatever
+      # floor it can find — re-proposing the release it had just made, as a *minor*
+      # bump, with a duplicate changelog. Once per release, and self-healing on the
+      # next push, which is why it read as intermittent rather than as a bug.
+      #
+      # Creating the tag first makes discovery succeed on the one run where it
+      # currently fails. It also removes the need for a `last-release-sha` floor:
+      # that was #36's fix for the same symptom, but a static floor is only correct
+      # until the next release ships, at which point it silently starts naming the
+      # wrong boundary. Discovery from the tag moves on its own.
+      - name: Cut the release (no PR yet — the tag must exist first)
+        uses: googleapis/release-please-action@v4
         id: release
         with:
           # App-installation token from the app-token step above, NOT the default
@@ -60,6 +78,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
       # Create the git tag ourselves when a release is cut. release-please makes a
       # *draft* GitHub Release ("draft": true), and GitHub does NOT materialise the
@@ -85,3 +104,19 @@ jobs:
               -f "ref=refs/tags/$TAG" -f "sha=$SHA"
             echo "created tag $TAG at $SHA -> release.yml will now run"
           fi
+
+      # Now that the tag exists, open/refresh the standing release PR. Release
+      # discovery finds `v<version>` and bounds the changelog at it, so this PR
+      # contains only what landed *after* the release above — empty, and therefore
+      # not opened at all, on a run that just cut one.
+      #
+      # Runs unconditionally, not just when a release was cut: on an ordinary push
+      # this is the step that maintains the standing PR, and no release was created
+      # for the tag step to skip.
+      - name: Open or refresh the release PR (tag now exists)
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
