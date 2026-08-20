@@ -49,7 +49,25 @@ jobs:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
-      - uses: googleapis/release-please-action@v4
+      # Split into two invocations, with the tag creation between them. A single
+      # invocation does the Release and the release PR back-to-back, and that
+      # ordering is what produced the phantom PRs (#63):
+      #
+      # `"draft": true` means the Release carries no git tag until it is published
+      # (see the tag step below). So a `release-pr` run in the same invocation
+      # looks for the release that was just cut, finds no `v<version>` tag, treats
+      # the repo as never released, and re-collects every commit above whatever
+      # floor it can find — re-proposing the release it had just made, as a *minor*
+      # bump, with a duplicate changelog. Once per release, and self-healing on the
+      # next push, which is why it read as intermittent rather than as a bug.
+      #
+      # Creating the tag first makes discovery succeed on the one run where it
+      # currently fails. It also removes the need for a `last-release-sha` floor:
+      # that was #36's fix for the same symptom, but a static floor is only correct
+      # until the next release ships, at which point it silently starts naming the
+      # wrong boundary. Discovery from the tag moves on its own.
+      - name: Cut the release (no PR yet — the tag must exist first)
+        uses: googleapis/release-please-action@v4
         id: release
         with:
           # App-installation token from the app-token step above, NOT the default
@@ -60,28 +78,136 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
-      # Create the git tag ourselves when a release is cut. release-please makes a
-      # *draft* GitHub Release ("draft": true), and GitHub does NOT materialise the
-      # underlying git tag for a draft Release until it is published — so the
-      # tag-listening release.yml (on: push: tags) would never fire and the
-      # cargo-dist build/sign/upload-into-draft/undraft handoff would stall.
-      # Pushing the tag under the App-installation token (which, like a PAT and
-      # unlike GITHUB_TOKEN, triggers other workflows) both supplies the missing
-      # ref and triggers release.yml. Idempotent: tolerate an already-existing ref
-      # so re-runs are safe.
-      - name: Create release tag (draft Releases don't create the git tag)
-        if: ${{ steps.release.outputs.release_created }}
+      # Create the git tag ourselves. release-please makes a *draft* GitHub Release
+      # ("draft": true), and GitHub does NOT materialise the underlying git tag for
+      # a draft Release until it is published — so the tag-listening release.yml
+      # (on: push: tags) would never fire and the cargo-dist
+      # build/sign/upload-into-draft/undraft handoff would stall. Pushing the tag
+      # under the App-installation token (which, like a PAT and unlike
+      # GITHUB_TOKEN, triggers other workflows) both supplies the missing ref and
+      # triggers release.yml.
+      #
+      # Deliberately NOT gated on `release_created`, and idempotent, because with
+      # the static floor gone the tag is the ONLY boundary release-please can
+      # discover. `release_created` fires exactly once per release: the action's
+      # `createReleases()` relabels the merged PR `autorelease: tagged` before this
+      # step runs, so if the ref POST failed transiently right here, no re-run and
+      # no later push would ever set that output again. The tag would stay missing
+      # permanently, every subsequent run would hit `needsBootstrap` with no floor,
+      # walk to the repo root, and re-propose already-shipped commits — #63 again,
+      # unbounded and unfixable by re-running. Gating a recovery step on a
+      # once-only signal is what makes a transient failure permanent.
+      #
+      # So: fast path from the action's outputs when a release was just cut, then a
+      # backstop that runs on EVERY push and restores the ref if it is absent. The
+      # backstop is scoped to the one version `.release-please-manifest.json` names
+      # — the same release discovery bounds at — so it cannot resurrect an
+      # unrelated draft Release someone left lying around. Read over the API
+      # because this job has no checkout.
+      #
+      # It refuses to guess: a Release's `target_commitish` is the release commit's
+      # sha when release-please creates it, but the field can also hold a branch
+      # name, and tagging a branch tip would put the tag on the wrong commit. If it
+      # is not a sha, fail loudly instead.
+      - name: Ensure the release tag exists (draft Releases don't create it)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.release.outputs.tag_name }}
           SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
-            echo "tag $TAG already exists; nothing to do"
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$TAG" -f "sha=$SHA"
-            echo "created tag $TAG at $SHA -> release.yml will now run"
+
+          repo="$GITHUB_REPOSITORY"
+
+          tag_exists() { gh api "repos/$repo/git/ref/tags/$1" >/dev/null 2>&1; }
+
+          # Create refs/tags/$1 at $2 unless it already exists. Non-zero only when
+          # the tag is missing AND cannot be created safely.
+          ensure_tag() {
+            tag="$1"
+            sha="$2"
+            if tag_exists "$tag"; then
+              echo "tag $tag already exists; nothing to do"
+              return 0
+            fi
+            # A Release's target_commitish is the release commit's sha when
+            # release-please creates it, but the field can also hold a branch name.
+            # Tagging a branch tip would put the tag on the wrong commit, so refuse
+            # rather than guess. Full-string match: a prefix check would accept a
+            # 40-character branch name that merely starts with a hex digit. Case
+            # tolerated — the API returns lowercase, and failing the whole run over
+            # capitals would be a false alarm that blocks PR grooming too.
+            if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::cannot create $tag safely: no commit sha for it (got '$2')."
+              echo "Create the tag by hand at the release commit, or release.yml will never fire for it."
+              return 1
+            fi
+            if gh api --method POST "repos/$repo/git/refs" \
+              -f "ref=refs/tags/$tag" -f "sha=$sha"; then
+              echo "created tag $tag at $sha -> release.yml will now run"
+              return 0
+            fi
+            # A POST that lost a race is not a failure: the ref is what matters,
+            # not who wrote it. Anything else is.
+            if tag_exists "$tag"; then
+              echo "tag $tag appeared while we were creating it; fine"
+              return 0
+            fi
+            return 1
+          }
+
+          # Fast path: a release was cut on this run, so the action told us both
+          # halves directly. Nothing left to backstop — the release just cut IS the
+          # boundary the next run discovers, and re-checking it here would only risk
+          # a second POST against a ref we just wrote.
+          if [ -n "${TAG:-}" ]; then
+            ensure_tag "$TAG" "$SHA"
+            exit 0
           fi
+
+          # Backstop, every run: the version the manifest calls released must have a
+          # tag, or the next run has no boundary to discover. Read over the API —
+          # this job has no checkout — at this run's commit, not the branch tip.
+          version="$(gh api \
+            "repos/$repo/contents/.release-please-manifest.json?ref=$GITHUB_SHA" \
+            -H "Accept: application/vnd.github.raw" | jq -r '."." // ""')"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::warning::.release-please-manifest.json names no root version; nothing to backstop."
+            exit 0
+          fi
+
+          tag="v$version"
+          if tag_exists "$tag"; then
+            echo "manifest version $version is tagged ($tag); discovery has its boundary"
+            exit 0
+          fi
+
+          # Missing. Recover the sha from the Release itself — drafts included,
+          # since a draft is precisely the case with no ref.
+          sha="$(gh api "repos/$repo/releases?per_page=100" \
+            | jq -r --arg tag "$tag" \
+                'map(select(.tag_name == $tag)) | .[0].target_commitish // ""')"
+          if [ -z "$sha" ]; then
+            echo "::warning::no Release exists for $tag, so there is nothing to tag from."
+            echo "If $version genuinely has not been released yet, that is expected; otherwise create the tag by hand at the release commit."
+            exit 0
+          fi
+          ensure_tag "$tag" "$sha"
+
+      # Now that the tag exists, open/refresh the standing release PR. Release
+      # discovery finds `v<version>` and bounds the changelog at it, so this PR
+      # contains only what landed *after* the release above — empty, and therefore
+      # not opened at all, on a run that just cut one.
+      #
+      # Runs unconditionally, not just when a release was cut: on an ordinary push
+      # this is the step that maintains the standing PR, and no release was created
+      # for the tag step to skip.
+      - name: Open or refresh the release PR (tag now exists)
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
