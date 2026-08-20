@@ -1357,13 +1357,28 @@ pub enum Command {
         action: AgentsCommand,
     },
 
-    /// Manage collateral transfers (list/create).
+    /// Manage collateral transfers (list/create). NOT SERVED — see below.
+    ///
+    /// HIDDEN FROM `--help`, NOT REMOVED (ENG-8123).
+    ///
+    /// `/transfers` and `/sub-accounts` 404 on the live venue where authenticated
+    /// routes 401, so nothing serves them; the contract does not name them either.
+    /// The standing rule is that every command a user can READ must be one they can
+    /// RUN, so these leave `--help`.
+    ///
+    /// They still PARSE, deliberately. A script or an older doc that already invokes
+    /// `nexus transfers list` should get the sentence in `main.rs`'s `unserved` —
+    /// which says the route is absent and cites ENG-7800 — rather than clap's
+    /// "unrecognized subcommand", which reads like a version problem and sends the
+    /// reader to upgrade. Withdrawing them outright is ENG-7800's call to make.
+    #[command(hide = true)]
     Transfers {
         #[command(subcommand)]
         action: TransfersCommand,
     },
 
-    /// Manage sub-accounts (list/create).
+    /// Manage sub-accounts (list/create). NOT SERVED — see `Transfers` above.
+    #[command(hide = true)]
     SubAccounts {
         #[command(subcommand)]
         action: SubAccountsCommand,
@@ -2698,8 +2713,14 @@ mod tests {
         assert!(matches!(cli.command, Command::Ws { .. }));
     }
 
-    /// `--help` renders, names the binary, and lists the full command surface.
+    /// `--help` renders, names the binary, and lists the full SERVED command surface.
     /// Guards against a command silently dropping out of the top-level help.
+    ///
+    /// `transfers` and `sub-accounts` were in this list and are deliberately not any
+    /// more (ENG-8123): nothing serves their routes, so they are `hide = true` and
+    /// `unserved_commands_are_not_advertised_in_help` below asserts their ABSENCE
+    /// instead — the exclusion carries its reason, and it is tested in both directions
+    /// rather than dropped from one list and forgotten.
     #[test]
     fn top_level_help_lists_every_command() {
         let help = Cli::command().render_long_help().to_string();
@@ -2730,8 +2751,6 @@ mod tests {
             "auth",
             "keys",
             "agents",
-            "transfers",
-            "sub-accounts",
             "ws",
             "setup",
             "completions",
@@ -3184,6 +3203,49 @@ mod tests {
                 action: TransfersCommand::Create { .. }
             }
         ));
+    }
+
+    /// Hiding a command from `--help` must not stop it PARSING (ENG-8123).
+    ///
+    /// `hide = true` only affects help rendering, and this pins that: a script that
+    /// already runs `nexus transfers list` has to reach the handler, so the user gets
+    /// the sentence that says the route is absent instead of clap's "unrecognized
+    /// subcommand" — which reads like a version problem and sends them to upgrade.
+    #[test]
+    fn hidden_unserved_commands_still_parse() {
+        let cli = Cli::try_parse_from(["nexus", "transfers", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Transfers {
+                action: TransfersCommand::List
+            }
+        ));
+        let cli = Cli::try_parse_from(["nexus", "sub-accounts", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::SubAccounts {
+                action: SubAccountsCommand::List
+            }
+        ));
+    }
+
+    /// And they must be out of `--help`, which is the half a user sees.
+    #[test]
+    fn unserved_commands_are_not_advertised_in_help() {
+        let help = Cli::command().render_long_help().to_string();
+        for advertised in ["transfers", "sub-accounts"] {
+            assert!(
+                !help.contains(advertised),
+                "`{advertised}` is still in --help; nothing a user can read should be \
+                 a command they cannot run (ENG-8123):\n{help}"
+            );
+        }
+        // The control: a served command IS advertised, so this test cannot pass by
+        // rendering an empty help.
+        assert!(
+            help.contains("positions"),
+            "help should still list served commands:\n{help}"
+        );
     }
 
     /// `order place`/`cancel` help spells out their flags, so the trading surface

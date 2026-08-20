@@ -333,16 +333,18 @@ nexus auth login                    # EIP-191 sign-in; prompts for the key,
                                     # stores the session token (mode 0600)
 nexus agents register --agent 0x<AGENT_ADDR>   # EIP-712; prompts for the key
 
-# API keys, agents, transfers, sub-accounts
+# API keys and agents
 nexus keys list
 nexus keys create                   # secret is shown ONCE — store it now
 nexus keys delete <KEY_ID>
 nexus agents list
 nexus agents revoke <AGENT_ADDRESS>
-nexus transfers list
-nexus transfers create --from <ACCT> --to <SUBACCT> --amount 100
-nexus sub-accounts list
-nexus sub-accounts create "trading-bot-1"
+
+# `nexus transfers` and `nexus sub-accounts` are NOT SERVED (ENG-8123). Both /transfers
+# and /sub-accounts return 404 on the live venue where authenticated routes return 401,
+# so no credential makes them work. The commands are hidden from `--help` and now report
+# that themselves instead of surfacing a raw 404; whether they ship or are withdrawn is
+# tracked in ENG-7800.
 
 # Live streaming over WebSocket (Ctrl-C to stop)
 nexus ws trades --market BTC-USDX-PERP      # public channels need --market

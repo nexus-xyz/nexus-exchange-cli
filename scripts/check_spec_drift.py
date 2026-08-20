@@ -596,9 +596,11 @@ def check_allowlist_is_honest():
     )
     if invisible:
         print(
-            f"\nNOTE: {len(invisible)} command(s) target a route nothing serves — they "
-            f"parse, authenticate, dispatch, and cannot succeed. Withdraw or specify "
-            f"(this is the ENG-7740 shape):"
+            f"\nNOTE: {len(invisible)} command(s) target a route nothing serves. Since "
+            f"ENG-8123 they refuse up front — hidden from `--help`, and a sentence "
+            f"naming the absent route instead of a raw 404 — so a user no longer pays "
+            f"for this, but the op still has no contract. Withdraw or specify (this is "
+            f"the ENG-7740 shape):"
         )
         for (m, p), (command, _, issue) in invisible:
             print(f"  - `nexus {command}` -> {m} {p}  ({issue})")
