@@ -985,6 +985,9 @@ async fn handle_transfers(
     action: TransfersCommand,
     format: OutputFormat,
 ) -> Result<()> {
+    if !unserved_override() {
+        return Err(unserved("transfers", "GET/POST /transfers"));
+    }
     match action {
         TransfersCommand::List => {
             require_authenticated(authenticated, "transfers list")?;
@@ -1028,6 +1031,9 @@ async fn handle_sub_accounts(
     action: SubAccountsCommand,
     format: OutputFormat,
 ) -> Result<()> {
+    if !unserved_override() {
+        return Err(unserved("sub-accounts", "GET/POST /sub-accounts"));
+    }
     match action {
         SubAccountsCommand::List => {
             require_authenticated(authenticated, "sub-accounts list")?;
@@ -1187,6 +1193,46 @@ fn margin_read_error(err: nexus_exchange::Error, context: &'static str) -> anyho
 /// These requests can only ever succeed signed, so we error (non-zero exit)
 /// instead of sending an unsigned request that surfaces as an opaque 401 —
 /// this stops scripts from silently mis-authenticating.
+/// The routes `transfers` and `sub-accounts` target, which nothing serves (ENG-8123).
+///
+/// Probed unauthenticated against `https://exchange.nexus.xyz/api/exchange` on
+/// 2026-07-29 and re-checked statically on 2026-08-20: `GET`/`POST /transfers` and
+/// `GET`/`POST /sub-accounts` all return **404**, while documented controls under
+/// identical conditions return **401** (`POST /orders`, `POST /account/deposit`). A 404
+/// where the controls give 401 means the route is absent, not protected. The contract
+/// agrees — neither path is among the spec's 85 — and so does the served code: no route
+/// registration anywhere under the engine's api-module or the indexer.
+///
+/// So a user who runs `nexus transfers list` cannot succeed by fixing anything on their
+/// side, and the raw `failed to fetch transfers: 404` they used to get invited them to
+/// try. This says the true thing instead.
+///
+/// WHY THE COMMANDS STILL EXIST. Whether these ship or the commands are withdrawn is
+/// ENG-7800, which is an open escalation and not this CLI's call — the SDK ships the
+/// methods, the drift script classifies both as `ROUTE_INVISIBLE`, and `mm-runner`'s
+/// coverage inventories them. Withdrawing them here would pre-empt that decision;
+/// leaving a 404 in a user's terminal is the one option that is wrong under either
+/// answer. When the routes land, delete `unserved` and its two call sites and the
+/// handlers below work unchanged.
+///
+/// `NEXUS_UNSERVED_ACCOUNT_ROUTES=1` bypasses the guard. It exists for whoever is
+/// verifying a deployment that claims to serve these — the point of the guard is to stop
+/// a user hitting a 404 they cannot fix, not to make the code unreachable.
+fn unserved(command: &str, routes: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{command}' targets {routes}, which this venue does not serve. Those paths \
+         return 404 where authenticated routes return 401, so they are absent rather \
+         than protected, and no credential or --base-url makes them work. Whether they \
+         ship or the commands are withdrawn is tracked in ENG-7800. \
+         (Set NEXUS_UNSERVED_ACCOUNT_ROUTES=1 to attempt the call anyway.)"
+    )
+}
+
+/// Has the caller explicitly opted in to attempting an unserved route?
+fn unserved_override() -> bool {
+    std::env::var_os("NEXUS_UNSERVED_ACCOUNT_ROUTES").is_some()
+}
+
 fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
     if !authenticated {
         anyhow::bail!(
@@ -1345,6 +1391,41 @@ mod tests {
                 "message should explain the constraint: {msg}"
             );
         }
+    }
+
+    /// The message a user sees instead of `failed to fetch transfers: 404`.
+    ///
+    /// Asserting the CONTENT, not just that it errors: the whole point of ENG-8123 is
+    /// that the old failure invited the reader to fix their credentials or their
+    /// --base-url, and neither could work. So the sentence has to name the command, say
+    /// the route is absent rather than protected, and cite where the decision lives.
+    #[test]
+    fn unserved_names_the_command_the_route_and_the_owner() {
+        let msg = unserved("transfers", "GET/POST /transfers").to_string();
+        assert!(msg.contains("transfers"), "names the command: {msg}");
+        assert!(
+            msg.contains("GET/POST /transfers"),
+            "names the routes: {msg}"
+        );
+        assert!(
+            msg.contains("404") && msg.contains("401"),
+            "tells 404 from 401: {msg}"
+        );
+        assert!(msg.contains("ENG-7800"), "cites the owning decision: {msg}");
+        // The two things a reader would otherwise try, ruled out explicitly.
+        assert!(msg.contains("credential"), "rules out credentials: {msg}");
+        assert!(msg.contains("--base-url"), "rules out a redirect: {msg}");
+    }
+
+    #[test]
+    fn unserved_override_is_off_unless_the_env_var_is_set() {
+        // Not `remove_var`/`set_var` — those are process-global and racy under the test
+        // harness's threads. The default is what every user gets, and that is the case
+        // worth pinning here; the override's own behaviour is one `var_os` call.
+        assert!(
+            !unserved_override(),
+            "NEXUS_UNSERVED_ACCOUNT_ROUTES must be opt-in, not the default"
+        );
     }
 
     #[test]

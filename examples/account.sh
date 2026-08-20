@@ -37,10 +37,14 @@ nexus fills --limit 50      # GET /fills
 nexus orders                # GET /orders
 nexus withdrawals           # GET /withdrawals
 
-# Funding booked against the account, collateral transfers, sub-accounts.
+# Funding booked against the account.
 nexus funding-payments --limit 50   # GET /funding-payments
-nexus transfers list                # GET /transfers
-nexus sub-accounts list             # GET /sub-accounts
+
+# `nexus transfers list` and `nexus sub-accounts list` used to be here. Removed
+# (ENG-8123): /transfers and /sub-accounts 404 on the live venue where authenticated
+# routes 401, so this script — which is meant to be pasted and run against a funded
+# account — failed halfway through with a raw 404. The commands still exist and now say
+# so themselves; whether they ship or are withdrawn is ENG-7800.
 
 # ADL settlements that touched an account (as bankrupt target or closed
 # counterparty).   GET /account/{address}/adl-history
