@@ -276,6 +276,50 @@ def load_targeted(path="endpoints.txt"):
     return out
 
 
+# The dual-stack v1 prefix (ENG-4949 / ENG-4751). The pinned spec documents many
+# operations TWICE — once on the legacy gateway route (`/orders`) and once on the
+# direct per-service route (`/api/v1/orders`) — pending the layout decision in
+# ENG-8155. METHOD_OP above already picks ONE spelling per operation, mirroring
+# what the SDK actually calls, so subtracting path strings reported the spelling
+# the CLI did not pick as an uncovered gap and divided by a denominator counting
+# 101 paths where the API has 68 operations: coverage read 37.6% when it was
+# 55.9%, and 33 of the 63 reported gaps were the other spelling of something the
+# CLI already covers (ENG-11847).
+V1_PREFIX = "/api/v1"
+
+
+def canonical_op(op):
+    """One (method, path) per operation, whichever spelling the spec used.
+
+    Applied ONLY to the coverage figures. Invariant 1 keeps comparing literal
+    paths, because an endpoints.txt entry must name a path the spec really
+    declares — and because METHOD_OP's whole point is that the row mirrors the
+    spelling the SDK sends, which a canonicalized comparison would stop checking.
+    """
+    method, path = op
+    if path.startswith(V1_PREFIX + "/"):
+        path = path[len(V1_PREFIX):]
+    return (method, path)
+
+
+def coverage_figures(targeted, available):
+    """Canonical coverage sets, split out of the reporting so they are testable.
+
+    Separate because a report that hides every gap and a report with no gaps
+    print the same line — the tests need something to call other than the
+    reporting path itself.
+    """
+    canon = lambda ops: {canonical_op(op) for op in ops}
+    spec_set, mine = canon(available), canon(targeted)
+    return {
+        "spec": spec_set,
+        "targeted": mine,
+        "covered": spec_set & mine,
+        "uncovered": sorted(spec_set - mine),
+        "spellings": len(available) - len(spec_set),
+    }
+
+
 def spec_ops(spec):
     ops = set()
     for p, methods in spec.get("paths", {}).items():
@@ -508,21 +552,33 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
 
 def check_targets_vs_spec(targeted, available):
     """Invariant 1: every endpoints.txt op exists in the pinned spec. Also prints
-    the coverage line the dashboard scrapes and the informational uncovered list.
-    Returns the number of errors printed."""
-    missing = [op for op in targeted if op not in available]
-    uncovered = sorted(available - set(targeted))
+    the coverage figures and the informational uncovered list. Returns the number
+    of errors printed.
 
-    pct = 100.0 * len(targeted) / len(available) if available else 0.0
+    This used to say the coverage line was "the coverage line the dashboard
+    scrapes". It is not: the interfaces fleet dashboard counts non-comment lines
+    of endpoints.txt (the numerator only), and no workflow reads this stdout. The
+    claim mattered because it is the kind of thing that stops someone making a
+    correct change to the wording — as it nearly stopped this one (ENG-11847).
+    """
+    missing = [op for op in targeted if op not in available]
+
+    cov = coverage_figures(targeted, available)
+    uncovered = cov["uncovered"]
+    pct = 100.0 * len(cov["covered"]) / len(cov["spec"]) if cov["spec"] else 0.0
     print(
-        f"CLI targets {len(targeted)} of {len(available)} spec endpoints "
-        f"({pct:.1f}% coverage)."
+        f"CLI covers {len(cov['covered'])} of {len(cov['spec'])} spec operations "
+        f"({pct:.1f}% coverage) — {len(available)} documented paths, "
+        f"{cov['spellings']} of them a second spelling of an operation already "
+        f"counted."
     )
 
     if uncovered:
         print(f"\nNot covered by the CLI ({len(uncovered)}):")
         for m, p in uncovered:
             print(f"  - {m} {p}")
+    else:
+        print("\nOK: every spec operation is covered by the CLI.")
 
     if not missing:
         print("\nOK: every targeted endpoint exists in the pinned spec.")
