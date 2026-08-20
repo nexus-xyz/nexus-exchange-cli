@@ -21,7 +21,9 @@ Run: python3 scripts/test_check_spec_drift.py   (stdlib unittest; no pytest need
 """
 import contextlib
 import io
+import json
 import os
+import re
 import sys
 import tempfile
 import textwrap
@@ -700,6 +702,108 @@ class TestCaughtUpCheckNormalisesBothSides(unittest.TestCase):
         errors, out = self._run(spec_of(MARKETS), code_only={("GET", "/nobody-calls-this")})
         self.assertGreater(errors, 0)
         self.assertIn("no longer called by any command", out)
+
+
+class TestCoverageCanonicalization(unittest.TestCase):
+    """Coverage counts operations, not path spellings (ENG-11847).
+
+    METHOD_OP already picks one spelling per operation — mirroring what the SDK
+    sends — so subtracting path strings counted the unpicked spelling as a gap.
+    Every test here also checks the fix does not over-correct: a genuine gap has
+    to survive deduplication, or a wrong number is traded for a blind one.
+    """
+
+    def test_both_spellings_are_one_operation(self):
+        self.assertEqual(
+            csd.canonical_op(("GET", "/api/v1/orders")),
+            csd.canonical_op(("GET", "/orders")),
+        )
+
+    def test_a_bare_path_is_unchanged(self):
+        self.assertEqual(csd.canonical_op(("GET", "/orders")), ("GET", "/orders"))
+
+    def test_the_prefix_is_stripped_only_as_a_whole_segment(self):
+        for path in ("/api/v1foo", "/api/v1", "/apiv1/orders", "/v1/orders"):
+            self.assertEqual(csd.canonical_op(("GET", path)), ("GET", path), path)
+
+    def test_the_method_still_separates_operations(self):
+        self.assertNotEqual(
+            csd.canonical_op(("GET", "/api/v1/orders")),
+            csd.canonical_op(("POST", "/orders")),
+        )
+
+    def test_a_real_gap_survives_deduplication(self):
+        available = {
+            ("GET", "/orders"),
+            ("GET", "/api/v1/orders"),
+            ("GET", "/widgets"),
+            ("GET", "/api/v1/widgets"),
+        }
+        cov = csd.coverage_figures({("GET", "/api/v1/orders")}, available)
+        self.assertEqual(cov["uncovered"], [("GET", "/widgets")])
+        self.assertEqual(len(cov["spec"]), 2)
+        self.assertEqual(cov["spellings"], 2)
+
+    def test_full_coverage_when_each_operation_is_targeted_once(self):
+        available = {
+            ("GET", "/orders"),
+            ("GET", "/api/v1/orders"),
+            ("GET", "/fills"),
+            ("GET", "/api/v1/fills"),
+        }
+        cov = csd.coverage_figures(
+            {("GET", "/api/v1/orders"), ("GET", "/fills")}, available
+        )
+        self.assertEqual(cov["uncovered"], [])
+        self.assertEqual(len(cov["covered"]), 2)
+
+
+class TestCoverageReportBites(unittest.TestCase):
+    """Exercises the reporting function itself, not sets the test built.
+
+    The class above passes even if `check_targets_vs_spec` ignores
+    `coverage_figures` entirely — hardcoding the gap list to `[]` is invisible to
+    it. "No gaps" and "not looking" print the same reassuring line, so these
+    capture the real function's stdout.
+    """
+
+    AVAILABLE = {
+        ("GET", "/orders"),
+        ("GET", "/api/v1/orders"),
+        ("GET", "/widgets"),
+        ("GET", "/api/v1/widgets"),
+    }
+
+    def _report(self, targeted):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            csd.check_targets_vs_spec(sorted(targeted), self.AVAILABLE)
+        return buf.getvalue()
+
+    def test_a_genuine_gap_is_printed_once(self):
+        out = self._report({("GET", "/api/v1/orders")})
+        self.assertIn("Not covered by the CLI (1):", out)
+        self.assertEqual(out.count("- GET /widgets"), 1, out)
+        self.assertNotIn("/api/v1/widgets", out)
+
+    def test_the_headline_counts_operations_not_paths(self):
+        out = self._report({("GET", "/api/v1/orders")})
+        self.assertIn("covers 1 of 2 spec operations", out)
+        self.assertIn("4 documented paths, 2 of them a second spelling", out)
+
+    def test_the_percentage_is_derived_from_the_numbers_it_prints(self):
+        # The counts alone do not pin the percentage — a fixture at 0% coverage
+        # reads 0.0% under either formula. This one is at 50% canonically and
+        # 25% under the raw denominator, so the two are distinguishable.
+        out = self._report({("GET", "/api/v1/orders")})
+        self.assertIn("(50.0% coverage)", out)
+        printed = [float(m) for m in re.findall(r"\(([0-9.]+)% coverage\)", out)]
+        self.assertEqual(printed, [50.0], out)
+
+    def test_no_gaps_says_so_rather_than_printing_nothing(self):
+        out = self._report({("GET", "/api/v1/orders"), ("GET", "/widgets")})
+        self.assertIn("OK: every spec operation is covered by the CLI.", out)
+        self.assertNotIn("Not covered by the CLI", out)
 
 
 if __name__ == "__main__":
