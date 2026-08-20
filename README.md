@@ -784,7 +784,7 @@ the crate's is simply a false statement about what the binary sends.
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
 verifies — in the `spec-drift` CI workflow, on **every** pull request — four
-invariants:
+invariants against the spec:
 
 1. every endpoint in `endpoints.txt` exists in the pinned spec (no rename/typo/
    removal slips through);
@@ -811,6 +811,24 @@ needed and no assumption is made about how `nexus-exchange-rs` names its tags:
    ceiling. A subset, deliberately: the SDK wraps considerably more than the CLI
    exposes, and those are coverage gaps to report, not failures.
 
+And two guard the README's own claims about all of the above, because both of them
+had gone stale in silence while every check stayed green:
+
+7. the coverage sentence below **equals** the ratio the checker just computed,
+   against the pin it was measured with — it had claimed `38 of 98 (38.8%)` against
+   `v0.7.2` for two spec releases while the pin was `v0.8.1`, because the checker
+   printed a number and nothing compared it to the one committed beside it;
+8. the bot-managed line above names the crate `Cargo.lock` actually resolves — which
+   is the third of "the pin, the README line, and the crate" that nothing
+   implemented, and is how the 0.9.0 → 0.9.1 bump left `main` claiming 0.9.0 while
+   shipping 0.9.1.
+
+Both fail on a claim that is wrong **or** unparseable: a guard that stops matching
+must not silently stop guarding. Both are also repairable rather than hand-edited —
+`check_spec_drift.py --sync-coverage <spec>` for 7, `sync_sdk_version.py --repair`
+for 8 — which is what keeps a bot's pin bump mergeable without a human retyping
+numbers into prose.
+
 Invariant 6 is what makes the original ENG-7962 bug structurally impossible.
 `amend_order` was mapped to `PUT /orders/{order_id}` while the SDK issues `PATCH`;
 the spec defines a PATCH there and PUT operations elsewhere, so no spec-level check
@@ -829,15 +847,30 @@ spec operations (**55.9%**), measured against the pinned `v0.8.1` spec.
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two
 mounts — and the CLI, like every other client surface, targets exactly one mount
-per operation. Counting both put 101 path-ops in the denominator while the
-numerator could only ever hold one of each, so a surface covering everything
-perfectly still scored well under 100% and the number could never read full. That
-is [ENG-10035](https://linear.app/nexus-labs/issue/ENG-10035); the twins are now
-collapsed, which is why this reads 55.9% rather than the 37.6% a literal path
-count gives. The 30 that remain are genuinely untargeted operations, not
-bookkeeping: the admin, stats, bridge and funding surfaces, plus `orders/preview`,
-`orders/history`, `positions/closed`, `cancel-on-disconnect` and the auth/token
-endpoints the CLI does not expose.
+per operation. Counting both put every mount in the denominator while the numerator
+could only ever hold one of each, so a surface covering everything perfectly still
+scored well under 100% and the number could never read full. That is
+[ENG-10035](https://linear.app/nexus-labs/issue/ENG-10035); the twins are now
+collapsed. At `v0.8.1` the literal count was `38 of 101 (37.6%)` against the same
+38 commands.
+
+The remainder are genuinely untargeted operations, not bookkeeping — the admin,
+stats, bridge and funding surfaces, `orders/preview`, `orders/history`,
+`positions/closed`, `cancel-on-disconnect`, the auth/token endpoints, and more.
+`check_spec_drift.py` prints the full list on every run, under
+`Not covered by the CLI`; that output is the enumeration, deliberately not a copy
+of it here. A hand-maintained list is exactly the kind of claim invariants 7 and 8
+exist to stop trusting: nothing checks it, and it goes stale on the next spec
+release.
+
+Operations the spec marks `deprecated` leave **both** sides of the ratio, matching
+the dashboard collector. `v0.8.1` deprecates nothing, so that filter is a no-op
+today; it is here because deprecating the legacy gateway mounts
+([ENG-4740](https://linear.app/nexus-labs/issue/ENG-4740)) is the stated direction,
+and that is the moment an unported filter would start disagreeing with the
+dashboard while invariant 7 held the disagreement in place. A deprecated operation
+the CLI still targets is reported — it is a wrapper the CLI is going to lose — but
+it is not a failure, because the mount is still served.
 
 Collapsing is used **only** to key the ratio. Existence is always matched
 literally, and uncovered operations are reported as their literal mounts, because
@@ -845,14 +878,16 @@ a canonical label can name a mount the spec never documents — the bridge domai
 `/api/v1`-native — and acting on one would ship a command that 404s
 ([ENG-8463](https://linear.app/nexus-labs/issue/ENG-8463)).
 
-The interfaces dashboard does not scrape this line; it computes the same ratio
-independently from `endpoints.txt` and the spec, under the same rule, in the
-monorepo's `collect-interfaces-metrics.py`. `canonical_op` here is a deliberate
-port of that collector's `normalise_op`, and the self-tests pin the same edge cases
-that collector's own agreement test pins — `/api/v1` only as a prefix, method
-upper-cased — because two collectors with opposite conventions is the root cause
-ENG-10035 documents. The cross-check against the live collector is manual: this
-repo's CI has no monorepo checkout to import.
+The interfaces dashboard does not scrape this line, or any other output of this
+workflow: it reads `endpoints.txt` and the spec and computes the ratio itself, in
+the monorepo's `collect-interfaces-metrics.py`. So agreement between the two is not
+something either side can observe — it has to be built in. Both of that collector's
+rules are ported here rather than reimplemented: `canonical_op` from its
+`normalise_op` (`/api/v1` stripped only as a prefix, method upper-cased), and the
+deprecated split from its `_spec_ops`. The self-tests pin the same edge cases that
+collector's own agreement test pins, because two collectors with opposite
+conventions is the root cause ENG-10035 documents. The cross-check against the live
+collector is manual: this repo's CI has no monorepo checkout to import.
 
 Run it locally with a fetched spec:
 

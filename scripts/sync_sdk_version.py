@@ -25,6 +25,22 @@ Modes:
             from the new crate) and the README managed line. Idempotent. Does NOT
             touch Cargo.lock — the caller runs `cargo update -p nexus-exchange`
             afterwards, because only cargo can resolve the lockfile correctly.
+  --repair  Re-derive the two bot-owned values — `.api-version` and the README
+            managed line — from the crate `Cargo.lock` ALREADY resolves. No
+            dependency bump, no lockfile change, no crates.io version lookup.
+
+`--repair` exists because `--write` is a bump, not a repair, and the two were being
+confused by the very checks that recommend it. `--write` returns at "Dependency is
+up to date" before it ever reaches the README, so in the one scenario invariant 8
+was built for — a hand-bump that moved Cargo.toml/Cargo.lock and left the README a
+release behind, which is what #60 did on 0.9.0 -> 0.9.1 — it prints "up to date"
+and changes nothing, leaving a red check with no working remedy while AGENTS.md
+forbids hand-editing the block. And if the crate happens to be behind, `--write`
+performs an unrelated dependency bump instead of the repair that was asked for.
+Same hole on the invariant-5 side: `.api-version` drifting from the resolved
+crate's pin (a bare `cargo update`, or a pin advanced by hand) is not a "newer crate
+published" event either. `--repair` fixes exactly the derived values, from the tree
+as it stands.
 
 Tokenless: crates.io needs only a User-Agent. `--latest` overrides the lookup for
 tests and offline runs.
@@ -32,6 +48,7 @@ tests and offline runs.
 Usage:
   sync_sdk_version.py --check [--latest X.Y.Z]
   sync_sdk_version.py --write [--latest X.Y.Z]
+  sync_sdk_version.py --repair
 """
 import argparse
 import os
@@ -117,11 +134,59 @@ def update_cargo_toml(old_version, new_version):
         f.write(new_text)
 
 
+def repair(locked):
+    """Bring `.api-version` and the README managed line back in line with the crate
+    `Cargo.lock` resolves. Idempotent; prints what it changed.
+
+    The pin is DERIVED from the crate (see the module docstring), so the crate is
+    the only input: reading it back out of the published `.crate` tarball is the
+    same source `check_sdk_parity.py` compares against, which is what makes this a
+    repair rather than a second opinion. Cargo.toml and Cargo.lock are deliberately
+    untouched — whatever crate the tree resolves today is taken as the intent, and
+    changing it is `--write`'s job, not this one's.
+    """
+    crate_tag = sdk_crate.crate_api_version(locked)
+    try:
+        with open(API_VERSION_FILE) as f:
+            old_tag = f.read().strip()
+    except OSError as e:
+        fail(f"cannot read {API_VERSION_FILE}: {e}")
+
+    print(f"Cargo.lock resolves {SDK_CRATE} {locked}, which pins spec {crate_tag}")
+    if old_tag != crate_tag:
+        with open(API_VERSION_FILE, "w") as f:
+            f.write(crate_tag + "\n")
+        print(f"Wrote .api-version = {crate_tag} (was {old_tag})")
+    else:
+        print(f".api-version already {crate_tag}")
+
+    if update_readme(crate_tag, locked):
+        print(f"Rewrote the README managed line (spec {crate_tag}, {locked})")
+    else:
+        print("README managed line already agrees with the tree")
+
+    if old_tag != crate_tag:
+        # The pin gates which operations endpoints.txt may name, so moving it can
+        # move invariant 1. Say so rather than leaving a green repair to imply the
+        # tree is now consistent everywhere.
+        print(
+            "NOTE: the pin moved, so re-run check_spec_drift.py — and "
+            "`--sync-coverage` if the README's coverage sentence still names the old "
+            "tag."
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="report only; no writes")
     mode.add_argument("--write", action="store_true", help="apply the bump if behind")
+    mode.add_argument(
+        "--repair",
+        action="store_true",
+        help="re-derive .api-version and the README managed line from the locked "
+        "crate (no dependency bump)",
+    )
     ap.add_argument(
         "--latest",
         metavar="X.Y.Z",
@@ -131,6 +196,11 @@ def main():
 
     required = sdk_crate.required_version()
     locked = sdk_crate.locked_version()
+
+    if args.repair:
+        repair(locked)
+        return
+
     latest = args.latest or sdk_crate.latest_published()
     if args.latest and not sdk_crate.CRATE_VERSION_RE.match(latest):
         fail(f"--latest is not a plain X.Y.Z crate version: {latest!r}")
