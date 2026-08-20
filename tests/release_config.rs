@@ -1,5 +1,7 @@
-//! Standing guards on `release-please-config.json` — the file that decides what
-//! version the next release cuts.
+//! Standing guards on the release automation: `release-please-config.json` — the
+//! file that decides what version the next release cuts — and the shape of
+//! `release-please.yml`, which decides whether that version is computed from the
+//! right boundary.
 //!
 //! This repo has been bitten by release config twice: the `release-as` bootstrap
 //! (ENG-4341) and the phantom releases it caused, then a missing pre-1.0 pair
@@ -23,10 +25,19 @@
 //! 2. **Distribution invariants** — `tag_shape_stays_binstall_compatible`,
 //!    `release_starts_as_draft_for_the_dist_handoff`,
 //!    `release_as_is_never_committed`, `cargo_toml_and_release_manifest_agree`,
-//!    and `windows_target_keeps_shipping` (the one guard here that reads
-//!    `dist-workspace.toml` rather than the release-please config).
+//!    and `windows_target_keeps_shipping` (which reads `dist-workspace.toml`).
 //!    These have nothing to do with being pre-1.0 and stay correct at every
 //!    version. Do not delete them along with the pre-1.0 pair.
+//! 3. **Changelog-boundary invariants** (ENG-3921) —
+//!    `no_static_release_floor_is_committed`,
+//!    `the_release_pr_is_built_after_the_tag_exists` and
+//!    `the_tag_step_recovers_on_every_run`. These three are one argument split
+//!    across two files: the boundary release-please bounds the changelog at must be
+//!    the `v<version>` tag (never a committed sha, which goes stale the moment the
+//!    next release ships), which means the tag has to exist before the release PR
+//!    is built, which means creating it cannot be gated on a signal that fires
+//!    once. Undo any one of the three and #63 comes back. The last two read
+//!    `release-please.yml`, not the JSON config.
 //!
 //! A note on the assertion style: some guards reject a specific wrong value while
 //! others require a specific right one. That tracks the upstream default in each
@@ -40,6 +51,8 @@ fn read(rel: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
+
+const WORKFLOW: &str = ".github/workflows/release-please.yml";
 
 fn config() -> Value {
     serde_json::from_str(&read("release-please-config.json"))
@@ -172,6 +185,57 @@ fn no_static_release_floor_is_committed() {
     }
 }
 
+/// One step of `.github/workflows/release-please.yml`: its text, with comment
+/// lines stripped.
+///
+/// Text-level, because there is no YAML parser in this tree and adding one for a
+/// single guard is a poor trade — but *structural*, because the thing being
+/// asserted is which invocation carries which flag. The previous version of this
+/// guard searched the whole file with `str::find`, which counts the workflow's
+/// (long) explanatory comments: quoting a flag name in prose could fail it
+/// spuriously, or — with one flag mentioned on each side of the tag step — let it
+/// pass over a single collapsed invocation, the exact thing it exists to prevent.
+struct Step {
+    body: String,
+}
+
+impl Step {
+    fn has(&self, needle: &str) -> bool {
+        self.body.contains(needle)
+    }
+}
+
+/// Split the `release-please` job's steps.
+///
+/// A step item is a line at the steps' indent opening with one of the keys a step
+/// can start with; the `run:` block scalars are indented deeper, so their shell
+/// cannot be mistaken for one. Deliberately strict: a parse that silently found
+/// nothing would make every assertion below vacuously true, so the caller asserts
+/// the count it expects.
+fn workflow_steps(wf: &str) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::new();
+    for line in wf.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue; // a mention in prose is not a setting
+        }
+        let is_item = line.starts_with("      - ")
+            && ["name:", "uses:", "if:", "env:", "with:", "run:"]
+                .iter()
+                .any(|k| trimmed.starts_with(&format!("- {k}")));
+        if is_item {
+            steps.push(Step {
+                body: String::new(),
+            });
+        }
+        if let Some(step) = steps.last_mut() {
+            step.body.push_str(line);
+            step.body.push('\n');
+        }
+    }
+    steps
+}
+
 /// The release PR must be built only after the git tag exists.
 ///
 /// This is the other half of [`no_static_release_floor_is_committed`], and the
@@ -183,30 +247,104 @@ fn no_static_release_floor_is_committed() {
 /// into one would look like a tidy-up and would silently restore #63.
 #[test]
 fn the_release_pr_is_built_after_the_tag_exists() {
-    let wf = read(".github/workflows/release-please.yml");
-    let tag_step = wf.find("Create release tag").expect(
-        "release-please.yml must still create the tag itself: a draft \
-                 Release does not materialise one, and release.yml listens on tags",
-    );
-    let skip_pr = wf.find("skip-github-pull-request: true").expect(
-        "the release-cutting invocation must set \
-                 `skip-github-pull-request: true` so the release PR is not built \
-                 before the tag exists (#63)",
-    );
-    let skip_release = wf.find("skip-github-release: true").expect(
-        "the PR-opening invocation must set `skip-github-release: true` \
-                 so it only grooms the PR",
+    let wf = read(WORKFLOW);
+    let steps = workflow_steps(&wf);
+    assert!(
+        steps.len() >= 3,
+        "parsed only {} step(s) from {WORKFLOW}; the step-splitting below no longer \
+         matches the file, so every assertion in this test would pass vacuously",
+        steps.len()
     );
 
+    let action = |s: &&Step| s.has("googleapis/release-please-action@v4");
+    let invocations: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| action(s))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        invocations.len(),
+        2,
+        "expected exactly TWO release-please-action invocations in {WORKFLOW}, found \
+         {}. One invocation does the Release and the release PR in a single pass, \
+         which builds the PR before the tag exists and re-proposes already-shipped \
+         commits (#63).",
+        invocations.len()
+    );
+    let (cut, groom) = (invocations[0], invocations[1]);
+
+    // Each flag on the invocation that must carry it — not merely present
+    // somewhere in the file.
     assert!(
-        skip_pr < tag_step,
-        "the release must be cut BEFORE the tag step; found the \
-         `skip-github-pull-request` invocation after it"
+        steps[cut].has("skip-github-pull-request: true"),
+        "the FIRST invocation must set `skip-github-pull-request: true`, so the \
+         release PR is not built before the tag exists (#63)"
     );
     assert!(
-        tag_step < skip_release,
-        "the release PR must be opened AFTER the tag is created, or discovery \
-         finds no release and re-proposes already-shipped commits (#63)"
+        !steps[cut].has("skip-github-release: true"),
+        "the first invocation is the one that cuts the Release; it must not skip it"
+    );
+    assert!(
+        steps[groom].has("skip-github-release: true"),
+        "the SECOND invocation must set `skip-github-release: true` so it only \
+         grooms the PR and cannot cut a second Release"
+    );
+    assert!(
+        !steps[groom].has("skip-github-pull-request: true"),
+        "the second invocation exists to open the PR; skipping that leaves nothing \
+         to maintain the standing release PR"
+    );
+
+    // The tag step is identified by what it DOES, so renaming it is free and
+    // deleting the ref creation is not.
+    let tag_step = steps
+        .iter()
+        .position(|s| s.has("git/refs"))
+        .expect("release-please.yml must still create the tag ref itself: a draft Release does not materialise one, and release.yml listens on tags");
+    assert!(
+        cut < tag_step && tag_step < groom,
+        "the tag must be created BETWEEN the two invocations (found cut={cut}, \
+         tag={tag_step}, groom={groom}). Before the first, there is no version to \
+         tag; after the second, discovery has already run without a boundary and \
+         re-proposed already-shipped commits (#63)."
+    );
+}
+
+/// The tag step must not be gated on a signal that fires once.
+///
+/// With the static floor gone, the `v<version>` tag is the ONLY boundary release
+/// discovery can find, which makes creating it the single point of failure. The
+/// action's `createReleases()` relabels the merged PR `autorelease: tagged` before
+/// the tag step runs, so `release_created` is true exactly once: if the ref write
+/// failed transiently while gated on it, no re-run and no later push would ever
+/// retry, the tag would stay missing permanently, and every subsequent run would
+/// walk to the repo root — #63 again, unbounded and unfixable by re-running.
+///
+/// So the step runs on every push and creates the ref if absent. This guard exists
+/// because re-adding the `if:` would look like an optimisation.
+#[test]
+fn the_tag_step_recovers_on_every_run() {
+    let wf = read(WORKFLOW);
+    let steps = workflow_steps(&wf);
+    let tag_step = steps
+        .iter()
+        .find(|s| s.has("git/refs"))
+        .expect("release-please.yml no longer creates the tag ref");
+
+    assert!(
+        !tag_step.has("if:"),
+        "the tag step must not be conditional. `release_created` fires once per \
+         release, so gating the only recovery path on it turns one transient ref \
+         write failure into a permanently missing tag — and, with no static floor, \
+         a changelog walk to the repo root on every run after it (#63).\n{}",
+        tag_step.body
+    );
+    assert!(
+        tag_step.has("release-please-manifest.json"),
+        "the tag step must derive the expected tag from the manifest on a run that \
+         cut no release; otherwise it has nothing to recover FROM, and the \
+         `release_created` fast path is again the only way a tag ever appears"
     );
 }
 
