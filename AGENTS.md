@@ -48,8 +48,20 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
   pick up new endpoints rather than reimplementing.
 - The spec pin (`.api-version`) is **derived from the `nexus-exchange` crate**, not
   chosen here — the crate is what sends `X-Nexus-Api-Version`. Don't hand-edit it or
-  the marked README block; run `scripts/sync_sdk_version.py --write`. CI fails if
-  the pin, the README line, and the crate disagree.
+  the marked README block. CI fails if the pin, the README line, and the crate
+  disagree (invariants 5 and 8), and there are two different repairs:
+  - `scripts/sync_sdk_version.py --write` — a **bump**: take a newly published
+    crate, and let the pin and the README line follow.
+  - `scripts/sync_sdk_version.py --repair` — a **repair**: re-derive the pin and the
+    README line from the crate `Cargo.lock` already resolves. This is the one to
+    reach for when a check is red, including after a hand-bump or a bare
+    `cargo update`. `--write` is a no-op there — it returns at "Dependency is up to
+    date" before it touches the README.
+- Moving the pin moves the coverage ratio, and the README commits a copy of it
+  (invariant 7). `scripts/check_spec_drift.py --sync-coverage <openapi.json>`
+  rewrites just that sentence's numbers and tag. `sdk-autobump.yml` runs it after
+  every bump, so a bot PR stays mergeable; do the same by hand if you move the pin
+  yourself.
 - Follow the crate, not the spec. A spec release is not actionable here until
   `nexus-exchange-rs` ships wrappers and publishes; that is why this repo has
   `sdk-autobump.yml` rather than the fleet's `spec-autobump.yml` and is not a target

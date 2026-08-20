@@ -10,18 +10,23 @@ over the SDK's `Client`, so it instead calls *named* SDK methods
 the CLI's targeted op set from those `client.<method>(` calls and map each method
 to its spec operation via the METHOD_OP table below.
 
-Four invariants are enforced. 1 and 2 are the contract; 3 and 4 exist because both
-of them can be silently defeated — an allowlist entry that stops being earned, or a
-command handler in a file the parser never reads — and a defeated check still
-prints OK. `scripts/test_check_spec_drift.py` defeats each one and asserts it goes
-red.
+Five invariants are enforced here: 1-4 against the spec, and 7 against the
+README's own coverage sentence. The numbering is fleet-wide, not per-file — 5, 6
+and 8 belong to `check_sdk_parity.py`, which owns the crate side — so a number
+means the same thing in the README, in CI logs and in both checkers.
+
+1 and 2 are the contract; 3 and 4 exist because both of them can be silently
+defeated — an allowlist entry that stops being earned, or a command handler in a
+file the parser never reads — and a defeated check still prints OK.
+`scripts/test_check_spec_drift.py` defeats each one and asserts it goes red.
 
 1. endpoints.txt <-> spec
    Every endpoint the CLI targets (endpoints.txt) must exist in the pinned
    OpenAPI spec (.api-version). A miss means a breaking change, rename, or typo
    in the spec. Spec operations the CLI does not cover are reported as an
-   informational coverage gap, and the coverage % is printed (this is the number
-   the dashboard's CLI panel reads).
+   informational coverage gap, and the coverage % is printed for humans — the
+   dashboard does NOT read this line, it recomputes the ratio itself from
+   `endpoints.txt` (see `coverage()`).
 
 2. CLI code <-> endpoints.txt
    The set of SDK methods the CLI actually calls (parsed from the source files in
@@ -61,7 +66,16 @@ red.
    command handler into a new module would otherwise silently under-count the CLI's
    targeted ops and read as green. Fail instead, and name the file to add.
 
-Usage: check_spec_drift.py <openapi.json>
+7. The README's coverage sentence is still true
+   The ratio is printed by this script and *committed* in README.md, and for two
+   spec releases nothing compared the two: the sentence claimed `38 of 98 (38.8%)`
+   against `v0.7.2` while the pin was `v0.8.1`, and every run stayed green.
+   Checked against what this run computed, and repairable with --sync-coverage so
+   the bot that moves the pin can move the sentence with it.
+
+Usage:
+  check_spec_drift.py <openapi.json>                  # check
+  check_spec_drift.py --sync-coverage <openapi.json>  # rewrite the README claim
 """
 import json
 import os
@@ -251,6 +265,44 @@ def normalize_path(p):
     return re.sub(r"\{[^}]*\}", "{}", p)
 
 
+# The dual-stack prefix. The spec mounts most operations twice — `GET /account`
+# and `GET /api/v1/account` are one operation at two mounts — and the CLI, like
+# every other client surface, targets exactly one mount per operation.
+API_V1_PREFIX = "/api/v1"
+
+
+def canonical_op(op):
+    """Canonical form of a `(method, path)` op, collapsing the dual-stack `/api/v1`
+    twin so the coverage ratio can reach 100%.
+
+    A literal count puts both mounts in the denominator while the numerator can
+    only ever hold one, so a surface targeting every operation perfectly still
+    scored well under 100% and the tile could never read full (ENG-10035). This
+    repo had exactly that: `38 of 101 (37.6%)`, where 101 is path-ops, not
+    operations.
+
+    **Never use this to decide whether an operation EXISTS.** The twin is not
+    universal — the bridge domain is `/api/v1`-native and has no host-root mount at
+    all — so collapsing invents bare labels the spec never documents. Crediting one
+    would credit a route that 404s, which is ENG-8463. Collapse ONLY to key the
+    ratio; match literally for existence, and report uncovered operations as their
+    literal mounts.
+
+    Ported deliberately, not invented: the source of truth is
+    `normalise_op` in the monorepo's `.github/scripts/collect-interfaces-metrics.py`
+    (and its sibling `eng/ops/intelligence/interfaces/capability_coverage.py`),
+    which is what actually computes the interfaces dashboard from this repo's
+    `endpoints.txt`. Two collectors in one tree with opposite conventions is the
+    root cause ENG-10035 documents, so this agrees with them by construction:
+    `/api/v1` is stripped only as a **prefix** (a bare `/api/v1` path is left
+    alone), and the method is upper-cased.
+    """
+    method, path = op
+    if path.startswith(API_V1_PREFIX + "/"):
+        path = path[len(API_V1_PREFIX) :]
+    return (method.upper(), path)
+
+
 def load_targeted(path="endpoints.txt"):
     out = []
     seen = {}
@@ -276,13 +328,48 @@ def load_targeted(path="endpoints.txt"):
     return out
 
 
+HTTP_METHODS = ("get", "post", "put", "delete", "patch")
+
+
 def spec_ops(spec):
+    """Every operation the spec documents, deprecated ones INCLUDED.
+
+    This is the existence set, so it must stay literal and complete: a deprecated
+    operation is still mounted and still served, and a targeted line naming one is
+    not a drift error. `deprecated_ops` splits them out for the *ratio* only.
+    """
     ops = set()
     for p, methods in spec.get("paths", {}).items():
-        for m in methods:
-            if m.lower() in ("get", "post", "put", "delete", "patch"):
+        for m, op in methods.items():
+            if m.lower() in HTTP_METHODS and isinstance(op, dict):
                 ops.add((m.upper(), p))
     return ops
+
+
+def deprecated_ops(spec):
+    """The operations the spec marks `deprecated: true`.
+
+    Ported from the collector for the same reason `canonical_op` is: the monorepo's
+    `collect-interfaces-metrics.py` splits deprecated operations out of its
+    denominator (`_spec_ops`, and `spec_ops_at`/`fetch_spec` return only the live
+    set), so counting them here would make the README's "the dashboard computes the
+    same ratio, under the same rule" claim false the moment the spec deprecates
+    anything. Both surfaces read 68 at v0.8.1 only because it deprecates nothing
+    (verified); the legacy gateway mounts going deprecated is the stated ENG-4740
+    direction, which is exactly when an unported filter would start lying.
+
+    An operation the CLI targets that is deprecated is not a failure — invariant 1
+    matches against the full set — but it IS reported, because it is a wrapper the
+    CLI will lose.
+    """
+    out = set()
+    for p, methods in spec.get("paths", {}).items():
+        for m, op in methods.items():
+            if m.lower() not in HTTP_METHODS or not isinstance(op, dict):
+                continue
+            if op.get("deprecated"):
+                out.add((m.upper(), p))
+    return out
 
 
 # Match `client.<method>(` or `<receiver>.<method>(` where <method> is one of the
@@ -506,23 +593,115 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
     return errors
 
 
-def check_targets_vs_spec(targeted, available):
-    """Invariant 1: every endpoints.txt op exists in the pinned spec. Also prints
-    the coverage line the dashboard scrapes and the informational uncovered list.
-    Returns the number of errors printed."""
-    missing = [op for op in targeted if op not in available]
-    uncovered = sorted(available - set(targeted))
+def spec_misses(targeted, available):
+    """The targeted ops the spec does not document, matched LITERALLY.
 
-    pct = 100.0 * len(targeted) / len(available) if available else 0.0
+    Shared by invariant 1 and by `main`, which needs the same answer to decide
+    whether invariant 7 can say anything meaningful (see its call site).
+    """
+    return [op for op in targeted if op not in available]
+
+
+def coverage(targeted, available, deprecated=frozenset()):
+    """The ratio, computed once and read by both invariant 1 and invariant 7.
+
+    Returns `(num, den, pct, uncovered)`, where `pct` is the already-rounded string
+    both callers print, and `uncovered` maps each uncovered canonical operation to
+    its sorted literal mounts.
+
+    Deliberately one function. The two callers used to compute this inline from the
+    same inputs, which is a divergence waiting to happen: invariant 7 asserts the
+    README against a number, and if its copy of the arithmetic ever drifted from
+    invariant 1's, the guard would enforce the wrong figure while printing the
+    right one.
+
+    Two rules are load-bearing here, both carried over from the collector:
+
+    * The ratio is keyed on CANONICAL operations, so the 100% ceiling is reachable
+      (ENG-10035). Counting mounts put 101 path-ops in a denominator whose
+      numerator could only ever hold 68.
+
+    * The numerator intersects LITERALLY first and collapses only after. The order
+      is the care point, not a style choice: `{canonical_op(o) for o in targeted} &
+      canon_available` reads equivalent but is not, because collapsing is not
+      injective over the mounts the spec documents. A phantom `/api/v1` twin of a
+      host-root-only operation would fold onto the real one and be credited for a
+      route that 404s (ENG-8463). Collapsing after the literal intersection keeps
+      the rule ENG-10035 states: an operation counts as covered when the CLI
+      targets a mount that literally exists.
+
+    Deprecated operations leave both sides (see `deprecated_ops`), so they can
+    neither inflate the denominator nor be credited.
+    """
+    live = set(available) - set(deprecated)
+    canon_available = {canonical_op(op) for op in live}
+    canon_targeted = {canonical_op(op) for op in set(targeted) & live}
+
+    num, den = len(canon_targeted), len(canon_available)
+    pct = f"{100.0 * num / den:.1f}" if den else "0.0"
+
+    # Keyed by canonical label so a covered operation cannot reappear under its
+    # twin, but the mounts are kept LITERAL: the canonical label may name a mount
+    # the spec never documents, and a reader who acts on one ships a method that
+    # 404s.
+    uncovered = {}
+    for op in sorted(live):
+        canon = canonical_op(op)
+        if canon not in canon_targeted:
+            uncovered.setdefault(canon, []).append(op)
+
+    return num, den, pct, uncovered
+
+
+def check_targets_vs_spec(targeted, available, deprecated=frozenset()):
+    """Invariant 1: every endpoints.txt op exists in the pinned spec. Also prints
+    the human-facing coverage line and the informational uncovered list.
+
+    The coverage line is NOT scraped by anything. The interfaces dashboard reads
+    `endpoints.txt` and the spec directly and recomputes the ratio in the monorepo's
+    `collect-interfaces-metrics.py`; this line is for the reader of a CI log and the
+    step summary. What IS load-bearing is that it agrees with the README, which
+    invariant 7 enforces — off the same `coverage()` call, so the two cannot drift.
+
+    Returns the number of errors printed.
+    """
+    # Existence stays LITERAL, and over the FULL set including deprecated ops. A
+    # targeted op counts as real only if that exact mount is in the spec —
+    # collapsing here would let a `/api/v1/X` documented only as `/X` pass as
+    # present while 404ing in production (ENG-8463) — and a deprecated operation is
+    # still served, so dropping it here would report a live route as removed.
+    missing = spec_misses(targeted, available)
+
+    num, den, pct, uncovered = coverage(targeted, available, deprecated)
     print(
-        f"CLI targets {len(targeted)} of {len(available)} spec endpoints "
-        f"({pct:.1f}% coverage)."
+        f"CLI targets {num} of {den} spec "
+        f"operations ({pct}% coverage), "
+        f"from {len(available)} path-ops with dual-stack mounts collapsed "
+        f"(ENG-10035)."
     )
+
+    if deprecated:
+        # Out of both sides of the ratio, so say so rather than leaving a reader to
+        # wonder why the path-op count and the denominator moved apart.
+        print(
+            f"  ({len(deprecated)} deprecated path-op(s) excluded from both sides, "
+            f"matching the dashboard collector.)"
+        )
+        hit = sorted(set(targeted) & set(deprecated))
+        if hit:
+            print(
+                f"\nNOTE: {len(hit)} targeted operation(s) are DEPRECATED in the "
+                f"pinned spec. Not a failure — they are still mounted — but the CLI "
+                f"will lose them, and they no longer count toward coverage:"
+            )
+            for m, path in hit:
+                print(f"  - {m} {path}")
 
     if uncovered:
         print(f"\nNot covered by the CLI ({len(uncovered)}):")
-        for m, p in uncovered:
-            print(f"  - {m} {p}")
+        for canon in sorted(uncovered):
+            mounts = ", ".join(f"{m} {p}" for m, p in uncovered[canon])
+            print(f"  - {mounts}")
 
     if not missing:
         print("\nOK: every targeted endpoint exists in the pinned spec.")
@@ -615,25 +794,182 @@ def check_allowlist_is_honest():
     return errors
 
 
+# The README sentence this script is allowed to contradict nobody about. Kept as
+# one regex so a reworded paragraph fails loudly rather than silently unchecking
+# itself: a guard that stops matching is a guard that stops guarding.
+#
+# Whitespace-tolerant between every token, not literal spaces. The README wraps at
+# ~80 columns and this sentence's numbers already straddle a line break, so editing
+# any earlier word in the paragraph reflows it. With fixed spacing that reflow
+# failed the guard as "no parseable coverage claim" — which reads as stale numbers
+# and sends the reader to check arithmetic that was never wrong.
+#
+# `_WS` is one run of whitespace containing AT MOST ONE newline, not `\s+`. Markdown
+# treats a single newline inside a paragraph as a space, so tolerating it is the
+# correct reading of the source — but a BLANK line ends the paragraph, and a
+# sentence split across two paragraphs is a rewording, which this guard exists to
+# catch. `\s+` would have quietly matched across it.
+_WS = r"(?=\s)[ \t]*\n?[ \t]*"
+README_COVERAGE_RE = re.compile(
+    r"\*\*(?P<num>\d+)" + _WS + r"of" + _WS + r"(?P<den>\d+)\*\*" + _WS
+    + r"spec" + _WS + r"operations" + _WS
+    + r"\(\*\*(?P<pct>[\d.]+)%\*\*\)," + _WS + r"measured" + _WS + r"against"
+    + _WS + r"the" + _WS + r"pinned" + _WS + r"`(?P<tag>v[\d.]+)`" + _WS + r"spec"
+)
+
+
+def _splice_groups(m, values):
+    """Return `m`'s matched text with each named group replaced by `values[name]`.
+
+    Group-wise, not a re-render of the sentence: the surrounding prose keeps its
+    exact wrapping and wording, so `--sync-coverage` can only ever change the four
+    values the guard reads. A writer that rebuilt the sentence would silently
+    reformat human-owned text and undo any rewording someone had made deliberately.
+    """
+    text = m.group(0)
+    base = m.start()
+    for name in sorted(values, key=lambda n: m.start(n), reverse=True):
+        start, end = m.start(name) - base, m.end(name) - base
+        text = text[:start] + values[name] + text[end:]
+    return text
+
+
+def check_readme_coverage_claim(targeted, available, readme="README.md",
+                                api_version_file=".api-version",
+                                deprecated=frozenset(), write=False):
+    """Invariant 7: the README's coverage sentence matches what this run computed.
+
+    Added because the numbers went stale in silence for two spec releases. The
+    README claimed `38 of 98 (38.8%)` against `v0.7.2` while the pin was `v0.8.1`
+    and the real ratio was different again — and every check stayed green, because
+    the checker *printed* a coverage number and nothing compared it to the one
+    committed next to it. AGENTS.md already promised this guard existed; this is it.
+
+    Fails on a claim that is wrong **or** absent. An unparseable paragraph is a
+    failure, not a skip: silently passing when the sentence has been reworded is
+    the exact hole being closed.
+
+    With `write=True` (`--sync-coverage`) it repairs the sentence instead of failing
+    on it. That mode exists because this guard otherwise reds a PR nobody can fix:
+    `sdk-autobump.yml` moves `.api-version` and the managed block, and it cannot
+    know the new coverage numbers, so every spec-pin bump would land with a red
+    invariant 7 and an auto-merge that can never complete. The bot now runs the
+    repair and commits the result. An unparseable sentence is still a hard failure
+    here — a writer that cannot find its target must not invent one.
+    """
+    try:
+        with open(readme) as f:
+            text = f.read()
+    except OSError as e:
+        print(f"\nERROR: cannot read {readme}: {e}")
+        return 1
+
+    m = README_COVERAGE_RE.search(text)
+    if not m:
+        print(
+            f"\nERROR: {readme} has no parseable coverage claim. Expected a sentence "
+            f'like "**38 of 68** spec operations (**55.9%**), measured against the '
+            f'pinned `v0.8.1` spec". Reword the guard in '
+            f"check_spec_drift.py:README_COVERAGE_RE if the wording must change."
+        )
+        return 1
+
+    num, den, pct, _ = coverage(targeted, available, deprecated)
+
+    try:
+        with open(api_version_file) as f:
+            pinned = f.read().strip()
+    except OSError as e:
+        print(f"\nERROR: cannot read {api_version_file}: {e}")
+        return 1
+
+    claimed = (m.group("num"), m.group("den"), m.group("pct"), m.group("tag"))
+    actual = (str(num), str(den), pct, pinned)
+    if claimed != actual:
+        if write:
+            values = {"num": str(num), "den": str(den), "pct": pct, "tag": pinned}
+            with open(readme, "w") as f:
+                f.write(text[: m.start()] + _splice_groups(m, values) + text[m.end():])
+            print(
+                f"Rewrote {readme}'s coverage claim: "
+                f"{claimed[0]} of {claimed[1]} ({claimed[2]}%) against {claimed[3]} "
+                f"-> {actual[0]} of {actual[1]} ({actual[2]}%) against {actual[3]}."
+            )
+            return 0
+        print(
+            f"\nERROR: {readme}'s coverage claim is stale.\n"
+            f"  claims: {claimed[0]} of {claimed[1]} ({claimed[2]}%) "
+            f"against {claimed[3]}\n"
+            f"  actual: {actual[0]} of {actual[1]} ({actual[2]}%) "
+            f"against {actual[3]}\n"
+            f"  Fix with: python3 scripts/check_spec_drift.py --sync-coverage "
+            f"<openapi.json>"
+        )
+        return 1
+
+    print(
+        f"\nOK: {readme}'s coverage claim ({num} of {den}, {pct}%, {pinned}) "
+        f"matches this run."
+    )
+    return 0
+
+
 def main():
-    if len(sys.argv) != 2:
-        sys.exit(f"usage: {sys.argv[0]} <openapi.json>")
-    with open(sys.argv[1]) as f:
+    # Positional-flexible on purpose: this is called from three workflows and by
+    # hand, and `... openapi.json --sync-coverage` is the order half of them will
+    # reach for. A usage error there would be a confusing way to fail a repair.
+    args = [a for a in sys.argv[1:] if a != "--sync-coverage"]
+    sync_coverage = "--sync-coverage" in sys.argv[1:]
+    if len(args) != 1:
+        sys.exit(f"usage: {sys.argv[0]} [--sync-coverage] <openapi.json>")
+    with open(args[0]) as f:
         spec = json.load(f)
     version = spec.get("info", {}).get("version", "?")
     targeted = load_targeted()
     available = spec_ops(spec)
+    deprecated = deprecated_ops(spec)
 
     print(f"Spec version: {version}")
 
+    if sync_coverage:
+        # Repair only, and only the four values invariant 7 reads. Nothing else is
+        # checked: this runs from `sdk-autobump.yml` right after the pin moves, and
+        # a bump that also breaks invariant 1 must fail in the PR's own CI run with
+        # invariant 1's message, not be pre-empted by a writer.
+        sys.exit(
+            check_readme_coverage_claim(
+                targeted, available, deprecated=deprecated, write=True
+            )
+        )
+
     # Invariant 1: endpoints.txt <-> spec.
-    failures = check_targets_vs_spec(targeted, available)
+    spec_failures = check_targets_vs_spec(targeted, available, deprecated)
+    failures = spec_failures
     # Invariants 2-4: CLI code <-> endpoints.txt, allowlist hygiene, and
     # CLI_SOURCES completeness.
     failures += check_code_vs_targets(targeted, available)
     # Invariant 3, attribution half (ENG-7927): every CODE_ONLY_OPS row names the
     # command it backs, why the op is absent, and a tracking issue.
     failures += check_allowlist_is_honest()
+    # Invariant 7: the README's committed coverage sentence is still true.
+    #
+    # Skipped when invariant 1 already failed, because then it cannot say anything
+    # true. A renamed or removed spec endpoint drops out of the numerator, so this
+    # check would fire a second, misleading "the README's coverage claim is stale"
+    # — pointing at the sentence when the fix is the endpoint — and double-count the
+    # same root cause in the exit status. The claim is re-checked for real on the
+    # next run, once invariant 1 is green.
+    if spec_failures:
+        print(
+            "\nSKIPPED (invariant 7): the README's coverage claim is not checked "
+            "while invariant 1 is failing — the numerator is computed from the spec, "
+            "so a missing endpoint would report the sentence as stale when the fix "
+            "is above. Re-run once the endpoint is resolved."
+        )
+    else:
+        failures += check_readme_coverage_claim(
+            targeted, available, deprecated=deprecated
+        )
 
     if failures:
         sys.exit(1)
