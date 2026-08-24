@@ -412,7 +412,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.9.1";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.10.0";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
@@ -1320,20 +1320,13 @@ pub enum Command {
     /// List your open orders.
     Orders,
 
-    /// Your funding payments (perp funding booked against the account).
-    FundingPayments {
-        /// Maximum number of payments to return.
-        #[arg(long, default_value_t = 100)]
-        limit: u32,
-    },
-
     /// Place, amend, cancel, or fetch orders.
     Order {
         #[command(subcommand)]
         action: OrderCommand,
     },
 
-    /// Manage account settings (deposit, credit, leverage, rate-limit).
+    /// Manage account settings (deposit, credit, rate-limit).
     Account {
         #[command(subcommand)]
         action: AccountCommand,
@@ -1357,18 +1350,12 @@ pub enum Command {
         action: AgentsCommand,
     },
 
-    /// Manage collateral transfers (list/create).
-    Transfers {
-        #[command(subcommand)]
-        action: TransfersCommand,
-    },
-
-    /// Manage sub-accounts (list/create).
-    SubAccounts {
-        #[command(subcommand)]
-        action: SubAccountsCommand,
-    },
-
+    // There are deliberately no `funding-payments`, `transfers` or `sub-accounts`
+    // commands. `GET /funding-payments` is in no spec version (ENG-3817), and
+    // `/transfers` and `/sub-accounts` have neither a contract nor a served route:
+    // probed live, they 404 where documented routes 401 (ENG-8123, ENG-7800). All
+    // three were withdrawn in ENG-12369 under ENG-8616 -- a command in `--help`
+    // must be one the user can actually run.
     /// Stream live data over WebSocket. Public channels (`trades`, `book`,
     /// `candles`) need `--market`; account channels (`orders`, `fills`,
     /// `positions`, `balances`) are scoped to your key.
@@ -1474,16 +1461,6 @@ pub enum OrderCommand {
         yes: bool,
     },
 
-    /// Cancel a batch of orders by id in a single request.
-    CancelBatch {
-        /// Order ids to cancel (at least one).
-        #[arg(required = true, num_args = 1..)]
-        order_ids: Vec<String>,
-        /// Skip the confirmation prompt (required when not run interactively).
-        #[arg(long)]
-        yes: bool,
-    },
-
     /// Fetch a single order by id.
     Get {
         /// Order id.
@@ -1494,21 +1471,13 @@ pub enum OrderCommand {
         market: String,
     },
 
-    /// Fetch a single order by its caller-assigned client order id.
-    GetByClientId {
-        /// Client order id assigned at placement (`client_order_id`).
-        client_order_id: String,
-    },
-
-    /// Cancel a single order by its caller-assigned client order id.
-    CancelByClientId {
-        /// Client order id assigned at placement (`client_order_id`).
-        client_order_id: String,
-        /// Skip the confirmation prompt (required when not run interactively).
-        #[arg(long)]
-        yes: bool,
-    },
-
+    // There are deliberately no `cancel-batch`, `get-by-client-id` or
+    // `cancel-by-client-id` subcommands. They targeted POST /orders/batch-cancel
+    // and GET|DELETE /orders/by-client-id/{}, none of which any spec version has
+    // ever defined; they were added in ENG-5487 on the "ahead of the spec" claim
+    // and withdrawn in ENG-12369 when that claim turned out never to have been
+    // true. Same rule as margin-mode: implement against a published spec version,
+    // or not at all.
     /// Amend an open order in place (atomic cancel-replace). Set only the
     /// fields you want to change.
     Amend {
@@ -1600,13 +1569,6 @@ pub enum AccountCommand {
     /// Show the caller's rate-limit status.
     RateLimit,
 
-    /// Set the leverage for a market.
-    Leverage {
-        /// Market identifier, e.g. `BTC-USDX-PERP`.
-        market_id: String,
-        /// Leverage multiplier (e.g. 10 for 10x). Must be at least 1.
-        leverage: u32,
-    },
     /// ADL settlement events touching an account, where the address was the
     /// bankrupt target or a closed counterparty. Most recent first.
     AdlHistory {
@@ -1622,6 +1584,13 @@ pub enum AccountCommand {
     // isolated. It was withdrawn in ENG-7740; ENG-7614 tracks the engine work
     // that has to land before it can come back. Don't re-add it against a guessed
     // request shape -- add it when the spec defines one.
+    //
+    // There is deliberately no `leverage` subcommand either, for the same reason
+    // and by the same rule (ENG-12369 under the fleet policy in ENG-8616). It sent
+    // `POST /account/leverage`: no spec version defines that path, and nothing
+    // routes it -- api-module serves `POST /leverage`, so the command failed for
+    // every caller. ENG-7318 is documenting the served route; when a PUBLISHED
+    // spec version carries it, add the command back at the path that spec defines.
 }
 
 #[derive(Debug, Subcommand)]
@@ -1710,41 +1679,6 @@ pub enum AgentsCommand {
     Revoke {
         /// Agent address (0x-prefixed).
         address: String,
-        /// Skip the confirmation prompt (required when not run interactively).
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum TransfersCommand {
-    /// List collateral transfers.
-    List,
-    /// Create a transfer between accounts (e.g. to/from a sub-account).
-    Create {
-        /// Source account id to debit.
-        #[arg(long)]
-        from: String,
-        /// Destination account id to credit.
-        #[arg(long)]
-        to: String,
-        /// Amount of collateral to move; must be positive.
-        #[arg(long)]
-        amount: String,
-        /// Skip the confirmation prompt (required when not run interactively).
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SubAccountsCommand {
-    /// List sub-accounts of the authenticated master account.
-    List,
-    /// Create a new sub-account with a label.
-    Create {
-        /// Human-readable label for the sub-account.
-        label: String,
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
@@ -2606,41 +2540,35 @@ mod tests {
         }
     }
 
+    /// The three ENG-5487 order commands are withdrawn (ENG-12369). They parsed,
+    /// authenticated and dispatched against `POST /orders/batch-cancel` and
+    /// `GET|DELETE /orders/by-client-id/{}`, none of which any spec version has
+    /// ever defined. This is the ENG-7740 shape and takes the ENG-7740 remedy:
+    /// under ENG-8616 an operation the contract does not define is not
+    /// implemented. Re-adding them fails this test on purpose — they come back
+    /// when a PUBLISHED spec version defines the operations, not before.
     #[test]
-    fn order_cancel_batch_requires_at_least_one_id() {
-        assert!(Cli::try_parse_from(["nexus", "order", "cancel-batch"]).is_err());
-        let cli = Cli::try_parse_from(["nexus", "order", "cancel-batch", "o1", "o2"]).unwrap();
-        match cli.command {
-            Command::Order {
-                action: OrderCommand::CancelBatch { order_ids, yes },
-            } => {
-                assert_eq!(order_ids, vec!["o1".to_string(), "o2".to_string()]);
-                assert!(!yes);
-            }
-            _ => panic!("expected order cancel-batch"),
+    fn order_phantom_subcommands_are_withdrawn() {
+        for args in [
+            vec!["nexus", "order", "cancel-batch", "o1", "o2"],
+            vec!["nexus", "order", "cancel-batch"],
+            vec!["nexus", "order", "get-by-client-id", "ladder-1"],
+            vec!["nexus", "order", "cancel-by-client-id", "ladder-1"],
+        ] {
+            let err = Cli::try_parse_from(&args)
+                .expect_err(&format!("{args:?} must be rejected, not parsed"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?} should be an unrecognized-subcommand error, got: {err}"
+            );
         }
-    }
-
-    #[test]
-    fn order_by_client_id_commands_parse() {
-        let cli = Cli::try_parse_from(["nexus", "order", "get-by-client-id", "ladder-1"]).unwrap();
-        match cli.command {
-            Command::Order {
-                action: OrderCommand::GetByClientId { client_order_id },
-            } => assert_eq!(client_order_id, "ladder-1"),
-            _ => panic!("expected order get-by-client-id"),
-        }
-        let cli =
-            Cli::try_parse_from(["nexus", "order", "cancel-by-client-id", "ladder-1"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Order {
-                action: OrderCommand::CancelByClientId { .. }
-            }
-        ));
-        // The client order id is required for both.
-        assert!(Cli::try_parse_from(["nexus", "order", "get-by-client-id"]).is_err());
-        assert!(Cli::try_parse_from(["nexus", "order", "cancel-by-client-id"]).is_err());
+        // Control: the contracted order commands still parse, so this cannot pass
+        // by `order` having lost its subcommands altogether.
+        assert!(
+            Cli::try_parse_from(["nexus", "order", "get", "o1", "--market", "BTC-USDX-PERP"])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2724,19 +2652,27 @@ mod tests {
             "withdrawals",
             "orders",
             "order",
-            "funding-payments",
             "withdrawals",
             "account",
             "auth",
             "keys",
             "agents",
-            "transfers",
-            "sub-accounts",
             "ws",
             "setup",
             "completions",
         ] {
             assert!(help.contains(cmd), "top-level help should list `{cmd}`");
+        }
+        // `funding-payments`, `transfers` and `sub-accounts` were removed from this
+        // list rather than quietly dropped: they are withdrawn (ENG-12369), and the
+        // rule is that a command a user can read must be one they can run. Their
+        // absence is asserted below with the controls above as the counterweight,
+        // so this cannot pass by rendering empty help.
+        for withdrawn in ["funding-payments", "transfers", "sub-accounts"] {
+            assert!(
+                !help.contains(withdrawn),
+                "top-level help must not offer the withdrawn `{withdrawn}` command: {help}"
+            );
         }
     }
 
@@ -2838,22 +2774,24 @@ mod tests {
         }
     }
 
+    /// `account leverage` is withdrawn (ENG-12369). It targeted
+    /// `POST /account/leverage`, which no spec version defines and nothing routes:
+    /// api-module serves `POST /leverage`, so the command could not succeed at the
+    /// path the SDK sent. ENG-7318 documents the served route; when a PUBLISHED
+    /// spec version carries it, the command comes back at the correct path.
     #[test]
-    fn account_leverage_parses() {
-        let cli =
-            Cli::try_parse_from(["nexus", "account", "leverage", "BTC-USDX-PERP", "10"]).unwrap();
-        match cli.command {
-            Command::Account {
-                action:
-                    AccountCommand::Leverage {
-                        market_id,
-                        leverage,
-                    },
-            } => {
-                assert_eq!(market_id, "BTC-USDX-PERP");
-                assert_eq!(leverage, 10);
-            }
-            _ => panic!("expected account leverage"),
+    fn account_leverage_is_withdrawn() {
+        for args in [
+            vec!["nexus", "account", "leverage", "BTC-USDX-PERP", "10"],
+            vec!["nexus", "account", "leverage"],
+        ] {
+            let err = Cli::try_parse_from(&args)
+                .expect_err(&format!("{args:?} must be rejected, not parsed"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?} should be an unrecognized-subcommand error, got: {err}"
+            );
         }
     }
 
@@ -2896,12 +2834,18 @@ mod tests {
             .expect("account subcommand");
         let help = account.render_long_help().to_string();
         assert!(
-            help.contains("leverage"),
-            "sanity: account help should still list leverage: {help}"
+            help.contains("deposit") && help.contains("rate-limit"),
+            "sanity: account help should still list the settings that work: {help}"
         );
         assert!(
             !help.contains("margin-mode"),
             "account help must not offer the withdrawn margin-mode command: {help}"
+        );
+        // `leverage` joined it in ENG-12369: POST /account/leverage is in no spec
+        // version and routes nowhere (ENG-7318 documents the served POST /leverage).
+        assert!(
+            !help.contains("leverage"),
+            "account help must not offer the withdrawn leverage command: {help}"
         );
     }
 
@@ -2921,7 +2865,11 @@ mod tests {
             "the account summary must not advertise a margin surface: {line:?}"
         );
         assert!(
-            line.contains("leverage") && line.contains("rate-limit"),
+            !line.contains("leverage"),
+            "the account summary must not advertise the withdrawn leverage command: {line:?}"
+        );
+        assert!(
+            line.contains("deposit") && line.contains("rate-limit"),
             "sanity: the summary should still name the settings that do work: {line:?}"
         );
     }
@@ -3162,28 +3110,52 @@ mod tests {
         ));
     }
 
+    /// `transfers` and `sub-accounts` are withdrawn (ENG-12369, closing ENG-8123).
+    /// Both command groups authenticated, dispatched, and came back with a 404:
+    /// probed against the live venue, `GET|POST /transfers` and
+    /// `GET|POST /sub-accounts` return 404 where documented routes return 401 under
+    /// identical conditions, so the routes are absent rather than protected, and no
+    /// spec version defines them (ENG-7800). Under ENG-8616 that is a deletion, not
+    /// a runtime refusal: a command a user can read in `--help` must be one they
+    /// can run, and the SDK methods behind these were themselves deleted in
+    /// nexus-exchange-rs #143.
     #[test]
-    fn transfers_create_requires_flags() {
-        // Missing --to/--amount is an error.
-        assert!(Cli::try_parse_from(["nexus", "transfers", "create", "--from", "a"]).is_err());
-        let cli = Cli::try_parse_from([
-            "nexus",
-            "transfers",
-            "create",
-            "--from",
-            "a",
-            "--to",
-            "b",
-            "--amount",
-            "5",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Transfers {
-                action: TransfersCommand::Create { .. }
-            }
-        ));
+    fn transfers_and_sub_accounts_are_withdrawn() {
+        for args in [
+            vec!["nexus", "transfers", "list"],
+            vec![
+                "nexus",
+                "transfers",
+                "create",
+                "--from",
+                "a",
+                "--to",
+                "b",
+                "--amount",
+                "5",
+            ],
+            vec!["nexus", "transfers"],
+            vec!["nexus", "sub-accounts", "list"],
+            vec!["nexus", "sub-accounts", "create", "desk-1"],
+            vec!["nexus", "sub-accounts"],
+        ] {
+            let err = Cli::try_parse_from(&args)
+                .expect_err(&format!("{args:?} must be rejected, not parsed"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{args:?} should be an unrecognized-subcommand error, got: {err}"
+            );
+        }
+    }
+
+    /// `funding-payments` is withdrawn (ENG-12369). It targeted
+    /// `GET /funding-payments`, absent from every spec version (ENG-3817).
+    #[test]
+    fn funding_payments_is_withdrawn() {
+        let err = Cli::try_parse_from(["nexus", "funding-payments"])
+            .expect_err("`nexus funding-payments` must be rejected, not parsed");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     /// `order place`/`cancel` help spells out their flags, so the trading surface
@@ -3198,9 +3170,11 @@ mod tests {
         let help = order.render_long_help().to_string();
         assert!(help.contains("place"));
         assert!(help.contains("cancel"));
-        assert!(help.contains("cancel-batch"));
-        assert!(help.contains("get-by-client-id"));
-        assert!(help.contains("cancel-by-client-id"));
+        // Withdrawn in ENG-12369, so `order` help must not advertise them; the
+        // `place`/`cancel` assertions above are the control.
+        assert!(!help.contains("cancel-batch"));
+        assert!(!help.contains("get-by-client-id"));
+        assert!(!help.contains("cancel-by-client-id"));
     }
 
     // ─────────────────── custom networks (ENG-9827) ───────────────────

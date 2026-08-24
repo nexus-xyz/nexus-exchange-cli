@@ -7,10 +7,9 @@
 
 use nexus_exchange::types::{
     AccountFees, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent, AgentInfo,
-    ApiKeyInfo, CreditResult, DepositResult, Fill, FundingPayment, FundingSample, HealthStatus,
-    LeverageUpdate, MarkPrice, Market, MarketStatus, MarketSummary, Ohlcv, Order, OrderBook,
-    OrderResponse, OrderResult, PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side,
-    SubAccount, Ticker, Trade, Transfer, Withdrawal,
+    ApiKeyInfo, CreditResult, DepositResult, Fill, FundingSample, HealthStatus, MarkPrice, Market,
+    MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
+    PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side, Ticker, Trade, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -1151,41 +1150,10 @@ pub fn funding_rates_json(fs: &[FundingSample]) -> String {
     pretty(&value)
 }
 
-pub fn funding_payments(fs: &[FundingPayment]) -> String {
-    if fs.is_empty() {
-        return "No funding payments returned.".to_string();
-    }
-    let mut out = format!(
-        "{:<16}  {:>16}  {:>14}  {:<16}\n",
-        "MARKET", "AMOUNT", "RATE", "TIME(ms)"
-    );
-    for f in fs {
-        out.push_str(&format!(
-            "{:<16}  {:>16}  {:>14}  {:<16}\n",
-            f.market_id,
-            f.amount,
-            opt(&f.funding_rate),
-            f.timestamp,
-        ));
-    }
-    out.push_str(&format!("\n{} payment(s).", fs.len()));
-    out
-}
-
-pub fn funding_payments_json(fs: &[FundingPayment]) -> String {
-    let value: Value = fs
-        .iter()
-        .map(|f| {
-            json!({
-                "market_id": f.market_id,
-                "amount": f.amount.to_string(),
-                "funding_rate": opt_json(&f.funding_rate),
-                "timestamp": f.timestamp,
-            })
-        })
-        .collect();
-    pretty(&value)
-}
+// The `funding_payments` / `funding_payments_json` renderers were removed with
+// the `funding-payments` command in ENG-12369: GET /funding-payments is in no
+// spec version (ENG-3817), so nothing renders `FundingPayment` any more. The
+// funding-RATE renderers above are contracted and stay.
 
 // ───────────────────────── ADL events ─────────────────────────
 
@@ -1434,24 +1402,16 @@ pub fn rate_limit_json(r: &RateLimitStatus) -> String {
     }))
 }
 
-// ───────────────────────── leverage ─────────────────────────
-
-pub fn leverage(l: &LeverageUpdate) -> String {
-    format!(
-        "{:<14}{}\n{:<14}{}x",
-        "market", l.market_id, "leverage", l.leverage
-    )
-}
-
-pub fn leverage_json(l: &LeverageUpdate) -> String {
-    pretty(&json!({ "market_id": l.market_id, "leverage": l.leverage }))
-}
+// The `leverage` / `leverage_json` renderers were removed with the
+// `account leverage` subcommand in ENG-12369 — nothing rendered `LeverageUpdate`
+// once the command went away. POST /account/leverage is in no spec version and
+// routes nowhere; ENG-7318 documents the served POST /leverage.
 
 // The `margin_mode` / `margin_mode_json` renderers were removed with the
 // `account margin-mode` subcommand in ENG-7740 — nothing rendered
 // `MarginModeUpdate` once the command went away. ENG-7614 gates its return.
 
-// ───────────────────────── withdrawals / transfers / sub-accounts ─────────────────────────
+// ───────────────────────── withdrawals ─────────────────────────
 
 pub fn withdrawals(ws: &[Withdrawal]) -> String {
     if ws.is_empty() {
@@ -1486,112 +1446,10 @@ pub fn withdrawals_json(ws: &[Withdrawal]) -> String {
     pretty(&value)
 }
 
-pub fn transfers(ts: &[Transfer]) -> String {
-    if ts.is_empty() {
-        return "No transfers.".to_string();
-    }
-    let mut out = format!(
-        "{:<24}  {:<20}  {:<20}  {:>16}  {:<12}\n",
-        "ID", "FROM", "TO", "AMOUNT", "STATUS"
-    );
-    for t in ts {
-        out.push_str(&format!(
-            "{:<24}  {:<20}  {:<20}  {:>16}  {:<12}\n",
-            t.id, t.from_account, t.to_account, t.amount, t.status,
-        ));
-    }
-    out.push_str(&format!("\n{} transfer(s).", ts.len()));
-    out
-}
-
-pub fn transfers_json(ts: &[Transfer]) -> String {
-    let value: Value = ts.iter().map(transfer_value).collect();
-    pretty(&value)
-}
-
-fn transfer_value(t: &Transfer) -> Value {
-    json!({
-        "id": t.id,
-        "from_account": t.from_account,
-        "to_account": t.to_account,
-        "amount": t.amount.to_string(),
-        "timestamp": t.timestamp,
-        "status": t.status,
-    })
-}
-
-/// Render a single transfer result (the `POST /transfers` response).
-pub fn transfer(t: &Transfer) -> String {
-    let rows = [
-        ("id", t.id.clone()),
-        ("from", t.from_account.clone()),
-        ("to", t.to_account.clone()),
-        ("amount", t.amount.to_string()),
-        ("status", t.status.clone()),
-    ];
-    rows.iter()
-        .map(|(k, v)| format!("{k:<10}{v}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub fn transfer_json(t: &Transfer) -> String {
-    pretty(&transfer_value(t))
-}
-
-pub fn sub_accounts(ss: &[SubAccount]) -> String {
-    if ss.is_empty() {
-        return "No sub-accounts.".to_string();
-    }
-    let mut out = format!("{:<24}  {:<20}  {:>16}\n", "ACCOUNT ID", "LABEL", "EQUITY");
-    for s in ss {
-        out.push_str(&format!(
-            "{:<24}  {:<20}  {:>16}\n",
-            s.account_id,
-            if s.label.is_empty() { "-" } else { &s.label },
-            opt(&s.equity),
-        ));
-    }
-    out.push_str(&format!("\n{} sub-account(s).", ss.len()));
-    out
-}
-
-pub fn sub_accounts_json(ss: &[SubAccount]) -> String {
-    let value: Value = ss.iter().map(sub_account_value).collect();
-    pretty(&value)
-}
-
-fn sub_account_value(s: &SubAccount) -> Value {
-    json!({
-        "account_id": s.account_id,
-        "label": s.label,
-        "equity": opt_json(&s.equity),
-    })
-}
-
-/// Render a single created sub-account.
-pub fn sub_account(s: &SubAccount) -> String {
-    let rows = [
-        ("account id", s.account_id.clone()),
-        (
-            "label",
-            if s.label.is_empty() {
-                "-".into()
-            } else {
-                s.label.clone()
-            },
-        ),
-        ("equity", opt(&s.equity)),
-    ];
-    rows.iter()
-        .map(|(k, v)| format!("{k:<14}{v}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub fn sub_account_json(s: &SubAccount) -> String {
-    pretty(&sub_account_value(s))
-}
+// The transfer and sub-account renderers were removed with the `transfers` and
+// `sub-accounts` commands in ENG-12369 (closing ENG-8123): both route groups 404
+// on the live venue where documented routes 401, and neither has ever been in the
+// spec (ENG-7800). `Transfer` and `SubAccount` no longer reach this module.
 
 #[cfg(test)]
 mod tests {

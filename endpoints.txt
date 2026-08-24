@@ -7,18 +7,21 @@
 #   * every line must exist in the pinned spec (no removed/renamed/typo'd op);
 #   * the set must equal the SDK methods the CLI actually calls (parsed from
 #     src/main.rs and src/wsclient.rs and mapped to spec ops via METHOD_OP in
-#     check_spec_drift.py), modulo two documented allowlists in that script:
-#       - CODE_ONLY_OPS    — a command exists and calls an SDK method, but the
-#         op is absent from the pinned spec, so it is kept OUT of this file
-#         (adding it here would fail the spec check). Currently: account
-#         leverage, funding-payments, transfers, sub-accounts. Each row there must
-#         name its calling command, say WHY the op is absent (the route is served
-#         but unspecified, vs. nothing serves it at all), and cite a tracking
-#         issue — ENG-7927, after an unverified "ahead of spec" claim let
-#         `account margin-mode` ship with no endpoint at all (ENG-7740).
+#     check_spec_drift.py), modulo ONE documented allowlist in that script:
 #       - NON_REST_TARGETS — exercised without a named REST method call; e.g.
 #         GET /ws (the WebSocket upgrade, opened by the streaming client, not a
 #         `client.<method>()` REST call).
+#
+# There is no allowlist for the other direction any more. CODE_ONLY_OPS was one:
+# a command could call an SDK method for an op absent from the pinned spec and be
+# kept out of this file, on the claim that the spec would catch up. It never did
+# for any of the nine rows that accumulated there (account leverage,
+# funding-payments, transfers, sub-accounts, batch cancel, the two by-client-id
+# ops), so the commands shipped as dead ends under a green gate. They were
+# deleted in ENG-12369 and the table is now sealed empty (ENG-8616): an operation
+# the pinned spec does not define is not implemented, and ANY entry fails the
+# check. When a PUBLISHED spec version defines an op, the command is implemented
+# against that version and the line is added HERE, covered rather than exempted.
 #
 # So: add a line here whenever a CLI command starts exercising a new spec op (a
 # new `client.<method>()` call mapped in METHOD_OP), or the drift check fails.

@@ -44,24 +44,42 @@ MARK=$(nx --output json mark-price "$MARKET" | jq -r .mark_price)
 PRICE=$(awk -v m="$MARK" 'BEGIN { printf "%d", m * 0.5 }')
 echo "mark ${MARK}, bidding ${PRICE}"
 
-# Tag the order with our own client_order_id so the rest of the flow never has
-# to scrape the exchange-assigned id. `order batch` (a JSON array on stdin) is
-# the placement path that carries client_order_id; --yes skips the interactive
-# confirmation, which is required when running as a script.
+# Tag the order with our own client_order_id for correlation, and read the
+# exchange-assigned id straight out of the placement response — the by-client-id
+# lookup and cancel this flow used to call were withdrawn in ENG-12369 (no spec
+# version defines /orders/by-client-id/{id}). The id is in the response either
+# way, so nothing here needs a route that does not exist.
+#
+# `order batch` (a JSON array on stdin) is the placement path that carries
+# client_order_id; --yes skips the interactive confirmation, which is required
+# when running as a script.
 CLIENT_ID="north-star-$$-$(date +%s)"
-nx order batch - --yes <<EOF
+PLACED=$(nx --output json order batch - --yes <<EOF
 [{"market": "$MARKET", "side": "buy", "type": "limit",
   "price": "$PRICE", "quantity": "0.001", "tif": "gtc",
   "client_order_id": "$CLIENT_ID"}]
 EOF
+)
+echo "$PLACED" | jq '.[0]'
+
+# The batch is non-atomic: entry 0 is either a placed order or a rejection, so
+# fail loudly here rather than cancelling an id that was never created.
+ORDER_ID=$(echo "$PLACED" | jq -r '.[0].order.id // empty')
+[ -n "$ORDER_ID" ] || {
+  echo "error: the order was not placed:" >&2
+  echo "$PLACED" | jq '.[0]' >&2
+  exit 1
+}
+echo "placed ${ORDER_ID} (client id ${CLIENT_ID})"
 
 echo "── 4. inspect: the order, open orders, positions ──"
-nx order get-by-client-id "$CLIENT_ID" # GET /orders/by-client-id/{id}
-nx orders                              # GET /orders
-nx positions                           # GET /positions (empty until a fill)
+# By-id routes are per-market, so they take --market.
+nx order get "$ORDER_ID" --market "$MARKET" # GET /orders/{id}
+nx orders                                   # GET /orders
+nx positions                                # GET /positions (empty until a fill)
 
 echo "── 5. clean up: cancel the resting order ──"
-nx order cancel-by-client-id "$CLIENT_ID" --yes # DELETE /orders/by-client-id/{id}
+nx order cancel "$ORDER_ID" --market "$MARKET" --yes # DELETE /orders/{id}
 
 echo "── 6. account after ──"
 nx fills --limit 5 # GET /fills (a deep bid normally never fills)
