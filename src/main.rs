@@ -1189,10 +1189,6 @@ fn margin_read_error(err: nexus_exchange::Error, context: &'static str) -> anyho
     }
 }
 
-/// Fail fast when an account-scoped command is invoked without credentials.
-/// These requests can only ever succeed signed, so we error (non-zero exit)
-/// instead of sending an unsigned request that surfaces as an opaque 401 —
-/// this stops scripts from silently mis-authenticating.
 /// The routes `transfers` and `sub-accounts` target, which nothing serves (ENG-8123).
 ///
 /// Probed unauthenticated against `https://exchange.nexus.xyz/api/exchange` on
@@ -1224,15 +1220,49 @@ fn unserved(command: &str, routes: &str) -> anyhow::Error {
          return 404 where authenticated routes return 401, so they are absent rather \
          than protected, and no credential or --base-url makes them work. Whether they \
          ship or the commands are withdrawn is tracked in ENG-7800. \
-         (Set NEXUS_UNSERVED_ACCOUNT_ROUTES=1 to attempt the call anyway.)"
+         (Set {UNSERVED_OVERRIDE_VAR}=1 to attempt the call anyway.)"
+    )
+}
+
+/// The variable that opts a caller in to attempting an unserved route. Named once
+/// so the guard's message and the guard's behaviour cannot describe different
+/// variables.
+const UNSERVED_OVERRIDE_VAR: &str = "NEXUS_UNSERVED_ACCOUNT_ROUTES";
+
+/// Is this value an opt-in? Only an affirmative setting counts.
+///
+/// `var_os(..).is_some()` was wrong in the one direction that matters: `=0`, `=false`,
+/// `=no` and `=""` all read as "yes" while the message says to set `=1`. Declaring a
+/// variable empty is how most CI systems spell "not set", so a runner with
+/// `NEXUS_UNSERVED_ACCOUNT_ROUTES: ""` silently got the 404 back — the exact failure
+/// the guard exists to prevent, reintroduced by the escape hatch. Empty-filtering
+/// matches `credentials::config_path`; the affirmative list is what makes the message
+/// true rather than approximately true.
+///
+/// Anything unrecognised is NOT an opt-in: the guard fails closed, because a caller who
+/// typed something we do not understand has not told us to attempt a route we know is
+/// absent.
+fn is_unserved_opt_in(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
     )
 }
 
 /// Has the caller explicitly opted in to attempting an unserved route?
+///
+/// The decision lives in [`is_unserved_opt_in`], which takes the value rather than
+/// reading the environment, so both answers are testable hermetically. The previous
+/// test read the real variable and therefore failed for exactly the person the hatch
+/// exists for, and left the opt-in path — where the bug above lived — untested.
 fn unserved_override() -> bool {
-    std::env::var_os("NEXUS_UNSERVED_ACCOUNT_ROUTES").is_some()
+    is_unserved_opt_in(std::env::var(UNSERVED_OVERRIDE_VAR).ok().as_deref())
 }
 
+/// Fail fast when an account-scoped command is invoked without credentials.
+/// These requests can only ever succeed signed, so we error (non-zero exit)
+/// instead of sending an unsigned request that surfaces as an opaque 401 —
+/// this stops scripts from silently mis-authenticating.
 fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
     if !authenticated {
         anyhow::bail!(
@@ -1417,14 +1447,53 @@ mod tests {
         assert!(msg.contains("--base-url"), "rules out a redirect: {msg}");
     }
 
+    /// Both sides of the escape hatch, decided on a VALUE rather than on the ambient
+    /// environment.
+    ///
+    /// The previous test called `unserved_override()` and asserted it was off, which
+    /// read the real variable: it failed for whoever actually had the hatch set — the
+    /// one person it exists for — and it never exercised the ON path, which is where
+    /// the bug was. `is_unserved_opt_in` takes the value, so both paths are hermetic
+    /// and `set_var`/`remove_var` (process-global and racy under the harness's threads)
+    /// stay out of it.
     #[test]
-    fn unserved_override_is_off_unless_the_env_var_is_set() {
-        // Not `remove_var`/`set_var` — those are process-global and racy under the test
-        // harness's threads. The default is what every user gets, and that is the case
-        // worth pinning here; the override's own behaviour is one `var_os` call.
+    fn only_an_affirmative_value_opts_in_to_an_unserved_route() {
+        for on in ["1", "true", "yes", "on", "TRUE", "Yes", " 1 "] {
+            assert!(
+                is_unserved_opt_in(Some(on)),
+                "{on:?} should opt in to attempting the route"
+            );
+        }
+        // The regression this closes: every one of these read as "yes" under
+        // `var_os(..).is_some()` while the guard's message says to set `=1`. The empty
+        // string is the one that mattered — declaring a variable empty is how CI
+        // systems spell "not set", so a runner silently got the 404 back.
+        for off in ["", "  ", "0", "false", "no", "off", "FALSE", "maybe", "2"] {
+            assert!(
+                !is_unserved_opt_in(Some(off)),
+                "{off:?} must NOT opt in — the guard fails closed on anything it does \
+                 not recognise"
+            );
+        }
         assert!(
-            !unserved_override(),
-            "NEXUS_UNSERVED_ACCOUNT_ROUTES must be opt-in, not the default"
+            !is_unserved_opt_in(None),
+            "unset is the default, and it is off"
+        );
+    }
+
+    /// The variable the guard reads is the variable the guard names.
+    ///
+    /// They were two separate string literals, so the message could have told a user to
+    /// set something the code never consults. Now the message interpolates the
+    /// constant, and this pins the constant itself so renaming it stays a deliberate,
+    /// user-visible change.
+    #[test]
+    fn the_override_variable_is_the_one_the_message_names() {
+        assert_eq!(UNSERVED_OVERRIDE_VAR, "NEXUS_UNSERVED_ACCOUNT_ROUTES");
+        let msg = unserved("transfers", "GET/POST /transfers").to_string();
+        assert!(
+            msg.contains(UNSERVED_OVERRIDE_VAR),
+            "the message must name the variable the code reads: {msg}"
         );
     }
 

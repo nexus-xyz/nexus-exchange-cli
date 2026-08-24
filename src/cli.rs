@@ -1357,27 +1357,43 @@ pub enum Command {
         action: AgentsCommand,
     },
 
-    /// Manage collateral transfers (list/create). NOT SERVED — see below.
+    /// Collateral transfers — REFUSED: this venue does not serve `/transfers`.
     ///
-    /// HIDDEN FROM `--help`, NOT REMOVED (ENG-8123).
-    ///
-    /// `/transfers` and `/sub-accounts` 404 on the live venue where authenticated
-    /// routes 401, so nothing serves them; the contract does not name them either.
-    /// The standing rule is that every command a user can READ must be one they can
-    /// RUN, so these leave `--help`.
-    ///
-    /// They still PARSE, deliberately. A script or an older doc that already invokes
-    /// `nexus transfers list` should get the sentence in `main.rs`'s `unserved` —
-    /// which says the route is absent and cites ENG-7800 — rather than clap's
-    /// "unrecognized subcommand", which reads like a version problem and sends the
-    /// reader to upgrade. Withdrawing them outright is ENG-7800's call to make.
+    /// `nexus transfers list` and `create` exit non-zero without sending a request.
+    /// Nothing you can configure makes them work: the paths are absent, not
+    /// protected. Whether they ship is tracked in ENG-7800.
+    //
+    // Everything above is `nexus transfers --help`; everything below is not. The
+    // rationale was in the doc comment and therefore in a user's terminal, which is
+    // how a reader ended up looking at "HIDDEN FROM `--help`", a Rust function name
+    // and a clap error string (@Luc-Campos).
+    //
+    // HIDDEN FROM `--help`, NOT REMOVED (ENG-8123). `/transfers` and `/sub-accounts`
+    // 404 on the live venue where authenticated routes 401, so nothing serves them;
+    // the contract does not name them either. The standing rule is that every command
+    // a user can READ must be one they can RUN, so these leave `--help`.
+    //
+    // They still PARSE, deliberately. A script or an older doc that already invokes
+    // `nexus transfers list` should get `main.rs`'s `unserved` sentence — which says
+    // the route is absent and cites ENG-7800 — rather than clap's "unrecognized
+    // subcommand", which reads like a version problem and sends the reader to
+    // upgrade. Withdrawing them outright is ENG-7800's call to make.
     #[command(hide = true)]
     Transfers {
         #[command(subcommand)]
         action: TransfersCommand,
     },
 
-    /// Manage sub-accounts (list/create). NOT SERVED — see `Transfers` above.
+    /// Sub-accounts — REFUSED: this venue does not serve `/sub-accounts`.
+    ///
+    /// `nexus sub-accounts list` and `create` exit non-zero without sending a
+    /// request, for the same reason as `transfers`: the paths are absent, not
+    /// protected, and no credential or `--base-url` changes that. Tracked in
+    /// ENG-7800.
+    //
+    // Said in full rather than "see `Transfers` above": this command's help is these
+    // lines and nothing else, so there is no "above" in a terminal, and `Transfers`
+    // is a Rust variant name a user never sees (@Luc-Campos).
     #[command(hide = true)]
     SubAccounts {
         #[command(subcommand)]

@@ -537,6 +537,27 @@ def check_targets_vs_spec(targeted, available):
     return len(missing)
 
 
+def _commands_that_refuse_up_front() -> set:
+    """Top-level commands whose handler raises the ENG-8123 `unserved` error early.
+
+    Read out of `src/main.rs`'s `unserved("<command>", ...)` call sites rather than
+    listed here, so a command that gains or loses the guard cannot leave this script
+    describing the old behaviour. Missing or unreadable source yields the empty set,
+    which makes the note say LESS rather than claim something it cannot see.
+    """
+    src = os.path.join(SRC_DIR, "main.rs")
+    try:
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return set()
+    # Skip the definition and any test-only construction; only real call sites count.
+    return {
+        m.group(1)
+        for m in re.finditer(r'\bunserved\(\s*"([^"]+)"', text)
+    }
+
+
 def check_allowlist_is_honest():
     """Invariant 3: every CODE_ONLY_OPS row's claim is true and attributed.
 
@@ -595,15 +616,41 @@ def check_allowlist_is_honest():
         if isinstance(row, tuple) and len(row) == 3 and row[1] == ROUTE_INVISIBLE
     )
     if invisible:
+        # Which of these actually refuse up front is DERIVED, not asserted. The note
+        # used to claim the ENG-8123 guard for every ROUTE_INVISIBLE row, which is true
+        # of today's four and false of the next one added — a row would inherit a
+        # reassurance nobody had implemented for it (@Luc-Campos). The guard is
+        # `unserved("<command>", ...)` in src/main.rs, so read the command names out of
+        # its call sites and say only what is there.
+        guarded = _commands_that_refuse_up_front()
+        # Rows name the subcommand (`transfers list`); the guard is per top-level
+        # command (`unserved("transfers", …)`) and fires before the subcommand is
+        # dispatched, so compare the leading word.
+        def _is_guarded(row):
+            command = row[1][0]
+            return command.split()[0] in guarded if command.split() else False
+        with_guard = [row for row in invisible if _is_guarded(row)]
+        without = [row for row in invisible if not _is_guarded(row)]
         print(
-            f"\nNOTE: {len(invisible)} command(s) target a route nothing serves. Since "
-            f"ENG-8123 they refuse up front — hidden from `--help`, and a sentence "
-            f"naming the absent route instead of a raw 404 — so a user no longer pays "
-            f"for this, but the op still has no contract. Withdraw or specify (this is "
-            f"the ENG-7740 shape):"
+            f"\nNOTE: {len(invisible)} command(s) target a route nothing serves, and "
+            f"the op still has no contract. Withdraw or specify (this is the ENG-7740 "
+            f"shape):"
         )
-        for (m, p), (command, _, issue) in invisible:
-            print(f"  - `nexus {command}` -> {m} {p}  ({issue})")
+        if with_guard:
+            print(
+                f"  {len(with_guard)} refuse up front since ENG-8123 — hidden from "
+                f"`--help`, and a sentence naming the absent route instead of a raw "
+                f"404 — so a user no longer pays for the gap:"
+            )
+            for (m, path), (command, _, issue) in with_guard:
+                print(f"    - `nexus {command}` -> {m} {path}  ({issue})")
+        if without:
+            print(
+                f"  {len(without)} have NO such guard, so a user still gets the raw "
+                f"404. Add one in src/main.rs (`unserved`) or withdraw the command:"
+            )
+            for (m, path), (command, _, issue) in without:
+                print(f"    - `nexus {command}` -> {m} {path}  ({issue})")
 
     if not errors:
         # Only the half this function owns. The "none is in the pinned spec" clause
