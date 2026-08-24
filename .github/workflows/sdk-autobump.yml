@@ -157,6 +157,42 @@ jobs:
           echo "new_version=$(python3 -c 'import sys; sys.path.insert(0,"scripts"); import sdk_crate; print(sdk_crate.locked_version())')" >> "$GITHUB_OUTPUT"
           echo "new_tag=$(cat .api-version)" >> "$GITHUB_OUTPUT"
 
+      # Invariant 7 (ENG-10035) is the one guard this bot can invalidate and no
+      # human is watching: moving `.api-version` moves the spec the coverage ratio
+      # is measured against, and the README carries a committed copy of that ratio
+      # ("**38 of 68** spec operations (**55.9%**), measured against the pinned
+      # `v0.8.1` spec"). The bot cannot know the new numbers — they come from the
+      # new spec — so without this step every pin-moving autobump PR would land RED
+      # on a sentence nobody can fix from the diff, and the auto-merge armed below
+      # for a non-breaking bump would sit forever unmergeable.
+      #
+      # `--sync-coverage` rewrites exactly the four values the guard reads (numbers,
+      # percentage, tag), group-wise, leaving the surrounding human-owned prose
+      # untouched. It is a no-op when the ratio has not moved — a crate-only bump
+      # that leaves the pin alone changes nothing here.
+      #
+      # The spec is fetched at the NEW tag, after the bump: the old cached copy
+      # would compute the old ratio and re-assert the sentence that is already
+      # there. A fetch failure is fatal on purpose — a silent skip would put the
+      # workflow right back to opening a PR that cannot go green.
+      - name: Re-derive the README coverage claim for the new pin
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          # Via env, not interpolation: `sync_sdk_version.py` wrote this file, and
+          # the shape is validated before it reaches a URL.
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NEW_TAG" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::.api-version must look like vX.Y.Z (got: '$NEW_TAG')"
+            exit 1
+          fi
+          curl -fsSL \
+            "https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/${NEW_TAG}/openapi.json" \
+            -o openapi.autobump.json
+          python3 scripts/check_spec_drift.py --sync-coverage openapi.autobump.json
+          rm -f openapi.autobump.json
+
       # The parity gate, run here too: it is the invariant that the pin equals the
       # crate's, so a bump that got it wrong must not reach a PR at all.
       - name: Verify pin parity with the new crate

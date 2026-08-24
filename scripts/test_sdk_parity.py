@@ -30,6 +30,7 @@ sys.path.insert(0, HERE)
 
 import check_sdk_parity as parity  # noqa: E402
 import sdk_crate  # noqa: E402
+import sync_sdk_version as sync  # noqa: E402
 
 
 def _quiet(fn, *args, **kwargs):
@@ -264,6 +265,241 @@ class TestRealRepoParity(unittest.TestCase):
             "Cargo.lock has floated away from the Cargo.toml requirement; harmless, "
             "but check_sdk_parity compares the pin against the LOCKED version",
         )
+
+
+class TestReadmePinGuard(unittest.TestCase):
+    """Invariant 8 (ENG-10956): AGENTS.md promised this guard; nothing implemented it.
+
+    `check_pin` compares `.api-version` to the crate's own pin. Nothing compared
+    the README's *crate version* to `Cargo.lock`, so a hand-bump that skipped the
+    sync script shipped a README a release behind, green.
+    """
+
+    RAW = (
+        "Currently targets Exchange API spec **`{tag}`** — the version pinned and "
+        "sent as `X-Nexus-Api-Version` by `nexus-exchange` **`{crate}`**."
+    )
+
+    @classmethod
+    def LINE(cls, tag, crate):
+        """The line inside the markers, which is the only place the writer owns.
+
+        Built with the real `sync_sdk_version` renderer, not a copy of the template:
+        a fixture that spelled the sentence itself could keep passing after the
+        writer's wording changed, which is the same "guard stops matching" hole
+        these tests exist to close.
+        """
+        return sync.render_managed_block(tag, crate)
+
+    def _run(self, body, locked="0.9.1", our_tag="v0.8.1"):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "README.md")
+            with open(path, "w") as f:
+                f.write(body)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                errors = parity.check_readme_pin(locked, our_tag, readme=path)
+            return errors, buf.getvalue()
+
+    def test_an_agreeing_line_passes(self):
+        errors, out = self._run(self.LINE("v0.8.1", "0.9.1"))
+        self.assertEqual(errors, 0)
+        self.assertIn("matches the tree", out)
+
+    def test_a_stale_crate_version_fails(self):
+        """The exact #60 shape: crate bumped, README left behind."""
+        errors, out = self._run(self.LINE("v0.8.1", "0.9.0"))
+        self.assertEqual(errors, 1)
+        self.assertIn("disagrees with the tree", out)
+
+    def test_the_remedy_is_the_one_that_works_on_this_failure(self):
+        """`--write` was named here and cannot fix this: it is a dependency bump,
+        and it returns at "Dependency is up to date" before it reaches the README —
+        which is precisely the state a stale README line is found in. Pinned as a
+        test because a wrong remedy on a red check is worse than none: AGENTS.md
+        forbids hand-editing the block, so it left no way out."""
+        errors, out = self._run(self.LINE("v0.8.1", "0.9.0"))
+        self.assertEqual(errors, 1)
+        self.assertIn("sync_sdk_version.py --repair", out)
+        self.assertNotIn("--write", out)
+
+    def test_a_stale_spec_tag_fails(self):
+        errors, out = self._run(self.LINE("v0.7.2", "0.9.1"))
+        self.assertEqual(errors, 1)
+        self.assertIn("disagrees with the tree", out)
+
+    def test_a_missing_line_fails_rather_than_skips(self):
+        """A guard that stops matching must not silently stop guarding."""
+        errors, out = self._run(
+            f"{sync.MARK_START}\n\nNothing parseable.\n\n{sync.MARK_END}\n"
+        )
+        self.assertEqual(errors, 1)
+        self.assertIn("no parseable api-version-sync line", out)
+
+    def test_missing_markers_fail_as_a_setup_error(self):
+        """Distinct from an unparseable line, and distinctly reported: without the
+        markers the writer has nothing to own, so the fix is to restore the block,
+        not to re-run a sync that would fail the same way."""
+        errors, out = self._run("# README\n\nNo managed block here.\n")
+        self.assertEqual(errors, 1)
+        self.assertIn("missing the", out)
+        self.assertIn("markers", out)
+
+    def test_a_half_open_marker_pair_fails(self):
+        """An opening marker with no close is not a block. Fails rather than
+        matching to the end of the file, where any stray copy of the line would
+        satisfy it."""
+        errors, out = self._run(
+            f"{sync.MARK_START}\n\n" + self.RAW.format(tag="v0.8.1", crate="0.9.1")
+        )
+        self.assertEqual(errors, 1)
+        self.assertIn("markers", out)
+
+    def test_a_copy_outside_the_block_cannot_satisfy_the_guard(self):
+        """The reason the search is scoped (finding: `README_PIN_RE.search` scanned
+        the whole file). The writer only ever rewrites text between the markers, so
+        a quoted copy elsewhere — a changelog excerpt, a bot PR body pasted into
+        docs — is text no bot maintains. A file-wide search could bind to that copy
+        and then validate a string that never changes, reporting OK while the real
+        managed line went stale.
+        """
+        body = (
+            "## Changelog\n\nAs of 0.9.1 the README said: "
+            + self.RAW.format(tag="v0.8.1", crate="0.9.1")
+            + "\n\n"
+            + self.LINE("v0.8.1", "0.9.0")  # the real, STALE line
+        )
+        errors, out = self._run(body)
+        self.assertEqual(errors, 1, "bound to the copy outside the managed block")
+        self.assertIn("README: spec v0.8.1, nexus-exchange 0.9.0", out)
+
+    def test_a_stale_copy_outside_the_block_is_ignored(self):
+        """The other direction: text outside the block is not the guard's business,
+        so a historical copy must not red a tree that is correct."""
+        body = (
+            self.LINE("v0.8.1", "0.9.1")
+            + "\n\nHistorically: "
+            + self.RAW.format(tag="v0.7.2", crate="0.9.0")
+        )
+        errors, out = self._run(body)
+        self.assertEqual(errors, 0, out)
+
+    def test_the_real_readme_matches_the_real_tree(self):
+        """So the synthetic cases above cannot stay green while the tree drifts."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = parity.check_readme_pin(
+                sdk_crate.locked_version(),
+                open(os.path.join(parity.csd.REPO, ".api-version")).read().strip(),
+            )
+        self.assertEqual(errors, 0, buf.getvalue())
+
+
+class TestRepairMode(unittest.TestCase):
+    """`sync_sdk_version.py --repair`: the remedy invariants 5 and 8 now name.
+
+    It exists because the remedy they used to name could not work. `--write` is a
+    dependency BUMP — it returns at "Dependency is up to date" before it reaches the
+    README — so on the failure these guards actually catch (a hand-bump, or a bare
+    `cargo update`, that left the derived values behind) it printed "up to date" and
+    changed nothing, while AGENTS.md forbids hand-editing the block. A red check with
+    no working remedy is worse than no check.
+    """
+
+    CRATE_TAG = "v0.8.1"
+    LOCKED = "0.9.1"
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = d.name
+        self.readme = os.path.join(self.dir, "README.md")
+        self.api_version = os.path.join(self.dir, ".api-version")
+        # Redirect the writer at the temp tree, and stub the one network call (the
+        # crate's own pin, read from its .crate tarball).
+        for mod, name, value in (
+            (sync, "README", self.readme),
+            (sync, "API_VERSION_FILE", self.api_version),
+            (sdk_crate, "crate_api_version", lambda _v: self.CRATE_TAG),
+        ):
+            original = getattr(mod, name)
+            setattr(mod, name, value)
+            self.addCleanup(setattr, mod, name, original)
+
+    def _write(self, tag, crate, api_version=None):
+        with open(self.readme, "w") as f:
+            f.write(
+                "# CLI\n\nProse above.\n\n"
+                + sync.render_managed_block(tag, crate)
+                + "\n\nProse below.\n"
+            )
+        with open(self.api_version, "w") as f:
+            f.write((api_version or self.CRATE_TAG) + "\n")
+
+    def _repair(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sync.repair(self.LOCKED)
+        return buf.getvalue()
+
+    def _check(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = parity.check_readme_pin(
+                self.LOCKED,
+                open(self.api_version).read().strip(),
+                readme=self.readme,
+            )
+        return errors, buf.getvalue()
+
+    def test_it_repairs_the_60_shape(self):
+        """Crate bumped by hand to 0.9.1, README left claiming 0.9.0. This is the
+        end-to-end case: red before, green after, no hand-edit."""
+        self._write(self.CRATE_TAG, "0.9.0")
+        self.assertEqual(self._check()[0], 1, "fixture is not actually broken")
+        self._repair()
+        errors, out = self._check()
+        self.assertEqual(errors, 0, out)
+
+    def test_it_repairs_a_drifted_pin(self):
+        """The invariant-5 side: `.api-version` no longer matches the crate the tree
+        resolves, which a bare `cargo update` produces."""
+        self._write(self.CRATE_TAG, self.LOCKED, api_version="v0.7.2")
+        out = self._repair()
+        self.assertIn("Wrote .api-version = v0.8.1 (was v0.7.2)", out)
+        self.assertEqual(open(self.api_version).read().strip(), self.CRATE_TAG)
+        # The pin gates invariant 1 and the coverage sentence, so it must say so
+        # rather than let a green repair imply the whole tree is consistent.
+        self.assertIn("--sync-coverage", out)
+
+    def test_it_is_idempotent_and_says_nothing_changed(self):
+        self._write(self.CRATE_TAG, self.LOCKED)
+        before = open(self.readme).read()
+        out = self._repair()
+        self.assertEqual(open(self.readme).read(), before)
+        self.assertIn("already agrees with the tree", out)
+        self.assertNotIn("--sync-coverage", out)
+
+    def test_it_leaves_human_owned_prose_alone(self):
+        self._write(self.CRATE_TAG, "0.9.0")
+        self._repair()
+        text = open(self.readme).read()
+        self.assertIn("Prose above.", text)
+        self.assertIn("Prose below.", text)
+
+    def test_write_cannot_do_this_which_is_why_repair_exists(self):
+        """The regression pin. If `--write` ever grows a repair path this test should
+        be revisited deliberately — but until then, naming it as the remedy sends
+        someone to a command that prints "up to date" and exits."""
+        self._write(self.CRATE_TAG, "0.9.0")
+        argv = sys.argv
+        sys.argv = ["sync_sdk_version.py", "--write", "--latest", self.LOCKED]
+        self.addCleanup(lambda: setattr(sys, "argv", argv))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sync.main()
+        self.assertIn("Dependency is up to date", buf.getvalue())
+        self.assertEqual(self._check()[0], 1, "--write unexpectedly fixed the README")
 
 
 if __name__ == "__main__":

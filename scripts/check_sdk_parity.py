@@ -8,8 +8,11 @@ decides which spec version is actually spoken — it pins the tag and sends it a
 `X-Nexus-Api-Version` on every request. A CLI pin ahead of (or behind) the crate's
 is simply a false statement about runtime behaviour, and nothing was checking it.
 
-Two invariants, both against the *published* crate (read from its crates.io
-tarball, so it is the exact artifact cargo builds):
+Three invariants. 5 and 6 are against the *published* crate (read from its
+crates.io tarball, so it is the exact artifact cargo builds); 8 is against the
+README line that reports both. The numbering is fleet-wide, not per-file — 1-4 and
+7 belong to `check_spec_drift.py` — so a number means the same thing in the README,
+in CI logs and in both checkers.
 
 5. `.api-version` == the crate's `.api-version`
    The pin is a DERIVED value, not a choice. Advancing it without a crate release
@@ -26,6 +29,13 @@ manifest lists `PATCH /orders/{order_id}` and no PUT, so this check fails that
 mapping immediately — where the spec-only check could not, since the spec defines
 both a PATCH and (elsewhere) PUT operations and neither file agreed with the other.
 
+8. The README's managed line names the resolved crate and the pin
+   AGENTS.md promises "CI fails if the pin, the README line, and the crate
+   disagree". Only two thirds of that was implemented: invariant 5 compares
+   `.api-version` to the crate's pin, and nothing compared the README's *crate
+   version* to `Cargo.lock` — which is how the 0.9.0 -> 0.9.1 hand-bump left `main`
+   claiming 0.9.0 while shipping 0.9.1, green.
+
 Subset, not equality, on purpose: the SDK wraps considerably more than the CLI
 exposes (bridge deposits, ADL history, admin tiers). Those are coverage gaps to
 report, not failures — the CLI is not required to surface everything the SDK can
@@ -35,6 +45,7 @@ Needs network (one crates.io fetch, cached by version). Run:
   check_sdk_parity.py
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +53,7 @@ sys.path.insert(0, HERE)
 
 import check_spec_drift as csd  # noqa: E402
 import sdk_crate  # noqa: E402
+import sync_sdk_version as sync  # noqa: E402
 
 
 def check_pin(locked, crate_tag, our_tag):
@@ -69,9 +81,12 @@ def check_pin(locked, crate_tag, our_tag):
         )
     else:
         print(
-            f"  The pin is BEHIND the SDK. Set .api-version to {crate_tag} (and the "
-            f"README managed line with it): `python3 scripts/sync_sdk_version.py "
-            f"--write`."
+            f"  The pin is BEHIND the SDK. Re-derive it (and the README managed line "
+            f"with it) from the locked crate: `python3 scripts/sync_sdk_version.py "
+            f"--repair`. NOT --write: that mode bumps the dependency only when a "
+            f"NEWER crate has been published, and here the crate is already "
+            f"resolved at {locked} — it would print \"up to date\" and change "
+            f"nothing."
         )
     return 1
 
@@ -144,6 +159,98 @@ def check_manifest_subset(locked, sdk_ops, our_ops):
     return len(unreachable)
 
 
+# The bot-managed README block, as `sync_sdk_version.py` renders it. Matched, not
+# regenerated, so this stays a check rather than a second writer.
+README_PIN_RE = re.compile(
+    r"Currently targets Exchange API spec \*\*`(?P<tag>v[\d.]+)`\*\* — the version "
+    r"pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` "
+    r"\*\*`(?P<crate>[\d.]+)`\*\*\."
+)
+
+
+def managed_block(text):
+    """The text between the sync markers, or None if they are absent/inverted.
+
+    Scoped rather than searched file-wide, to match the writer's contract exactly:
+    `sync_sdk_version.update_readme` only ever rewrites what is between these
+    markers, so anything outside them is text no bot maintains. A file-wide search
+    could bind to a copy of the line — quoted in a changelog excerpt, a bot's own PR
+    body pasted into docs, a migration note — and then validate a string that never
+    changes, reporting OK while the real managed line went stale. Same markers, same
+    order of preference, one writer and one reader.
+    """
+    start = text.find(sync.MARK_START)
+    if start == -1:
+        return None
+    end = text.find(sync.MARK_END, start)
+    if end == -1:
+        return None
+    return text[start + len(sync.MARK_START) : end]
+
+
+def check_readme_pin(locked, our_tag, readme=None):
+    """Invariant 8: the README's managed line names the resolved crate and our pin.
+
+    AGENTS.md says "CI fails if the pin, the README line, and the crate disagree."
+    Two thirds of that was true: `check_pin` above compares `.api-version` to the
+    crate's own pin, but nothing compared the README's *crate version* to
+    `Cargo.lock`. So a hand-bump that skipped `sync_sdk_version.py --write` went
+    green with the README a release behind — which is what happened on the
+    0.9.0 -> 0.9.1 bump (ENG-10956), left `main` claiming 0.9.0 while shipping
+    0.9.1, and was only corrected because a stale autobump PR happened to carry the
+    line. This closes it.
+
+    The fix is never a hand-edit of the block — AGENTS.md forbids it, and a hand-fix
+    is what goes stale next time. Run `python3 scripts/sync_sdk_version.py --repair`,
+    which re-derives both values from the crate `Cargo.lock` resolves. Deliberately
+    not `--write`: that is a dependency bump, and it returns at "Dependency is up to
+    date" before touching the README, so in exactly this scenario it does nothing.
+    """
+    readme = readme or os.path.join(csd.REPO, "README.md")
+    try:
+        with open(readme) as f:
+            text = f.read()
+    except OSError as e:
+        print(f"\nERROR: cannot read {readme}: {e}")
+        return 1
+
+    block = managed_block(text)
+    if block is None:
+        print(
+            f"\nERROR: {readme} is missing the {sync.MARK_START} / "
+            f"{sync.MARK_END} markers, so the bot has no line to own and this "
+            f"invariant has nothing to check. Restore the managed block under "
+            f"'### API coverage'."
+        )
+        return 1
+
+    m = README_PIN_RE.search(block)
+    if not m:
+        print(
+            f"\nERROR: {readme} has no parseable api-version-sync line inside the "
+            f"managed block. It is generated by sync_sdk_version.py; run it with "
+            f"--repair, or update check_sdk_parity.py:README_PIN_RE if the template "
+            f"changed."
+        )
+        return 1
+
+    if (m.group("tag"), m.group("crate")) != (our_tag, locked):
+        print(
+            f"\nERROR: {readme}'s managed line disagrees with the tree.\n"
+            f"  README: spec {m.group('tag')}, {sdk_crate.SDK_CRATE} "
+            f"{m.group('crate')}\n"
+            f"  tree:   spec {our_tag}, {sdk_crate.SDK_CRATE} {locked}\n"
+            f"  Fix with: python3 scripts/sync_sdk_version.py --repair"
+        )
+        return 1
+
+    print(
+        f"OK: README's managed line matches the tree (spec {our_tag}, "
+        f"{sdk_crate.SDK_CRATE} {locked})."
+    )
+    return 0
+
+
 def main():
     locked = sdk_crate.locked_version()
     required = sdk_crate.required_version()
@@ -164,6 +271,8 @@ def main():
     )
 
     failures = check_pin(locked, crate_tag, our_tag)
+    # Invariant 8: the README's managed line agrees with Cargo.lock and the pin.
+    failures += check_readme_pin(locked, our_tag)
     failures += check_manifest_subset(
         locked, sdk_crate.crate_endpoints(locked), our_ops
     )
