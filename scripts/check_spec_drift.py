@@ -328,7 +328,13 @@ def load_targeted(path="endpoints.txt"):
     return out
 
 
-HTTP_METHODS = ("get", "post", "put", "delete", "patch")
+# The collector's set, verbatim (`collect-interfaces-metrics.py:103`). `head` and
+# `options` are in it and were missing here: v0.8.1 documents neither, so the two
+# denominators agreed by luck rather than by construction. The first HEAD or
+# OPTIONS operation would move the dashboard's denominator while invariant 7 pinned
+# the README to this one — the same latent divergence the `deprecated` split was
+# ported to prevent, and not something a reader would think to check.
+HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
 
 
 def spec_ops(spec):
@@ -339,7 +345,15 @@ def spec_ops(spec):
     not a drift error. `deprecated_ops` splits them out for the *ratio* only.
     """
     ops = set()
-    for p, methods in spec.get("paths", {}).items():
+    for p, methods in (spec.get("paths") or {}).items():
+        # `isinstance` on the PATH ITEM as well as the operation, and `or {}` above:
+        # both are the collector's shape (`_spec_ops`), and neither was ported. A
+        # non-object path item (a `$ref` string, a null from a hand-edit) turned the
+        # run into an AttributeError traceback where the bare loop was harmless —
+        # a checker that crashes on malformed input reports nothing about the input
+        # it was pointed at.
+        if not isinstance(methods, dict):
+            continue
         for m, op in methods.items():
             if m.lower() in HTTP_METHODS and isinstance(op, dict):
                 ops.add((m.upper(), p))
@@ -363,7 +377,9 @@ def deprecated_ops(spec):
     CLI will lose.
     """
     out = set()
-    for p, methods in spec.get("paths", {}).items():
+    for p, methods in (spec.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
         for m, op in methods.items():
             if m.lower() not in HTTP_METHODS or not isinstance(op, dict):
                 continue
@@ -596,8 +612,8 @@ def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
 def spec_misses(targeted, available):
     """The targeted ops the spec does not document, matched LITERALLY.
 
-    Shared by invariant 1 and by `main`, which needs the same answer to decide
-    whether invariant 7 can say anything meaningful (see its call site).
+    Called by invariant 1, whose returned failure count is what `main` reads to
+    decide whether invariant 7 can say anything meaningful (see its call site).
     """
     return [op for op in targeted if op not in available]
 
@@ -804,12 +820,20 @@ def check_allowlist_is_honest():
 # failed the guard as "no parseable coverage claim" — which reads as stale numbers
 # and sends the reader to check arithmetic that was never wrong.
 #
-# `_WS` is one run of whitespace containing AT MOST ONE newline, not `\s+`. Markdown
-# treats a single newline inside a paragraph as a space, so tolerating it is the
-# correct reading of the source — but a BLANK line ends the paragraph, and a
+# `_WS` is one run of whitespace containing AT MOST ONE line break, not `\s+`.
+# Markdown treats a single newline inside a paragraph as a space, so tolerating it
+# is the correct reading of the source — but a BLANK line ends the paragraph, and a
 # sentence split across two paragraphs is a rewording, which this guard exists to
 # catch. `\s+` would have quietly matched across it.
-_WS = r"(?=\s)[ \t]*\n?[ \t]*"
+#
+# The break is `\r?\n`, not `\n`. The repo has no `.gitattributes` and ships Windows
+# installers, so a contributor with `core.autocrlf=true` gets a CRLF working copy;
+# with a bare `\n` this guard failed there with "no parseable coverage claim" — a
+# message that sends them to audit numbers that were never wrong, on a file they
+# never edited. The claim is read and written with `newline=""` for the same
+# reason: universal-newline mode would translate the whole file's endings on the
+# first repair, turning a four-value edit into a whole-file diff.
+_WS = r"(?=\s)[ \t]*\r?\n?[ \t]*"
 README_COVERAGE_RE = re.compile(
     r"\*\*(?P<num>\d+)" + _WS + r"of" + _WS + r"(?P<den>\d+)\*\*" + _WS
     + r"spec" + _WS + r"operations" + _WS
@@ -834,9 +858,23 @@ def _splice_groups(m, values):
     return text
 
 
+def _same_release(spec_version, pinned_tag):
+    """Whether a spec document's `info.version` is the release `.api-version` pins.
+
+    Compared with a leading `v` stripped from either side: the pin is a git tag
+    (`v0.8.1`) and `info.version` is a bare semver (`0.8.1`), and they name the same
+    release. Returns False for a missing or unparseable version rather than
+    guessing — see the caller.
+    """
+    if not spec_version or not pinned_tag:
+        return False
+    return str(spec_version).lstrip("v").strip() == str(pinned_tag).lstrip("v").strip()
+
+
 def check_readme_coverage_claim(targeted, available, readme="README.md",
                                 api_version_file=".api-version",
-                                deprecated=frozenset(), write=False):
+                                deprecated=frozenset(), write=False,
+                                spec_version=None):
     """Invariant 7: the README's coverage sentence matches what this run computed.
 
     Added because the numbers went stale in silence for two spec releases. The
@@ -858,7 +896,43 @@ def check_readme_coverage_claim(targeted, available, readme="README.md",
     here — a writer that cannot find its target must not invent one.
     """
     try:
-        with open(readme) as f:
+        with open(api_version_file) as f:
+            pinned = f.read().strip()
+    except OSError as e:
+        print(f"\nERROR: cannot read {api_version_file}: {e}")
+        return 1
+
+    # The tag in the sentence comes from `.api-version`; the ratio comes from
+    # whatever spec document this run was handed. Nothing tied the two together, so
+    # a spec for a DIFFERENT release produced a sentence pairing this pin with that
+    # release's numbers — in check mode a false "claim is stale" whose suggested
+    # remedy corrupts the sentence, and under `--sync-coverage` a false claim
+    # written by the tool, at exit 0.
+    #
+    # Not a contrived case: `openapi.pinned.json` is gitignored and the README tells
+    # you to reuse that filename, so a stale local copy is what a contributor will
+    # have. Refuse in BOTH modes — a writer that cannot prove its inputs correspond
+    # must not write.
+    if not _same_release(spec_version, pinned):
+        shown = spec_version if spec_version else "not declared"
+        wrote = " (and write it into the README)" if write else ""
+        print(
+            f"\nERROR: the spec passed to this run is {shown}, but {api_version_file} "
+            f"pins {pinned}. The coverage ratio is computed from the spec document "
+            f"while the tag in {readme} comes from the pin, so pairing them would "
+            f"state a ratio for one release against the name of another{wrote}. "
+            f"Fetch the pinned spec and re-run:\n"
+            f"  curl -fsSL -o openapi.pinned.json \\\n"
+            f"    https://raw.githubusercontent.com/nexus-xyz/nexus-exchange-api/"
+            f"{pinned}/openapi.json"
+        )
+        return 1
+
+    try:
+        # `newline=""`: read the file's own line endings verbatim rather than
+        # translating them, so the repair below rewrites four values and nothing
+        # else. See the note on `_WS`.
+        with open(readme, newline="") as f:
             text = f.read()
     except OSError as e:
         print(f"\nERROR: cannot read {readme}: {e}")
@@ -876,19 +950,12 @@ def check_readme_coverage_claim(targeted, available, readme="README.md",
 
     num, den, pct, _ = coverage(targeted, available, deprecated)
 
-    try:
-        with open(api_version_file) as f:
-            pinned = f.read().strip()
-    except OSError as e:
-        print(f"\nERROR: cannot read {api_version_file}: {e}")
-        return 1
-
     claimed = (m.group("num"), m.group("den"), m.group("pct"), m.group("tag"))
     actual = (str(num), str(den), pct, pinned)
     if claimed != actual:
         if write:
             values = {"num": str(num), "den": str(den), "pct": pct, "tag": pinned}
-            with open(readme, "w") as f:
+            with open(readme, "w", newline="") as f:
                 f.write(text[: m.start()] + _splice_groups(m, values) + text[m.end():])
             print(
                 f"Rewrote {readme}'s coverage claim: "
@@ -918,18 +985,27 @@ def main():
     # Positional-flexible on purpose: this is called from three workflows and by
     # hand, and `... openapi.json --sync-coverage` is the order half of them will
     # reach for. A usage error there would be a confusing way to fail a repair.
-    args = [a for a in sys.argv[1:] if a != "--sync-coverage"]
+    #
+    # But only the flags this script defines are filtered out. Anything else that
+    # starts with `-` is a usage error, not a path: the earlier filter kept every
+    # unrecognised token as positional, so `--sync-coverge` became the spec path and
+    # failed with a FileNotFoundError traceback naming the typo as a missing file.
+    flags = {"--sync-coverage"}
+    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in flags]
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
     sync_coverage = "--sync-coverage" in sys.argv[1:]
-    if len(args) != 1:
+    if unknown or len(args) != 1:
+        if unknown:
+            print(f"unrecognised option(s): {' '.join(unknown)}", file=sys.stderr)
         sys.exit(f"usage: {sys.argv[0]} [--sync-coverage] <openapi.json>")
     with open(args[0]) as f:
         spec = json.load(f)
-    version = spec.get("info", {}).get("version", "?")
+    version = (spec.get("info") or {}).get("version")
     targeted = load_targeted()
     available = spec_ops(spec)
     deprecated = deprecated_ops(spec)
 
-    print(f"Spec version: {version}")
+    print(f"Spec version: {version or '?'}")
 
     if sync_coverage:
         # Repair only, and only the four values invariant 7 reads. Nothing else is
@@ -938,7 +1014,8 @@ def main():
         # invariant 1's message, not be pre-empted by a writer.
         sys.exit(
             check_readme_coverage_claim(
-                targeted, available, deprecated=deprecated, write=True
+                targeted, available, deprecated=deprecated, write=True,
+                spec_version=version,
             )
         )
 
@@ -968,7 +1045,7 @@ def main():
         )
     else:
         failures += check_readme_coverage_claim(
-            targeted, available, deprecated=deprecated
+            targeted, available, deprecated=deprecated, spec_version=version
         )
 
     if failures:

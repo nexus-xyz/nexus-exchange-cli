@@ -40,13 +40,24 @@ def _quiet(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def spec_of(*ops):
-    """Build a minimal OpenAPI doc covering exactly `ops` (METHOD, path) pairs."""
+def spec_of(*ops, version="0.0.0-test"):
+    """Build a minimal OpenAPI doc covering exactly `ops` (METHOD, path) pairs.
+
+    `version` is settable because invariant 7 now refuses to pair a ratio with a pin
+    naming a different release: a fixture that writes `.api-version` must declare
+    the matching `info.version`, or it exercises that refusal instead of the branch
+    it was written for.
+    """
     paths = {}
     for method, path in ops:
         paths.setdefault(path, {})[method.lower()] = {"responses": {}}
-    return {"info": {"version": "0.0.0-test"}, "paths": paths}
+    return {"info": {"version": version}, "paths": paths}
 
+
+# The release the subprocess fixtures pin. One name, so the `.api-version` a
+# fixture writes and the `info.version` its spec declares cannot drift apart —
+# which invariant 7 would (correctly) reject.
+PINNED_TAG = "v0.8.1"
 
 # Two real METHOD_OP methods, used to build synthetic Rust. Real names matter:
 # `_CALL_RE` is compiled from METHOD_OP at import time, so a made-up method name
@@ -870,7 +881,7 @@ class TestReadmeCoverageClaimGuard(unittest.TestCase):
         return readme_claiming(self, sentence)
 
     def _run(self, sentence, write=False, targeted=None, available=None,
-             deprecated=frozenset()):
+             deprecated=frozenset(), spec_version="0.8.1"):
         readme, pin = self._readme(sentence)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -881,6 +892,12 @@ class TestReadmeCoverageClaimGuard(unittest.TestCase):
                 api_version_file=pin,
                 deprecated=deprecated,
                 write=write,
+                # The fixture pins v0.8.1, so the default here is the spec that pin
+                # names. Passing it is not incidental: invariant 7 now refuses to
+                # pair a ratio with a tag from a different release, so a test that
+                # omitted it would be exercising that refusal rather than the branch
+                # it is named for.
+                spec_version=spec_version,
             )
         return errors, buf.getvalue(), readme
 
@@ -932,7 +949,8 @@ class TestReadmeCoverageClaimGuard(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             errors = csd.check_readme_coverage_claim(
-                self.TARGETED, self.AVAILABLE, readme="/nonexistent/README.md"
+                self.TARGETED, self.AVAILABLE, readme="/nonexistent/README.md",
+                spec_version="0.8.1",
             )
         self.assertEqual(errors, 1)
         self.assertIn("cannot read", buf.getvalue())
@@ -944,6 +962,7 @@ class TestReadmeCoverageClaimGuard(unittest.TestCase):
             errors = csd.check_readme_coverage_claim(
                 self.TARGETED, self.AVAILABLE, readme=readme,
                 api_version_file="/nonexistent/.api-version",
+                spec_version="0.8.1",
             )
         self.assertEqual(errors, 1)
         self.assertIn("cannot read", buf.getvalue())
@@ -1041,13 +1060,13 @@ class TestSyncCoverageRepairsTheClaim(unittest.TestCase):
     TARGETED = TestReadmeCoverageClaimGuard.TARGETED
     AVAILABLE = TestReadmeCoverageClaimGuard.AVAILABLE
 
-    def _run(self, sentence, write=False):
+    def _run(self, sentence, write=False, spec_version="0.8.1"):
         readme, pin = readme_claiming(self, sentence)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             errors = csd.check_readme_coverage_claim(
                 self.TARGETED, self.AVAILABLE, readme=readme,
-                api_version_file=pin, write=write,
+                api_version_file=pin, write=write, spec_version=spec_version,
             )
         return errors, buf.getvalue(), readme
 
@@ -1079,6 +1098,7 @@ class TestSyncCoverageRepairsTheClaim(unittest.TestCase):
             errors = csd.check_readme_coverage_claim(
                 self.TARGETED, self.AVAILABLE, readme=readme,
                 api_version_file=os.path.join(os.path.dirname(readme), ".api-version"),
+                spec_version="0.8.1",
             )
         self.assertEqual(errors, 0, buf.getvalue())
 
@@ -1112,6 +1132,7 @@ class TestSyncCoverageRepairsTheClaim(unittest.TestCase):
             errors = csd.check_readme_coverage_claim(
                 self.TARGETED, self.AVAILABLE,
                 readme=readme, api_version_file=pin, write=True,
+                spec_version="0.8.1",
             )
         self.assertEqual(errors, 0)
         self.assertEqual(open(readme).read(), before)
@@ -1208,6 +1229,301 @@ class TestDeprecatedOpsLeaveTheRatio(unittest.TestCase):
         self.assertEqual(csd.deprecated_ops({"paths": {}}), set())
 
 
+class TestCommandLineParsing(unittest.TestCase):
+    """A mistyped flag must be a usage error, not a filename.
+
+    `main` filtered `--sync-coverage` out of `argv` and treated everything left as
+    positional, so `--sync-coverge` became the spec path and the run died with a
+    `FileNotFoundError` traceback naming the typo as a missing file. The reader is
+    then debugging a path that was never meant to be one.
+    """
+
+    def _run(self, *argv):
+        return subprocess.run(
+            [sys.executable, os.path.join(HERE, "check_spec_drift.py"), *argv],
+            capture_output=True, text=True,
+        )
+
+    def test_a_mistyped_flag_is_a_usage_error(self):
+        proc = self._run("--sync-coverge", "openapi.json")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unrecognised option", proc.stderr)
+        self.assertIn("usage:", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_an_unknown_flag_alone_is_a_usage_error(self):
+        proc = self._run("--help")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("usage:", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_no_arguments_is_a_usage_error(self):
+        proc = self._run()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("usage:", proc.stderr)
+
+    def test_two_positionals_is_a_usage_error(self):
+        proc = self._run("a.json", "b.json")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("usage:", proc.stderr)
+
+    def test_the_flag_may_come_after_the_path(self):
+        """The control, and the reason the filter exists: three workflows and half
+        the humans write `... openapi.json --sync-coverage`. That must keep working,
+        so this cannot be fixed by demanding flags come first."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        spec = os.path.join(d.name, "openapi.json")
+        with open(spec, "w") as f:
+            json.dump(spec_of(("GET", "/markets"), version=PINNED_TAG.lstrip("v")), f)
+        with open(os.path.join(d.name, "endpoints.txt"), "w") as f:
+            f.write("GET /markets\n")
+        with open(os.path.join(d.name, ".api-version"), "w") as f:
+            f.write(PINNED_TAG + "\n")
+        with open(os.path.join(d.name, "README.md"), "w") as f:
+            f.write("Coverage: the CLI currently exercises **0 of 1** spec "
+                    "operations (**0.0%**), measured against the pinned "
+                    "`v0.8.1` spec.\n")
+        proc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "check_spec_drift.py"),
+             spec, "--sync-coverage"],
+            cwd=d.name, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Rewrote", proc.stdout)
+
+
+class TestTheClaimSurvivesCrlfLineEndings(unittest.TestCase):
+    """A CRLF working copy must not read as a reworded sentence.
+
+    The repo has no `.gitattributes` and ships Windows installers, so a contributor
+    with `core.autocrlf=true` gets CRLF on checkout. The guard tolerated `\n` inside
+    the sentence but not `\r\n`, so on that machine an unedited README failed as "no
+    parseable coverage claim" — pointing them at a regex, for a file they never
+    touched.
+    """
+
+    TARGETED = TestReadmeCoverageClaimGuard.TARGETED
+    AVAILABLE = TestReadmeCoverageClaimGuard.AVAILABLE
+
+    def _crlf_readme(self, sentence):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        readme = os.path.join(d.name, "README.md")
+        body = (f"### API coverage\n\nPreamble.\n\nThe CLI currently exercises "
+                f"{sentence}. Trailing prose.\n")
+        with open(readme, "w", newline="") as f:
+            f.write(body.replace("\n", "\r\n"))
+        pin = os.path.join(d.name, ".api-version")
+        with open(pin, "w") as f:
+            f.write("v0.8.1\n")
+        return readme, pin
+
+    def _run(self, sentence, write=False):
+        readme, pin = self._crlf_readme(sentence)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = csd.check_readme_coverage_claim(
+                self.TARGETED, self.AVAILABLE, readme=readme,
+                api_version_file=pin, write=write, spec_version="0.8.1",
+            )
+        return errors, buf.getvalue(), readme
+
+    def test_a_true_claim_on_a_crlf_file_passes(self):
+        errors, out, _ = self._run(TestReadmeCoverageClaimGuard.CLAIM)
+        self.assertEqual(errors, 0, out)
+
+    def test_a_crlf_break_inside_the_sentence_is_still_one_paragraph(self):
+        """The wrap case, in CRLF: Markdown reads a single line break inside a
+        paragraph as a space regardless of how the line ends."""
+        errors, out, _ = self._run(
+            "**1 of 1** spec operations (**100.0%**), measured against\nthe "
+            "pinned `v0.8.1` spec"
+        )
+        self.assertEqual(errors, 0, out)
+
+    def test_a_blank_crlf_line_still_ends_the_paragraph(self):
+        """The tolerance must stay at ONE break. A sentence split across two
+        paragraphs is a rewording, which is what this guard is for."""
+        errors, out, _ = self._run(
+            "**1 of 1** spec operations (**100.0%**), measured against\n\nthe "
+            "pinned `v0.8.1` spec"
+        )
+        self.assertEqual(errors, 1)
+        self.assertIn("no parseable coverage claim", out)
+
+    def test_the_repair_does_not_rewrite_every_line_ending(self):
+        """The writer reads and writes with `newline=""`, so a four-value repair
+        stays a four-value diff. In universal-newline mode it would translate the
+        whole file and bury the edit in a diff touching every line."""
+        _, out, readme = self._run(
+            "**0 of 2** spec operations (**0.0%**), measured against the pinned "
+            "`v0.8.1` spec",
+            write=True,
+        )
+        raw = open(readme, "rb").read()
+        self.assertIn(b"**1 of 1**", raw, out)
+        self.assertGreater(raw.count(b"\r\n"), 0, "fixture must be CRLF to prove anything")
+        self.assertEqual(
+            raw.count(b"\n"), raw.count(b"\r\n"),
+            "every line ending must still be CRLF — the repair rewrote the file",
+        )
+
+
+class TestSpecParsingMatchesTheCollector(unittest.TestCase):
+    """`spec_ops` / `deprecated_ops` must read a spec the way the collector does.
+
+    Both are ports, and both had gaps that agreed with the collector only because
+    `v0.8.1` happens not to exercise them — the same latent-divergence shape the
+    `deprecated` split was ported to prevent.
+    """
+
+    def test_head_and_options_are_counted(self):
+        """`collect-interfaces-metrics.py:103` includes both. Omitting them here
+        would move the dashboard's denominator without moving ours, while invariant
+        7 pinned the README to ours."""
+        spec = {"info": {"version": "0.0.0-test"}, "paths": {
+            "/thing": {
+                "get": {"responses": {}},
+                "head": {"responses": {}},
+                "options": {"responses": {}},
+            }
+        }}
+        self.assertEqual(
+            csd.spec_ops(spec),
+            {("GET", "/thing"), ("HEAD", "/thing"), ("OPTIONS", "/thing")},
+        )
+
+    def test_the_full_method_set_is_the_collectors(self):
+        self.assertEqual(
+            set(csd.HTTP_METHODS),
+            {"get", "post", "put", "patch", "delete", "head", "options"},
+        )
+
+    def test_a_non_dict_path_item_is_skipped_not_crashed(self):
+        """A `$ref` string or a hand-edited null used to raise AttributeError, so
+        the checker reported nothing at all about the spec it was pointed at."""
+        spec = {"info": {"version": "0.0.0-test"}, "paths": {
+            "/good": {"get": {"responses": {}}},
+            "/ref": "#/components/pathItems/Thing",
+            "/null": None,
+        }}
+        self.assertEqual(csd.spec_ops(spec), {("GET", "/good")})
+        self.assertEqual(csd.deprecated_ops(spec), set())
+
+    def test_a_null_paths_member_is_tolerated(self):
+        """`(spec.get("paths") or {})`, from the collector: an explicit null is not
+        the same as an absent key, and only one of them used to work."""
+        for paths in (None, {}):
+            with self.subTest(paths=paths):
+                self.assertEqual(csd.spec_ops({"paths": paths}), set())
+                self.assertEqual(csd.deprecated_ops({"paths": paths}), set())
+
+    def test_non_operation_members_are_still_ignored(self):
+        """The control: `parameters` and `summary` are legal path-item members and
+        must not become operations just because the method filter widened."""
+        spec = {"info": {"version": "0.0.0-test"}, "paths": {
+            "/thing": {
+                "get": {"responses": {}},
+                "parameters": [{"name": "id", "in": "path"}],
+                "summary": "not an operation",
+            }
+        }}
+        self.assertEqual(csd.spec_ops(spec), {("GET", "/thing")})
+
+
+class TestInvariant7RefusesASpecThatIsNotThePinnedOne(unittest.TestCase):
+    """The ratio and the tag must come from the same release.
+
+    Invariant 7 builds its sentence from two independent sources: the ratio from
+    whatever spec document the run was handed, and the tag from `.api-version`.
+    Nothing tied them together, so pointing the checker at a spec for a DIFFERENT
+    release produced a sentence pairing this pin with that release's numbers.
+
+    In `--sync-coverage` mode that is the serious one: a false claim written into
+    the README by the tool, at exit 0. In check mode it is a false "claim is stale"
+    whose suggested remedy is the command that corrupts the sentence.
+
+    It is also the normal case rather than a contrived one: `openapi.pinned.json` is
+    gitignored and the README tells you to reuse that filename, so a stale local
+    copy is exactly what a contributor will have on disk.
+    """
+
+    TARGETED = TestReadmeCoverageClaimGuard.TARGETED
+    AVAILABLE = TestReadmeCoverageClaimGuard.AVAILABLE
+    CLAIM = TestReadmeCoverageClaimGuard.CLAIM
+
+    def _run(self, spec_version, write=False, claim=None):
+        readme, pin = readme_claiming(self, self.CLAIM if claim is None else claim)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            errors = csd.check_readme_coverage_claim(
+                self.TARGETED, self.AVAILABLE, readme=readme,
+                api_version_file=pin, write=write, spec_version=spec_version,
+            )
+        return errors, buf.getvalue(), readme
+
+    def test_a_spec_from_another_release_fails(self):
+        errors, out, _ = self._run("0.7.2")
+        self.assertEqual(errors, 1)
+        self.assertIn("0.7.2", out)
+        self.assertIn("v0.8.1", out)
+        # The message must name the mismatch, not the sentence: the README is not
+        # what is wrong here, and "claim is stale" would send the reader to edit it.
+        self.assertNotIn("claim is stale", out)
+
+    def test_sync_coverage_refuses_to_write_from_the_wrong_spec(self):
+        """The one that matters. This case used to exit 0 having written a false
+        sentence — a guard turned into a corruption path."""
+        before = None
+        errors, out, readme = self._run(
+            "0.7.2",
+            write=True,
+            claim="**0 of 2** spec operations (**0.0%**), measured against the "
+                  "pinned `v0.7.2` spec",
+        )
+        self.assertEqual(errors, 1, out)
+        self.assertNotIn("Rewrote", out)
+        # And the file is untouched: refusing but writing anyway would be worse than
+        # not checking, because the exit code would then contradict the diff.
+        text = open(readme).read()
+        self.assertIn("**0 of 2**", text)
+        self.assertNotIn("**1 of 1**", text)
+        del before
+
+    def test_the_matching_release_still_passes(self):
+        """The control. Without it every case above could pass by refusing
+        everything, which is the failure mode a correspondence check invites."""
+        errors, out, _ = self._run("0.8.1")
+        self.assertEqual(errors, 0, out)
+
+    def test_the_tag_v_prefix_is_not_load_bearing(self):
+        """`.api-version` is a git tag (`v0.8.1`); `info.version` is bare semver
+        (`0.8.1`). They name one release, and the guard must not read the `v` as a
+        difference — that would fail every correct run."""
+        for declared in ("0.8.1", "v0.8.1"):
+            with self.subTest(declared=declared):
+                errors, out, _ = self._run(declared)
+                self.assertEqual(errors, 0, out)
+
+    def test_a_spec_declaring_no_version_fails_closed(self):
+        """Unknown is not "assume it matches". A spec with no `info.version` cannot
+        be shown to be the pinned one, and a guard that cannot verify must not
+        pass — the same rule the unparseable-sentence branch follows."""
+        for missing in (None, ""):
+            with self.subTest(missing=missing):
+                errors, out, _ = self._run(missing)
+                self.assertEqual(errors, 1)
+                self.assertIn("not declared", out)
+
+    def test_the_failure_names_the_command_that_fixes_it(self):
+        """A remedy that is a fetch, not an edit: the spec on disk is wrong, so
+        pointing at the README (or at --sync-coverage) would be the corruption."""
+        _, out, _ = self._run("0.7.2")
+        self.assertIn("openapi.pinned.json", out)
+        self.assertIn("nexus-exchange-api/v0.8.1/openapi.json", out)
+
+
 class TestInvariant7IsSkippedWhileInvariant1Fails(unittest.TestCase):
     """No cascading second error, and no double-counted exit status.
 
@@ -1219,8 +1535,14 @@ class TestInvariant7IsSkippedWhileInvariant1Fails(unittest.TestCase):
 
     Driven through `main()` as a subprocess, because the composition IS the
     behaviour under test: the two checks are individually right, and it was their
-    wiring that produced the misleading message. Hermetic — a temp cwd, a temp spec,
-    no network.
+    wiring that produced the misleading message.
+
+    NOT hermetic, despite the temp cwd: `CLI_SOURCES` and `SRC_DIR` are absolute, so
+    invariants 2-4 read the real `src/` inside these runs and fail noisily there.
+    That is harmless — every assertion below is on a specific substring or on
+    `returncode`, neither of which those failures can forge — but the earlier
+    docstring called this hermetic, and a test that misstates what it isolates is
+    the kind of claim this PR exists to stop trusting. No network either way.
     """
 
     def _run(self, spec_paths, endpoints, claim):
@@ -1228,11 +1550,14 @@ class TestInvariant7IsSkippedWhileInvariant1Fails(unittest.TestCase):
         self.addCleanup(d.cleanup)
         spec = os.path.join(d.name, "openapi.json")
         with open(spec, "w") as f:
-            json.dump(spec_of(*spec_paths), f)
+            # Declares the release the `.api-version` written below pins: invariant 7
+            # refuses a spec/pin mismatch, and that refusal is a different branch
+            # from the skip-vs-check composition under test here.
+            json.dump(spec_of(*spec_paths, version=PINNED_TAG.lstrip("v")), f)
         with open(os.path.join(d.name, "endpoints.txt"), "w") as f:
             f.write("\n".join(f"{m} {p}" for m, p in endpoints) + "\n")
         with open(os.path.join(d.name, ".api-version"), "w") as f:
-            f.write("v0.8.1\n")
+            f.write(PINNED_TAG + "\n")
         with open(os.path.join(d.name, "README.md"), "w") as f:
             f.write(f"Coverage: the CLI currently exercises {claim}.\n")
         proc = subprocess.run(

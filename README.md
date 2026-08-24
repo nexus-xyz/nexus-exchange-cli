@@ -817,14 +817,24 @@ had gone stale in silence while every check stayed green:
 7. the coverage sentence below **equals** the ratio the checker just computed,
    against the pin it was measured with — it had claimed `38 of 98 (38.8%)` against
    `v0.7.2` for two spec releases while the pin was `v0.8.1`, because the checker
-   printed a number and nothing compared it to the one committed beside it;
+   printed a number and nothing compared it to the one committed beside it. The
+   ratio and the tag must also come from the **same release**: the ratio is computed
+   from whatever spec document the run was handed, the tag is read from
+   `.api-version`, and pairing a ratio for one release with the name of another is
+   refused rather than reported — in check mode *and* under `--sync-coverage`, which
+   would otherwise write the false sentence itself. `openapi.pinned.json` is
+   gitignored, so a stale local copy is the ordinary way to hit this;
 8. the bot-managed line above names the crate `Cargo.lock` actually resolves — which
    is the third of "the pin, the README line, and the crate" that nothing
    implemented, and is how the 0.9.0 → 0.9.1 bump left `main` claiming 0.9.0 while
    shipping 0.9.1.
 
 Both fail on a claim that is wrong **or** unparseable: a guard that stops matching
-must not silently stop guarding. Both are also repairable rather than hand-edited —
+must not silently stop guarding. Both also read and write the README with its own
+line endings preserved, and tolerate a single line break anywhere in the sentence
+(`\n` or `\r\n`), because the paragraph wraps at ~80 columns and a CRLF checkout is
+what `core.autocrlf=true` gives a contributor on Windows — a rewrap is not a
+rewording, and neither is a line ending. Both are also repairable rather than hand-edited —
 `check_spec_drift.py --sync-coverage <spec>` for 7, `sync_sdk_version.py --repair`
 for 8 — which is what keeps a bot's pin bump mergeable without a human retyping
 numbers into prose.
@@ -871,6 +881,17 @@ and that is the moment an unported filter would start disagreeing with the
 dashboard while invariant 7 held the disagreement in place. A deprecated operation
 the CLI still targets is reported — it is a wrapper the CLI is going to lose — but
 it is not a failure, because the mount is still served.
+
+That rule is asymmetric, and the asymmetry will look like a regression before it
+looks like a rule. When a dual-mounted operation has its gateway mount deprecated
+and its `/api/v1` twin kept live, the operation stays in the denominator — the live
+twin still contributes it — while a CLI line targeting the deprecated mount leaves
+the numerator. Coverage therefore *falls* on a spec release that changed nothing
+about what the CLI can do, and the commands keep working, because a deprecated
+mount is still served. That is ENG-4740's exact shape, so expect it. The fix is to
+retarget the affected `endpoints.txt` lines at the `/api/v1` mounts, not to change
+this arithmetic: the collector counts it this way, and diverging to flatter our own
+number is how the two surfaces disagreed in the first place.
 
 Collapsing is used **only** to key the ratio. Existence is always matched
 literally, and uncovered operations are reported as their literal mounts, because

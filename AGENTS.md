@@ -61,7 +61,10 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
   (invariant 7). `scripts/check_spec_drift.py --sync-coverage <openapi.json>`
   rewrites just that sentence's numbers and tag. `sdk-autobump.yml` runs it after
   every bump, so a bot PR stays mergeable; do the same by hand if you move the pin
-  yourself.
+  yourself. **Fetch the spec at the new tag first.** The ratio comes from the spec
+  file you pass and the tag comes from `.api-version`, so a stale `openapi.pinned.json`
+  from the previous pin describes the wrong release; the checker refuses that pair
+  rather than writing it, and the fix is the fetch, not the sentence.
 - Follow the crate, not the spec. A spec release is not actionable here until
   `nexus-exchange-rs` ships wrappers and publishes; that is why this repo has
   `sdk-autobump.yml` rather than the fleet's `spec-autobump.yml` and is not a target
