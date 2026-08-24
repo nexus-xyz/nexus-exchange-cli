@@ -90,9 +90,11 @@ fn managed_block(readme: &str) -> &str {
     &readme[start..end]
 }
 
-/// `scripts/sync_sdk_version.py --write` owns the marked README block, and fails
-/// loudly if the markers are gone — which would kill an autobump run mid-flight.
-/// Cheaper to notice here.
+/// `scripts/sync_sdk_version.py` owns the marked README block (both `--write` and
+/// `--repair` write it), and fails loudly if the markers are gone — which would kill
+/// an autobump run mid-flight. Cheaper to notice here. `check_sdk_parity.py`
+/// invariant 8 reads the same block, and reports missing markers as a setup error
+/// rather than an unparseable line, for the same reason.
 #[test]
 fn readme_has_exactly_one_managed_api_version_block() {
     let readme = read("README.md");
@@ -127,7 +129,8 @@ fn readme_managed_line_matches_the_pinned_api_version() {
         block.contains(&format!("**`{tag}`**")),
         "README managed block says {block:?} but .api-version pins {tag}. Both are \
          derived from the `nexus-exchange` crate, so the fix is \
-         `python3 scripts/sync_sdk_version.py --write` — not a hand-edit of either."
+         `python3 scripts/sync_sdk_version.py --repair` — not a hand-edit of either, \
+         and not `--write`, which only acts when a NEWER crate has been published."
     );
 }
 
