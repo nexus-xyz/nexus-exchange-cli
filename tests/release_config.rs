@@ -203,6 +203,35 @@ impl Step {
     fn has(&self, needle: &str) -> bool {
         self.body.contains(needle)
     }
+
+    /// Whether the step declares `key` as a step-level YAML key.
+    ///
+    /// `has` is a substring match over the whole step, shell included, which is the
+    /// text-matching fragility this file has been removing: `!step.has("if:")` also
+    /// matched an `echo` mentioning `if:`, and would have failed the moment the run
+    /// block said the word. A step-level key sits either on the item line
+    /// (`      - if:`) or at the step's own indent (`        if:`); a `run:` block
+    /// scalar is indented deeper than that, so its shell cannot be mistaken for one.
+    fn has_key(&self, key: &str) -> bool {
+        self.body.lines().any(|l| {
+            l == format!("      - {key}:")
+                || l.starts_with(&format!("      - {key}: "))
+                || l == format!("        {key}:")
+                || l.starts_with(&format!("        {key}: "))
+        })
+    }
+
+    /// The value of a step-level key, if it has one.
+    fn value(&self, key: &str) -> Option<String> {
+        self.body.lines().find_map(|l| {
+            for prefix in [format!("      - {key}: "), format!("        {key}: ")] {
+                if let Some(v) = l.strip_prefix(&prefix) {
+                    return Some(v.trim().to_string());
+                }
+            }
+            None
+        })
+    }
 }
 
 /// Split the `release-please` job's steps.
@@ -327,13 +356,20 @@ fn the_release_pr_is_built_after_the_tag_exists() {
 fn the_tag_step_recovers_on_every_run() {
     let wf = read(WORKFLOW);
     let steps = workflow_steps(&wf);
+    assert!(
+        steps.len() >= 3,
+        "parsed only {} step(s) from {WORKFLOW}; the step-splitting no longer matches \
+         the file, so `find` below would return None and this test would fail with a \
+         misleading message about the tag ref rather than about the parse",
+        steps.len()
+    );
     let tag_step = steps
         .iter()
         .find(|s| s.has("git/refs"))
         .expect("release-please.yml no longer creates the tag ref");
 
     assert!(
-        !tag_step.has("if:"),
+        !tag_step.has_key("if"),
         "the tag step must not be conditional. `release_created` fires once per \
          release, so gating the only recovery path on it turns one transient ref \
          write failure into a permanently missing tag — and, with no static floor, \
@@ -345,6 +381,120 @@ fn the_tag_step_recovers_on_every_run() {
         "the tag step must derive the expected tag from the manifest on a run that \
          cut no release; otherwise it has nothing to recover FROM, and the \
          `release_created` fast path is again the only way a tag ever appears"
+    );
+}
+
+/// Grooming must be gated on the boundary the tag step reports.
+///
+/// This is the guard for the second failure the review found. The tag step used to
+/// `exit 0` on every path it could not resolve — no Release to tag from, an
+/// unreadable manifest — and `exit 0` reads as go-ahead. The groom step then ran
+/// `release-pr` with no tag and, since this PR removed `last-release-sha`, no floor
+/// either: `needsBootstrap` with an empty `releaseShas`, walking to
+/// `commitSearchDepth`. That is #63 in its original *unbounded* form, arrived at
+/// through the recovery path added to prevent it.
+///
+/// So the step reports `established`, and grooming is conditional on it. Skipping
+/// is the recoverable half — the standing PR is refreshed on the next push — while
+/// walking is not. Removing this `if:` would look like "grooming should always
+/// run", which is exactly the reasoning that produced the bug.
+#[test]
+fn grooming_is_gated_on_an_established_boundary() {
+    let wf = read(WORKFLOW);
+    let steps = workflow_steps(&wf);
+    assert_eq!(
+        steps.len(),
+        4,
+        "expected 4 steps in {WORKFLOW} (token, cut, tag, groom); the parse or the \
+         workflow changed shape, and every assertion below would be about the wrong \
+         steps"
+    );
+
+    let boundary = steps
+        .iter()
+        .find(|s| s.has("git/refs"))
+        .expect("release-please.yml no longer creates the tag ref");
+    let id = boundary.value("id").expect(
+        "the tag step must carry an `id:`, or nothing downstream can read \
+                 whether it established a boundary",
+    );
+
+    // The LAST action invocation is the groom step; the first cuts the release.
+    let groom = steps
+        .iter()
+        .rfind(|s| s.has("googleapis/release-please-action@v4"))
+        .expect("no release-please-action invocation left in the workflow");
+    let gate = groom.value("if").unwrap_or_else(|| {
+        panic!(
+            "the release-PR step must be gated on the tag step's result. Ungated, it \
+             runs `release-pr` with no discoverable boundary whenever the tag step \
+             could not establish one, and re-collects every reachable commit (#63, \
+             unbounded).\n{}",
+            groom.body
+        )
+    });
+    assert!(
+        gate.contains(&format!("steps.{id}.outputs.established")),
+        "the release-PR step is gated on {gate:?}, which does not read the tag \
+         step's `established` output. The gate has to be that output specifically: \
+         `release_created` is true only on the run that cut a release, so gating on \
+         it would stop the standing PR being maintained on ordinary pushes — the \
+         bug this workflow's two-invocation shape exists to fix."
+    );
+
+    // And the reporting half: a step that can only ever say "true" cannot gate
+    // anything. Assert the writer exists and that BOTH outcomes are reachable.
+    assert!(
+        boundary.has("established=") && boundary.has("GITHUB_OUTPUT"),
+        "the tag step must write an `established` output; the gate above reads it.\n{}",
+        boundary.body
+    );
+    for outcome in ["finish true", "finish false"] {
+        assert!(
+            boundary.has(outcome),
+            "the tag step must have a reachable `{outcome}` path; a step that can only \
+             report one outcome makes the gate above decorative.\n{}",
+            boundary.body
+        );
+    }
+    assert!(
+        !boundary.has("set -euo pipefail"),
+        "the tag step must not use `set -e`: it has to write its `established` \
+         output on every exit, and an unhandled failure that dies first leaves the \
+         gate reading empty — indistinguishable from a confirmed-missing boundary, \
+         which silently stops the standing release PR being maintained.\n{}",
+        boundary.body
+    );
+}
+
+/// A missing tag must not be recovered by re-tagging something a human pulled.
+///
+/// Re-creating the ref under the App-installation token triggers `release.yml`,
+/// which builds, signs, uploads into the Release and undrafts it. Deleting the tag
+/// is also the normal way to abort a cargo-dist release, so an unconditional
+/// backstop republishes a release the team just pulled, with nobody in the loop.
+/// Two conditions guard the write, and both are load-bearing.
+#[test]
+fn the_backstop_refuses_to_republish_a_pulled_release() {
+    let wf = read(WORKFLOW);
+    let steps = workflow_steps(&wf);
+    let boundary = steps
+        .iter()
+        .find(|s| s.has("git/refs"))
+        .expect("release-please.yml no longer creates the tag ref");
+
+    assert!(
+        boundary.has(".draft"),
+        "the backstop must check the Release is still a DRAFT before re-creating its \
+         tag. A published Release whose tag has gone is a different anomaly, and \
+         re-announcing something already public is not a recovery.\n{}",
+        boundary.body
+    );
+    assert!(
+        boundary.has("do-not-retag"),
+        "the backstop must honour the `do-not-retag` marker. Without an opt-out, a \
+         draft left in place after a pulled release is re-tagged on the next push to \
+         main, which re-runs release.yml and republishes it."
     );
 }
 
