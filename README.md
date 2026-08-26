@@ -803,7 +803,7 @@ the crate's is simply a false statement about what the binary sends.
 
 [`endpoints.txt`](./endpoints.txt) lists the spec operations the CLI's commands
 actually exercise, and [`scripts/check_spec_drift.py`](./scripts/check_spec_drift.py)
-verifies — in the `spec-drift` CI workflow, on **every** pull request — four
+verifies — in the `spec-drift` CI workflow, on **every** pull request — five
 invariants against the spec:
 
 1. every endpoint in `endpoints.txt` exists in the pinned spec (no rename/typo/
@@ -811,15 +811,28 @@ invariants against the spec:
 2. that set **equals** the SDK methods the CLI actually calls (parsed from
    `src/main.rs` / `src/wsclient.rs` and mapped through `METHOD_OP`) — real
    equality in both directions, so an unlisted call and an uncalled listing both
-   fail — modulo two documented allowlists: `CODE_ONLY_OPS` (implemented but ahead
-   of the pinned spec) and `NON_REST_TARGETS` (reached without a named REST call,
-   i.e. the WebSocket upgrade);
-3. neither allowlist holds a stale exemption — an entry nothing calls, an entry
-   the pinned spec has since caught up with, or one whose `METHOD_OP` verb doesn't
-   match a path the spec does define;
+   fail — modulo one documented allowlist: `NON_REST_TARGETS`, for an endpoint
+   reached *without* a named REST call (the WebSocket upgrade). Nothing stands in
+   the other direction any more. `CODE_ONLY_OPS` used to, parking an op as
+   "implemented but ahead of the pinned spec"; it is now empty and **sealed**, so
+   an op the CLI calls that `endpoints.txt` does not carry fails outright
+   ([ENG-8616](https://linear.app/nexus-labs/issue/ENG-8616));
+3. no allowlist holds a stale exemption — an entry nothing calls exempts nothing,
+   and *any* `CODE_ONLY_OPS` entry fails whether or not the pinned spec defines
+   the op, because the old check passed precisely when the op was absent, which is
+   the case that shipped nine unrunnable commands;
 4. no source file outside the two scanned ones reaches the SDK — anywhere under
    `src/`, at any depth — so moving a command handler into a new module (including
-   a nested `src/commands/…`) can't silently under-count coverage.
+   a nested `src/commands/…`) can't silently under-count coverage;
+9. every `client.<method>()` call **has** a `METHOD_OP` row. The parser for 2-4 is
+   built *from* `METHOD_OP`'s keys, so it could only ever see calls the table
+   already knew about, and a call with no row was not merely uncounted but
+   unchecked. A second parser that doesn't consult the table is what makes the
+   difference visible. `sign_in` and `register_agent` had sat unmapped since the
+   check was written, which is why `POST /auth/login` and `POST /agents/register`
+   were reported as uncovered while `auth login` and `agents register` called them
+   ([ENG-12786](https://linear.app/nexus-labs/issue/ENG-12786)). 4 governs where
+   the parser looks; 9 governs what it recognises.
 
 Two more run in the same workflow, checking the CLI against the **crate** rather
 than the spec — read straight out of the published `.crate` tarball, so no token is
@@ -871,8 +884,8 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints a coverage number: the CLI currently exercises **38 of 68**
-spec operations (**55.9%**), measured against the pinned `v0.8.1` spec.
+The check also prints a coverage number: the CLI currently exercises **40 of 68**
+spec operations (**58.8%**), measured against the pinned `v0.8.1` spec.
 
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two
@@ -881,8 +894,8 @@ per operation. Counting both put every mount in the denominator while the numera
 could only ever hold one of each, so a surface covering everything perfectly still
 scored well under 100% and the number could never read full. That is
 [ENG-10035](https://linear.app/nexus-labs/issue/ENG-10035); the twins are now
-collapsed. At `v0.8.1` the literal count was `38 of 101 (37.6%)` against the same
-38 commands.
+collapsed. At `v0.8.1` the literal count was `40 of 101 (39.6%)` against the same
+40 commands.
 
 The remainder are genuinely untargeted operations, not bookkeeping — the admin,
 stats, bridge and funding surfaces, `orders/preview`, `orders/history`,

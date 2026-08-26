@@ -42,9 +42,14 @@
 # file and the drift check are the spec-coverage bookkeeping that goes with it.
 #
 # Commands that DON'T appear here, by design: `setup` and `completions` are
-# local-only (no API call); the wallet-auth `auth login` / `agents register`
-# flows are unauthenticated wallet-signed requests with no `/api/v1` variant and
-# are covered by the SDK's own coverage file, not this one.
+# local-only (no API call).
+#
+# `auth login` and `agents register` used to be listed here as a third exclusion,
+# on the grounds that a wallet-signed request was "covered by the SDK's own
+# coverage file, not this one". That was never true — they are ordinary spec
+# operations the CLI calls — and because their SDK methods had no METHOD_OP row,
+# nothing could contradict it. They are listed below, and invariant 9 now fails a
+# call the mapping does not carry (ENG-12786).
 
 # ── public market data ──
 # Migrated to the /api/v1 direct-indexer surface:
@@ -81,6 +86,11 @@ GET /agents
 # variant — stay on the gateway:
 GET /markets/{market_id}/adl-events
 GET /account/{address}/adl-history
+
+# ── wallet-signed auth (unauthenticated; signature in the body) ──
+# No /api/v1 variant — stay on the gateway:
+POST /auth/login
+POST /agents/register
 
 # ── trading & account mutations ──
 # Migrated to /api/v1:

@@ -10,15 +10,17 @@ over the SDK's `Client`, so it instead calls *named* SDK methods
 the CLI's targeted op set from those `client.<method>(` calls and map each method
 to its spec operation via the METHOD_OP table below.
 
-Five invariants are enforced here: 1-4 against the spec, and 7 against the
-README's own coverage sentence. The numbering is fleet-wide, not per-file — 5, 6
-and 8 belong to `check_sdk_parity.py`, which owns the crate side — so a number
-means the same thing in the README, in CI logs and in both checkers.
+Six invariants are enforced here: 1-4 and 9 against the spec and the CLI's own
+source, and 7 against the README's own coverage sentence. The numbering is
+fleet-wide, not per-file — 5, 6 and 8 belong to `check_sdk_parity.py`, which owns
+the crate side — so a number means the same thing in the README, in CI logs and in
+both checkers.
 
-1 and 2 are the contract; 3 and 4 exist because both of them can be silently
-defeated — an allowlist entry that stops being earned, or a command handler in a
-file the parser never reads — and a defeated check still prints OK.
-`scripts/test_check_spec_drift.py` defeats each one and asserts it goes red.
+1 and 2 are the contract; 3, 4 and 9 exist because it can be silently defeated —
+an allowlist entry that stops being earned, a command handler in a file the parser
+never reads, or a call the parser cannot recognise — and a defeated check still
+prints OK. `scripts/test_check_spec_drift.py` defeats each one and asserts it goes
+red.
 
 1. endpoints.txt <-> spec
    Every endpoint the CLI targets (endpoints.txt) must exist in the pinned
@@ -74,6 +76,27 @@ file the parser never reads — and a defeated check still prints OK.
    under src/, at any depth. The parser only reads the listed files, so moving a
    command handler into a new module would otherwise silently under-count the CLI's
    targeted ops and read as green. Fail instead, and name the file to add.
+
+9. METHOD_OP completeness — the parser must not generate its own blind spot
+   Every `client.<method>()` call in CLI_SOURCES must have a METHOD_OP row.
+
+   `_CALL_RE` is BUILT FROM METHOD_OP's own keys, so the parser can only see calls
+   the table already knows about: an unmapped call matches nothing, contributes
+   nothing to `called_ops`, and every invariant keyed on that set stays green. The
+   table under validation was also generating its own validator.
+
+   Not hypothetical. `sign_in` and `register_agent` had no row, so
+   `POST /auth/login` and `POST /agents/register` — called by `auth login` and
+   `agents register`, and present in the pinned spec since long before it was
+   pinned — were absent from endpoints.txt and printed in the `Not covered by the
+   CLI` list on every run for the whole life of this check (ENG-12786). The
+   comment that explained them away named ENG-4046 as "a separate in-flight PR";
+   it had merged one PR before this script was written.
+
+   Invariant 4 governs WHERE the parser looks; this governs WHAT it recognises.
+   Note the direction — an unmapped METHOD is fine (the withdrawn margin-mode
+   setter is deliberately unmapped, and no command calls it), an unmapped CALL is
+   not. This is a check on the call sites, not on the SDK's surface.
 
 7. The README's coverage sentence is still true
    The ratio is printed by this script and *committed* in README.md, and for two
@@ -170,6 +193,12 @@ METHOD_OP = {
     # here, which hid a covered operation behind CODE_ONLY_OPS — see ENG-7962 and
     # invariant 3.
     "amend_order": ("PATCH", "/orders/{order_id}"),
+    # wallet-signed auth. Unauthenticated signed requests rather than HMAC ones,
+    # which is why they were once described as outside this table's scope — but
+    # they are ordinary spec operations the CLI calls, and leaving them unmapped
+    # made them invisible to every invariant here (ENG-12786, invariant 9).
+    "sign_in": ("POST", "/auth/login"),  # no /api/v1 variant yet
+    "register_agent": ("POST", "/agents/register"),  # no /api/v1 variant yet
     # websocket
     "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # NOTE: ten SDK methods are deliberately unmapped, because no command calls
@@ -233,8 +262,6 @@ NON_REST_TARGETS = {
 
 # Spec operations that exist but the CLI deliberately does not target. Documented
 # here so the exclusion is intentional, not an oversight:
-#   POST /auth/login, POST /agents/register — wallet-signed auth flows owned by a
-#     separate in-flight PR (ENG-4046); their endpoints.txt lines land with it.
 #   PUT/GET/DELETE /admin/tiers* — admin-only tier management; out of CLI scope.
 #   POST /ws-tokens — deprecated; superseded by POST /ws/token (which we use).
 #   GET  /stream — deprecated SSE stream; superseded by the /ws upgrade.
@@ -376,6 +403,36 @@ _CALL_RE = re.compile(
     r"\.(" + "|".join(sorted(METHOD_OP, key=len, reverse=True)) + r")\s*\("
 )
 
+# Invariant 9's parser, and deliberately NOT built from METHOD_OP — that is the
+# entire point. `_CALL_RE` above can only match methods the table already lists,
+# so it is structurally unable to report a call the table is missing; a second
+# regex that does not consult the table is the only way to see one.
+#
+# Anchored on the receiver instead of the method name, since the method name is
+# exactly what is unknown here. `\w*client` covers the two bindings that exist
+# (`client` in main.rs, `ws_client` in wsclient.rs) plus a field access
+# (`self.client`), and rustfmt's habit of breaking the receiver onto its own line
+# is why the separator is `\s*` rather than nothing.
+#
+# The limit, stated rather than papered over: a receiver whose name does not
+# contain "client" (`c.clone().sign_in()`) is not seen. That is under-detection of
+# the same kind the check has today, not a new hole, and no such binding exists in
+# either source. `_CALL_RE` stays receiver-agnostic and keeps counting ops
+# regardless of the binding — the two regexes answer different questions.
+_CLIENT_CALL_RE = re.compile(r"\b\w*client\s*\.\s*([A-Za-z_]\w*)\s*\(")
+
+# Methods on the SDK client that are NOT REST operations, so invariant 9 must not
+# demand a METHOD_OP row for them. One entry, and it is earned: `connect` opens the
+# WebSocket upgrade, which endpoints.txt reaches through NON_REST_TARGETS
+# (`GET /ws`) precisely because there is no named REST method behind it.
+#
+# Kept honest the way NON_REST_TARGETS is (invariant 3) — an entry nothing calls is
+# stale and fails, so this cannot quietly become a parking space for a method
+# someone did not want to map. It is the only allowlist here that still GRANTS
+# anything: CODE_ONLY_OPS is sealed empty (ENG-8616), so its rule is emptiness
+# rather than staleness, and re-opening it is a reviewed change to this file.
+NON_OP_CLIENT_METHODS = {"connect"}
+
 
 def called_ops(sources=CLI_SOURCES):
     """Derive the set of (METHOD, normalized_path) the CLI targets from the
@@ -399,6 +456,74 @@ def called_ops(sources=CLI_SOURCES):
             "pattern may have changed — update METHOD_OP / the parser."
         )
     return ops, seen_methods
+
+
+def client_calls(sources=CLI_SOURCES):
+    """Every `<...>client.<method>(` call in `sources`, as {method: [file, ...]}.
+
+    Independent of METHOD_OP by construction — see `_CLIENT_CALL_RE`."""
+    found = {}
+    for path in sources:
+        try:
+            with open(path) as f:
+                src = f.read()
+        except OSError as e:
+            sys.exit(f"ERROR: cannot read CLI source {path!r}: {e}")
+        for m in _CLIENT_CALL_RE.finditer(src):
+            found.setdefault(m.group(1), set()).add(os.path.relpath(path, REPO))
+    return {k: sorted(v) for k, v in found.items()}
+
+
+def check_method_op_complete(sources=None):
+    """Invariant 9: every SDK method the CLI calls has a METHOD_OP row.
+
+    Returns the number of errors printed."""
+    calls = client_calls(sources if sources is not None else CLI_SOURCES)
+    if not calls:
+        sys.exit(
+            "ERROR: parsed zero `client.<method>()` calls from the CLI sources; the "
+            "call pattern or the client binding may have changed — update "
+            "_CLIENT_CALL_RE."
+        )
+
+    errors = 0
+
+    unmapped = sorted(
+        (m, files) for m, files in calls.items()
+        if m not in METHOD_OP and m not in NON_OP_CLIENT_METHODS
+    )
+    if unmapped:
+        errors += len(unmapped)
+        print(
+            f"\nERROR: {len(unmapped)} SDK method(s) the CLI calls have no METHOD_OP "
+            f"row, so the drift parser cannot see them. Every invariant here is "
+            f"computed from the calls it recognises, which means an unmapped call is "
+            f"not merely uncounted — it is unchecked:"
+        )
+        for method, files in unmapped:
+            print(f"  - {method}  ({', '.join(files)})")
+        print(
+            "  Add a METHOD_OP row naming the spec operation it issues (and the "
+            "matching endpoints.txt line), or, if it issues no REST request, add it "
+            "to NON_OP_CLIENT_METHODS saying what it does instead."
+        )
+
+    stale = sorted(NON_OP_CLIENT_METHODS - set(calls))
+    if stale:
+        errors += len(stale)
+        print(
+            f"\nERROR: {len(stale)} NON_OP_CLIENT_METHODS entr(ies) are not called by "
+            f"any command — exempting a call that is not there:"
+        )
+        for method in stale:
+            print(f"  - {method}")
+
+    if not errors:
+        print(
+            f"OK: all {len(calls)} SDK method(s) the CLI calls are mapped in "
+            f"METHOD_OP ({len(NON_OP_CLIENT_METHODS)} non-REST, exempted)."
+        )
+    return errors
 
 
 def _walk_error(err):
@@ -437,9 +562,10 @@ def unscanned_sources(src_dir=SRC_DIR, sources=CLI_SOURCES):
 
 
 def check_code_vs_targets(targeted, available, sources=None, src_dir=None):
-    """Invariants 2-4: called SDK-method ops == endpoints.txt (modulo the two
-    documented allowlists), the allowlists are still earned, and no unscanned
-    source file reaches the API. Returns the number of errors printed.
+    """Invariants 2-4: called SDK-method ops == endpoints.txt (modulo the one
+    documented allowlist, NON_REST_TARGETS — CODE_ONLY_OPS is sealed empty and
+    suppresses nothing), that allowlist is still earned, and no unscanned source
+    file reaches the API. Returns the number of errors printed.
 
     `sources` / `src_dir` default to the real CLI_SOURCES / SRC_DIR; the self-test
     overrides them with synthetic Rust so each invariant can be defeated in
@@ -896,6 +1022,12 @@ def main():
     # entry fails. This replaces the ENG-7927 attribution rule, which let an
     # attributed phantom op ship.
     failures += check_allowlist_is_sealed()
+    # Invariant 9 (ENG-12786): every `client.<method>()` call is mapped, so the
+    # parser above cannot be blind to a command it has no row for. Runs after the
+    # checks above deliberately — those report what the mapping SAYS, this reports
+    # what it is MISSING, and the second is the more useful last word when both
+    # fire.
+    failures += check_method_op_complete()
     # Invariant 7: the README's committed coverage sentence is still true.
     #
     # Skipped when invariant 1 already failed, because then it cannot say anything
