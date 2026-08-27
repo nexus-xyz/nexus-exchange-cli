@@ -490,10 +490,21 @@ class TestRepairMode(unittest.TestCase):
     def test_write_cannot_do_this_which_is_why_repair_exists(self):
         """The regression pin. If `--write` ever grows a repair path this test should
         be revisited deliberately — but until then, naming it as the remedy sends
-        someone to a command that prints "up to date" and exits."""
+        someone to a command that prints "up to date" and exits.
+
+        `--latest` is the version the REAL tree resolves, read here rather than
+        written down. This is the one test in the class that drives `sync.main()`,
+        which reads `Cargo.toml`/`Cargo.lock` off disk instead of the temp tree, so a
+        literal here means "up to date" only until the next crate release: with the
+        tree ahead of a hardcoded latest, `main` takes the "AHEAD; nothing to sync"
+        branch instead and the assertion fails for a reason that has nothing to do
+        with what the test is pinning. Derived, it reproduces `latest == locked` at
+        every future version.
+        """
+        locked = sdk_crate.locked_version()
         self._write(self.CRATE_TAG, "0.9.0")
         argv = sys.argv
-        sys.argv = ["sync_sdk_version.py", "--write", "--latest", self.LOCKED]
+        sys.argv = ["sync_sdk_version.py", "--write", "--latest", locked]
         self.addCleanup(lambda: setattr(sys, "argv", argv))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

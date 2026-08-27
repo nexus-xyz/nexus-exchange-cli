@@ -17,12 +17,12 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use nexus_exchange::auth::AgentRegistration;
-use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest, TransferRequest};
+use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest};
 use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
     AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
-    OrderCommand, OutputFormat, SubAccountsCommand, Target, TransfersCommand,
+    OrderCommand, OutputFormat, Target,
 };
 use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
@@ -247,25 +247,12 @@ async fn main() -> Result<()> {
             });
         }
 
-        Command::FundingPayments { limit } => {
-            require_authenticated(authenticated, "funding-payments")?;
-            let mut payments = client
-                .fetch_funding_payments(None)
-                .await
-                .context("failed to fetch funding payments")?;
-            // The SDK returns the full set; honor the CLI's `--limit` client-side.
-            payments.truncate(limit as usize);
-            emit(format, output::funding_payments(&payments), || {
-                output::funding_payments_json(&payments)
-            });
-        }
-
         // ── trading ──
         Command::Order { action } => {
             handle_order(&client, authenticated, action, format, &target, &file).await?
         }
 
-        // ── account / keys / agents / transfers / sub-accounts ──
+        // ── account / keys / agents ──
         Command::Account { action } => {
             handle_account(&client, authenticated, action, format, &target).await?
         }
@@ -273,12 +260,6 @@ async fn main() -> Result<()> {
         Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
         Command::Agents { action } => {
             handle_agents(&client, authenticated, action, format, &target).await?
-        }
-        Command::Transfers { action } => {
-            handle_transfers(&client, authenticated, action, format).await?
-        }
-        Command::SubAccounts { action } => {
-            handle_sub_accounts(&client, authenticated, action, format).await?
         }
 
         // ── websocket ──
@@ -512,71 +493,6 @@ async fn handle_order(
             });
         }
 
-        OrderCommand::GetByClientId { client_order_id } => {
-            require_authenticated(authenticated, "order get-by-client-id")?;
-            let order = client
-                .fetch_order_by_client_id(&client_order_id)
-                .await
-                .with_context(|| {
-                    format!("failed to fetch order with client id {client_order_id}")
-                })?;
-            emit(format, output::order_detail(&order), || {
-                output::order_detail_json(&order)
-            });
-        }
-
-        OrderCommand::CancelByClientId {
-            client_order_id,
-            yes,
-        } => {
-            require_authenticated(authenticated, "order cancel-by-client-id")?;
-            if !confirm(
-                &format!("Cancel order with client id {client_order_id}"),
-                yes,
-            )? {
-                eprintln!("aborted.");
-                return Ok(());
-            }
-            let value = client
-                .cancel_order_by_client_id(&client_order_id)
-                .await
-                .with_context(|| {
-                    format!("failed to cancel order with client id {client_order_id}")
-                })?;
-            emit(
-                format,
-                output::cancel(
-                    &value,
-                    &format!("cancelled order with client id {client_order_id}."),
-                ),
-                || serde_json::to_string_pretty(&value).unwrap_or_default(),
-            );
-        }
-
-        OrderCommand::CancelBatch { order_ids, yes } => {
-            require_authenticated(authenticated, "order cancel-batch")?;
-            if !confirm(
-                &format!("Cancel a batch of {} order(s)", order_ids.len()),
-                yes,
-            )? {
-                eprintln!("aborted.");
-                return Ok(());
-            }
-            let ids: Vec<&str> = order_ids.iter().map(String::as_str).collect();
-            let value = client
-                .cancel_orders(&ids)
-                .await
-                .context("failed to cancel order batch")?;
-            emit(
-                format,
-                output::cancel(
-                    &value,
-                    &format!("submitted cancel for {} order(s).", order_ids.len()),
-                ),
-                || serde_json::to_string_pretty(&value).unwrap_or_default(),
-            );
-        }
-
         OrderCommand::Amend {
             order_id,
             market,
@@ -744,19 +660,6 @@ async fn handle_account(
                 .context("failed to fetch rate-limit status")?;
             emit(format, output::rate_limit(&status), || {
                 output::rate_limit_json(&status)
-            });
-        }
-        AccountCommand::Leverage {
-            market_id,
-            leverage,
-        } => {
-            require_authenticated(authenticated, "account leverage")?;
-            let result = client
-                .set_leverage(&market_id, leverage)
-                .await
-                .with_context(|| format!("failed to set leverage for {market_id}"))?;
-            emit(format, output::leverage(&result), || {
-                output::leverage_json(&result)
             });
         }
         AccountCommand::AdlHistory { address, limit } => {
@@ -973,85 +876,6 @@ async fn handle_agents(
                 output::cancel(&value, &format!("revoked agent {address}.")),
                 || serde_json::to_string_pretty(&value).unwrap_or_default(),
             );
-        }
-    }
-    Ok(())
-}
-
-/// Handle the `nexus transfers` subcommands.
-async fn handle_transfers(
-    client: &Client,
-    authenticated: bool,
-    action: TransfersCommand,
-    format: OutputFormat,
-) -> Result<()> {
-    match action {
-        TransfersCommand::List => {
-            require_authenticated(authenticated, "transfers list")?;
-            let transfers = client
-                .fetch_transfers()
-                .await
-                .context("failed to fetch transfers")?;
-            emit(format, output::transfers(&transfers), || {
-                output::transfers_json(&transfers)
-            });
-        }
-        TransfersCommand::Create {
-            from,
-            to,
-            amount,
-            yes,
-        } => {
-            require_authenticated(authenticated, "transfers create")?;
-            let amount = parse_amount("amount", &amount)?;
-            if !confirm(&format!("Transfer {amount} from {from} to {to}"), yes)? {
-                eprintln!("aborted.");
-                return Ok(());
-            }
-            let request = TransferRequest::new(from, to, amount);
-            let transfer = client
-                .create_transfer(&request)
-                .await
-                .context("failed to create transfer")?;
-            emit(format, output::transfer(&transfer), || {
-                output::transfer_json(&transfer)
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Handle the `nexus sub-accounts` subcommands.
-async fn handle_sub_accounts(
-    client: &Client,
-    authenticated: bool,
-    action: SubAccountsCommand,
-    format: OutputFormat,
-) -> Result<()> {
-    match action {
-        SubAccountsCommand::List => {
-            require_authenticated(authenticated, "sub-accounts list")?;
-            let accounts = client
-                .fetch_sub_accounts()
-                .await
-                .context("failed to fetch sub-accounts")?;
-            emit(format, output::sub_accounts(&accounts), || {
-                output::sub_accounts_json(&accounts)
-            });
-        }
-        SubAccountsCommand::Create { label, yes } => {
-            require_authenticated(authenticated, "sub-accounts create")?;
-            if !confirm(&format!("Create sub-account {label:?}"), yes)? {
-                eprintln!("aborted.");
-                return Ok(());
-            }
-            let account = client
-                .create_sub_account(&label)
-                .await
-                .context("failed to create sub-account")?;
-            emit(format, output::sub_account(&account), || {
-                output::sub_account_json(&account)
-            });
         }
     }
     Ok(())

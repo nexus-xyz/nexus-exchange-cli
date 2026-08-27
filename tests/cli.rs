@@ -196,6 +196,89 @@ fn withdrawn_margin_mode_command_is_rejected() {
     );
 }
 
+/// The nine phantom commands are withdrawn (ENG-12369, under the fleet policy in
+/// ENG-8616). Each targeted an operation no published spec version defines, and
+/// each is checked here the way `margin-mode` is: with credentials supplied, so a
+/// pass proves rejection at argument parsing rather than a stop at the auth gate,
+/// and with the arguments the command used to accept so clap cannot be quietly
+/// taking them as positionals for something else.
+///
+/// This is the revert-with-the-test-kept pin. Re-adding any of these commands
+/// turns this test red on purpose. They come back when a PUBLISHED spec version
+/// defines the operation — implemented against that version, listed in
+/// endpoints.txt, and covered rather than exempted.
+#[test]
+fn withdrawn_phantom_commands_are_rejected() {
+    let cases: &[(&[&str], &str)] = &[
+        // POST /account/leverage — in no spec version; the venue serves
+        // POST /leverage, so this path routed nowhere (ENG-7318).
+        (&["account", "leverage", "BTC-USDX-PERP", "10"], "leverage"),
+        // GET /funding-payments — in no spec version (ENG-3817).
+        (&["funding-payments"], "funding-payments"),
+        // /transfers, /sub-accounts — 404 live where documented routes 401, and in
+        // no spec version (ENG-7800, ENG-8123).
+        (&["transfers", "list"], "transfers"),
+        (
+            &[
+                "transfers",
+                "create",
+                "--from",
+                "a",
+                "--to",
+                "b",
+                "--amount",
+                "5",
+            ],
+            "transfers",
+        ),
+        (&["sub-accounts", "list"], "sub-accounts"),
+        (&["sub-accounts", "create", "desk-1"], "sub-accounts"),
+        // The ENG-5487 three — added on an "ahead of spec" claim that was never
+        // true for any of them.
+        (
+            &["order", "cancel-batch", "o1", "o2", "--yes"],
+            "cancel-batch",
+        ),
+        (
+            &["order", "get-by-client-id", "ladder-1"],
+            "get-by-client-id",
+        ),
+        (
+            &["order", "cancel-by-client-id", "ladder-1", "--yes"],
+            "cancel-by-client-id",
+        ),
+    ];
+    for (args, name) in cases {
+        let mut cmd = bin();
+        cmd.args([
+            "--api-key",
+            "k",
+            "--api-secret",
+            "s",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ]);
+        cmd.args(*args);
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`{args:?}` should be a clap usage error, got stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("unrecognized subcommand") || stderr.contains(name),
+            "`{args:?}` should name the unrecognized subcommand, got: {stderr}"
+        );
+        // Nothing may reach the network: the whole point is that these cannot
+        // succeed, so a dispatch attempt is the bug, not the error message.
+        assert!(
+            !stderr.contains("failed to"),
+            "`{args:?}` must not dispatch a request, got: {stderr}"
+        );
+    }
+}
+
 /// `account help` must not advertise the withdrawn command, while still listing
 /// the account commands that do work.
 #[test]
@@ -203,13 +286,21 @@ fn account_help_omits_margin_mode() {
     let out = run(&["account", "--help"]);
     assert_eq!(out.code, Some(0));
     assert!(
-        out.stdout.contains("leverage") && out.stdout.contains("rate-limit"),
+        out.stdout.contains("deposit") && out.stdout.contains("rate-limit"),
         "sanity: working account commands should still be listed: {}",
         out.stdout
     );
     assert!(
         !out.stdout.contains("margin-mode"),
         "help must not offer the withdrawn margin-mode command: {}",
+        out.stdout
+    );
+    // `leverage` was withdrawn alongside it in ENG-12369: POST /account/leverage
+    // is in no spec version and routes nowhere (ENG-7318 documents the served
+    // POST /leverage). Same rule, same assertion.
+    assert!(
+        !out.stdout.contains("leverage"),
+        "help must not offer the withdrawn leverage command: {}",
         out.stdout
     );
 }
@@ -499,10 +590,6 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
             ],
             "failed to fetch ADL history",
         ),
-        (
-            &["order", "get-by-client-id", "ladder-1"],
-            "failed to fetch order with client id",
-        ),
     ];
     for (args, want) in cases {
         let mut cmd = bin();
@@ -534,25 +621,16 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
     }
 }
 
-/// The cancel variants (`--market` flatten, batch by ids, by client id), given
-/// credentials and `--yes`, must route through the SDK to a network attempt —
-/// proving the dispatch and confirmation wiring, without a live server.
+/// The `--market` flatten, given credentials and `--yes`, must route through the
+/// SDK to a network attempt — proving the dispatch and confirmation wiring,
+/// without a live server. The batch and by-client-id variants were withdrawn in
+/// ENG-12369; `phantom_order_subcommands_are_withdrawn` pins their absence.
 #[test]
 fn cancel_variants_route_to_the_sdk_when_credentialed() {
-    let cases: &[(&[&str], &str)] = &[
-        (
-            &["order", "cancel", "--market", "BTC-USDX-PERP", "--yes"],
-            "failed to cancel orders in BTC-USDX-PERP",
-        ),
-        (
-            &["order", "cancel-batch", "o1", "o2", "--yes"],
-            "failed to cancel order batch",
-        ),
-        (
-            &["order", "cancel-by-client-id", "ladder-1", "--yes"],
-            "failed to cancel order with client id",
-        ),
-    ];
+    let cases: &[(&[&str], &str)] = &[(
+        &["order", "cancel", "--market", "BTC-USDX-PERP", "--yes"],
+        "failed to cancel orders in BTC-USDX-PERP",
+    )];
     for (args, want) in cases {
         let mut cmd = bin();
         cmd.args([
@@ -585,8 +663,6 @@ fn new_authenticated_commands_are_gated_without_credentials() {
     for args in [
         ["market", "adl-events", "BTC-USDX-PERP"].as_slice(),
         ["account", "adl-history", "0xabc"].as_slice(),
-        ["order", "get-by-client-id", "ladder-1"].as_slice(),
-        ["order", "cancel-batch", "o1"].as_slice(),
     ] {
         let out = run(args);
         assert_ne!(out.code, Some(0), "`{args:?}` should be refused");

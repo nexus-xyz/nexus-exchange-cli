@@ -296,21 +296,16 @@ nexus positions                     # open positions, with per-position risk det
 nexus fills --limit 50              # recent executions (server-side page, max 1000)
 nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
-nexus funding-payments --limit 50   # funding booked against the account
 nexus withdrawals                   # withdrawal history
 
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
   --price 84000 --quantity 0.01 --tif GTC
 # By-id order commands are routed per market, so they require --market.
-# (By-client-id commands are account-scoped and do not.)
 nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
-nexus order get-by-client-id <CLIENT_ORDER_ID>   # …or by your own id
 nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
-nexus order cancel-by-client-id <CLIENT_ORDER_ID>
-nexus order cancel-batch <ORDER_ID> <ORDER_ID>   # several ids, one request
 nexus order cancel --market BTC-USDX-PERP        # flatten one market
 nexus order cancel --all
 
@@ -322,27 +317,29 @@ nexus account portfolio-history --window day     # day | week | month | all
 nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
-nexus account leverage BTC-USDX-PERP 10
 nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
 # Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
 # withdrawn (ENG-7740): no endpoint accepts a margin-mode change, so the command
 # could only ever fail. Tracking: ENG-7614.
+# Leverage is NOT settable either. `nexus account leverage` was withdrawn in
+# ENG-12369: it sent POST /account/leverage, which no published spec version
+# defines and nothing routes. Tracking: ENG-7318.
 
 # Wallet-signed auth (EVM key; see Credentials below)
 nexus auth login                    # EIP-191 sign-in; prompts for the key,
                                     # stores the session token (mode 0600)
 nexus agents register --agent 0x<AGENT_ADDR>   # EIP-712; prompts for the key
 
-# API keys, agents, transfers, sub-accounts
+# API keys and agents
 nexus keys list
 nexus keys create                   # secret is shown ONCE — store it now
 nexus keys delete <KEY_ID>
 nexus agents list
 nexus agents revoke <AGENT_ADDRESS>
-nexus transfers list
-nexus transfers create --from <ACCT> --to <SUBACCT> --amount 100
-nexus sub-accounts list
-nexus sub-accounts create "trading-bot-1"
+# Collateral transfers and sub-accounts are NOT available. `nexus transfers` and
+# `nexus sub-accounts` were withdrawn in ENG-12369 (closing ENG-8123): both route
+# groups 404 against the live venue where documented routes return 401, and no
+# spec version defines them. Tracking: ENG-7800.
 
 # Live streaming over WebSocket (Ctrl-C to stop)
 nexus ws trades --market BTC-USDX-PERP      # public channels need --market
@@ -772,7 +769,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.9.1`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.10.0`**.
 
 <!-- api-version-sync:end -->
 

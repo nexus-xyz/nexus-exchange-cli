@@ -37,10 +37,12 @@ nexus fills --limit 50      # GET /fills
 nexus orders                # GET /orders
 nexus withdrawals           # GET /withdrawals
 
-# Funding booked against the account, collateral transfers, sub-accounts.
-nexus funding-payments --limit 50   # GET /funding-payments
-nexus transfers list                # GET /transfers
-nexus sub-accounts list             # GET /sub-accounts
+# There is no funding-payments, transfers or sub-accounts command. All three
+# were withdrawn in ENG-12369 (closing ENG-8123): GET /funding-payments is in no
+# spec version (ENG-3817), and /transfers and /sub-accounts have neither a
+# contract nor a served route — probed live, they 404 where documented routes
+# return 401 (ENG-7800). This file is meant to be pasted against a funded
+# account, so a line that cannot work does not belong in it.
 
 # ADL settlements that touched an account (as bankrupt target or closed
 # counterparty).   GET /account/{address}/adl-history
