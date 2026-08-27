@@ -10,9 +10,9 @@ is simply a false statement about runtime behaviour, and nothing was checking it
 
 Three invariants. 5 and 6 are against the *published* crate (read from its
 crates.io tarball, so it is the exact artifact cargo builds); 8 is against the
-README line that reports both. The numbering is fleet-wide, not per-file — 1-4 and
-7 belong to `check_spec_drift.py` — so a number means the same thing in the README,
-in CI logs and in both checkers.
+README line that reports both. The numbering is fleet-wide, not per-file — 1-4, 7
+and 9 belong to `check_spec_drift.py` — so a number means the same thing in the
+README, in CI logs and in both checkers.
 
 5. `.api-version` == the crate's `.api-version`
    The pin is a DERIVED value, not a choice. Advancing it without a crate release

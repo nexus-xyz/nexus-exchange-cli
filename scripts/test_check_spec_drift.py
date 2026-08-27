@@ -10,7 +10,7 @@ the same failure shape as the bug ENG-7962 found: `amend_order` was mapped to
 CODE_ONLY_OPS as "ahead of spec", and the check went green over an operation the
 spec had covered since v0.7.1. One test would have caught it; there wasn't one.
 
-The counterpart in nexus-exchange-rs is the same-named script. Each of the four
+The counterpart in nexus-exchange-rs is the same-named script. Each of the five
 invariants gets at least one test that defeats it and asserts a non-zero error
 count, plus regression tests pinning the ENG-7962 fix in the real repo files so
 the synthetic fixtures cannot pass while reality drifts out from under them.
@@ -422,6 +422,121 @@ class TestNormalizePath(unittest.TestCase):
         self.assertEqual(csd.normalize_path("/api/v1/tickers"), "/api/v1/tickers")
 
 
+class TestInvariant9MethodOpCompleteness(unittest.TestCase):
+    """Invariant 9 (ENG-12786): a `client.<method>()` call with no METHOD_OP row.
+
+    The bug being pinned is subtle enough to restate: `_CALL_RE` is built from
+    METHOD_OP's keys, so the invariant-2 parser CANNOT report a missing row — the
+    call simply does not match, and every downstream set is short one op while the
+    run stays green. So these tests defeat it the only way that means anything: a
+    file that calls a method the table does not carry, and an assertion that the
+    check goes red naming it.
+    """
+
+    def _sources(self, body, name="main.rs"):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, name)
+        with open(path, "w") as f:
+            f.write(body)
+        return [path]
+
+    def test_an_unmapped_call_fails(self):
+        srcs = self._sources("let x = client.brand_new_method(&req).await?;\n")
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 1)
+
+    def test_the_error_names_the_method_and_the_file(self):
+        """An error that does not say which call it means is a puzzle, not a check."""
+        srcs = self._sources("client.brand_new_method(&req).await?;\n", "handlers.rs")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), patched("NON_OP_CLIENT_METHODS", set()):
+            csd.check_method_op_complete(srcs)
+        out = buf.getvalue()
+        self.assertIn("brand_new_method", out)
+        self.assertIn("handlers.rs", out)
+        self.assertIn("METHOD_OP", out)
+
+    def test_a_fully_mapped_source_passes(self):
+        srcs = self._sources("let m = client.fetch_markets().await?;\n")
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 0)
+
+    def test_rustfmt_line_breaks_do_not_hide_a_call(self):
+        """rustfmt puts the receiver on its own line for a chained await, which is how
+        every real call site in this repo is written. A regex that only matched
+        `client.method(` on one line would see none of them."""
+        srcs = self._sources(
+            "let x = client\n    .brand_new_method(&req)\n    .await?;\n"
+        )
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 1)
+
+    def test_a_renamed_binding_is_still_seen(self):
+        """`ws_client` is the second real binding; a check anchored on the exact name
+        `client` would miss the file wsclient.rs entirely."""
+        srcs = self._sources("ws_client.brand_new_method(&req).await?;\n")
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 1)
+
+    def test_a_non_rest_method_is_exempt(self):
+        srcs = self._sources("ws_client.connect(&url).await?;\n")
+        self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 0)
+
+    def test_a_non_rest_exemption_nothing_calls_is_stale(self):
+        """The exemption list is held to the same rule as the other two: an entry that
+        stops being earned is a silent hole, so it fails rather than lingering."""
+        srcs = self._sources("let m = client.fetch_markets().await?;\n")
+        with patched("NON_OP_CLIENT_METHODS", {"connect"}):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 1)
+
+    def test_ordinary_rust_method_calls_are_not_flagged(self):
+        """The receiver anchor is what keeps this from matching every `.iter()` in the
+        tree. Without it the check would be unusable and would be turned off."""
+        srcs = self._sources(
+            "let s = name.to_string();\n"
+            "for x in items.iter().map(|v| v.clone()) {}\n"
+            "let m = client.fetch_markets().await?;\n"
+        )
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(_quiet(csd.check_method_op_complete, srcs), 0)
+
+    def test_zero_parsed_calls_fails_closed(self):
+        """Same rule as the invariant-2 parser: if the binding is ever renamed
+        wholesale, abort loudly rather than report a clean bill of health over a file
+        this regex can no longer read."""
+        srcs = self._sources("fn main() {}\n")
+        with self.assertRaises(SystemExit):
+            _quiet(csd.check_method_op_complete, srcs)
+
+    def test_invariant_2_is_blind_to_what_invariant_9_catches(self):
+        """The case that makes 9 worth having, shown rather than asserted.
+
+        Once an endpoints.txt line exists, dropping its METHOD_OP row also fails
+        invariant 2 — so it is fair to ask what 9 adds. It adds the case that
+        actually happened: a command ships calling a method with NO row AND NO
+        endpoints.txt line. There is then nothing on either side of invariant 2's
+        equality to be unbalanced by, and it passes clean. That is the whole life of
+        `sign_in` and `register_agent`.
+
+        Same fixture, both checks, opposite verdicts."""
+        repo = SyntheticRepo(
+            self,
+            {"main.rs": "client.fetch_markets().await?;\n"
+                        "client.brand_new_method(&req).await?;\n"},
+            ["GET /markets"],
+        )
+        self.assertEqual(
+            repo.check(spec_of(MARKETS)), 0,
+            "invariant 2 cannot see the unmapped call — it is not in either set",
+        )
+        with patched("NON_OP_CLIENT_METHODS", set()):
+            self.assertEqual(
+                _quiet(csd.check_method_op_complete, repo.sources), 1,
+                "invariant 9 must catch it",
+            )
+
+
 class TestRealRepoState(unittest.TestCase):
     """Against the committed files, so the synthetic fixtures above cannot stay
     green while the real tree drifts."""
@@ -438,6 +553,24 @@ class TestRealRepoState(unittest.TestCase):
             f"METHOD_OP rows no CLI command calls: {unused}. Remove them, or add "
             f"the calling command.",
         )
+
+    def test_the_real_sources_are_fully_mapped(self):
+        """The invariant against the committed tree, not a fixture. This is the test
+        that was red before ENG-12786: `sign_in` and `register_agent` were called by
+        `auth login` and `agents register` with no METHOD_OP row."""
+        self.assertEqual(_quiet(csd.check_method_op_complete), 0)
+
+    def test_the_wallet_auth_ops_are_counted_not_invisible(self):
+        """Pins the two the missing rows hid. They are ordinary spec operations the
+        CLI calls; while they were unmapped, `POST /auth/login` was printed in the
+        `Not covered by the CLI` list on every run."""
+        for method, op in (
+            ("sign_in", ("POST", "/auth/login")),
+            ("register_agent", ("POST", "/agents/register")),
+        ):
+            with self.subTest(method=method):
+                self.assertEqual(csd.METHOD_OP.get(method), op)
+                self.assertIn(op, csd.load_targeted())
 
     def test_cli_sources_all_exist(self):
         for path in csd.CLI_SOURCES:

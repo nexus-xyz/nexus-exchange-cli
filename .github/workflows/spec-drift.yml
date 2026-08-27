@@ -4,7 +4,9 @@ name: Spec drift
 # still exist in the pinned OpenAPI spec (.api-version), that the commands and
 # endpoints.txt stay in sync (every entry is backed by a real `client.<method>()`
 # call, and vice versa, modulo the documented allowlists), that neither allowlist
-# is holding a stale exemption, and reports the CLI's API coverage % (for humans —
+# is holding a stale exemption, that every `client.<method>()` call the CLI makes
+# has a METHOD_OP row (so the parser cannot be blind to a call the table is missing
+# — ENG-12786), and reports the CLI's API coverage % (for humans —
 # the dashboard recomputes the ratio itself from endpoints.txt, it does not scrape
 # this run) while asserting the README's committed copy of it. Mirrors the same
 # workflow in the Rust SDK
@@ -71,7 +73,7 @@ jobs:
             -o openapi.pinned.json
 
       # Self-test BOTH checkers before trusting a green run from either: proves each
-      # of the eight invariants goes RED when defeated (ENG-7962). Hermetic — no
+      # of the nine invariants goes RED when defeated (ENG-7962). Hermetic — no
       # network, no pinned spec, no crates.io (the parity checks take the crate's
       # data as arguments; the tarball plumbing is covered with temp files). Runs
       # first so a broken checker fails with a clear message rather than a
