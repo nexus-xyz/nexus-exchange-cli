@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.4.0...v0.5.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** delete the phantom code-only ops, seal the allowlist (ENG-12369) ([#67](https://github.com/nexus-xyz/nexus-exchange-cli/issues/67))
+
+### Features
+
+* **cli:** delete the phantom code-only ops, seal the allowlist (ENG-12369) ([#67](https://github.com/nexus-xyz/nexus-exchange-cli/issues/67)) ([13930f1](https://github.com/nexus-xyz/nexus-exchange-cli/commit/13930f1919d37170f51fe78adfda487e43b83a33))
+
+
+### Bug Fixes
+
+* **drift:** count operations, not path-ops, in the coverage ratio (ENG-10035) ([#62](https://github.com/nexus-xyz/nexus-exchange-cli/issues/62)) ([7e56089](https://github.com/nexus-xyz/nexus-exchange-cli/commit/7e560894fd4466309c2fd42c5587ed3b50c65fe0))
+* **drift:** fail on an SDK call METHOD_OP has no row for (ENG-12786) ([#70](https://github.com/nexus-xyz/nexus-exchange-cli/issues/70)) ([1994fa7](https://github.com/nexus-xyz/nexus-exchange-cli/commit/1994fa7029f85d61b4f27550704d1ed4e12a70ea))
+* **release:** stop the once-per-release phantom release PR (ENG-3921) ([#64](https://github.com/nexus-xyz/nexus-exchange-cli/issues/64)) ([0a8b181](https://github.com/nexus-xyz/nexus-exchange-cli/commit/0a8b1817b0f614b8e13a2a2e208f45e23132cb31))
+
 ## [0.4.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.3.0...v0.4.0) (2026-08-18)
 
 
