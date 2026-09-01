@@ -17,12 +17,13 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use nexus_exchange::auth::AgentRegistration;
-use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest};
+use nexus_exchange::types::{AmendOrder, Decimal, MarginDirection, OrderRequest};
 use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
-    AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
-    OrderCommand, OutputFormat, Target,
+    AccountCommand, AgentsCommand, AuthCommand, BridgeCommand, CancelOnDisconnectCommand, Cli,
+    Command, DepositsCommand, KeysCommand, MarginCommand, MarketCommand, OrderCommand,
+    OutputFormat, Target,
 };
 use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
@@ -148,6 +149,48 @@ async fn main() -> Result<()> {
             emit(format, output::funding_rates(&samples), || {
                 output::funding_rates_json(&samples)
             });
+        }
+        Command::Stats => {
+            let snapshot = client
+                .fetch_stats()
+                .await
+                .context("failed to fetch stats")?;
+            emit(format, output::stats(&snapshot), || {
+                output::stats_json(&snapshot)
+            });
+        }
+        Command::StatsHistory => {
+            let samples = client
+                .fetch_stats_history()
+                .await
+                .context("failed to fetch stats history")?;
+            emit(format, output::stats_history(&samples), || {
+                output::stats_history_json(&samples)
+            });
+        }
+        Command::FundingSamples { market_id, limit } => {
+            let samples = client
+                .fetch_funding_premium_samples(&market_id, limit)
+                .await
+                .with_context(|| {
+                    format!("failed to fetch funding premium samples for {market_id}")
+                })?;
+            emit(format, output::funding_samples(&samples), || {
+                output::funding_samples_json(&samples)
+            });
+        }
+        Command::PositionsClosed { limit } => {
+            require_authenticated(authenticated, "positions-closed")?;
+            let positions = client
+                .fetch_closed_positions(limit)
+                .await
+                .context("failed to fetch closed positions")?;
+            emit(format, output::closed_positions(&positions), || {
+                output::closed_positions_json(&positions)
+            });
+        }
+        Command::Bridge { action } => {
+            run_bridge(action, &client, authenticated, format).await?;
         }
         Command::Health => {
             let health = client
@@ -325,6 +368,15 @@ async fn handle_market(
                 output::mark_price_json(&mark)
             });
         }
+        MarketCommand::RiskParams { market_id } => {
+            let params = client
+                .fetch_market_risk_params(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch risk params for {market_id}"))?;
+            emit(format, output::market_risk_params(&params), || {
+                output::market_risk_params_json(&params)
+            });
+        }
         MarketCommand::AdlEvents { market_id, limit } => {
             require_authenticated(authenticated, "market adl-events")?;
             let events = client
@@ -361,27 +413,15 @@ async fn handle_order(
             yes,
         } => {
             require_authenticated(authenticated, "order place")?;
-            let quantity = parse_amount("quantity", &quantity)?;
-
-            use cli::OrderTypeArg;
-            let mut request = match order_type {
-                OrderTypeArg::Limit => {
-                    let p = price
-                        .as_deref()
-                        .context("--price is required for a limit order")?;
-                    let price = parse_amount("price", p)?;
-                    OrderRequest::limit(market.clone(), side.into(), price, quantity, tif.into())
-                }
-                OrderTypeArg::Market => {
-                    if price.is_some() {
-                        eprintln!("note: --price is ignored for a market order");
-                    }
-                    OrderRequest::market(market.clone(), side.into(), quantity)
-                }
-            };
-            if reduce_only {
-                request.reduce_only = Some(true);
-            }
+            let request = build_order_request(
+                market.clone(),
+                side,
+                order_type,
+                price.as_deref(),
+                &quantity,
+                tif,
+                reduce_only,
+            )?;
 
             let summary = format!(
                 "Place {:?} {:?} order: {} {} @ {} (tif {:?}{})",
@@ -417,6 +457,47 @@ async fn handle_order(
             });
         }
 
+        OrderCommand::Preview {
+            market,
+            side,
+            order_type,
+            price,
+            quantity,
+            tif,
+            reduce_only,
+        } => {
+            require_authenticated(authenticated, "order preview")?;
+            let request = build_order_request(
+                market,
+                side,
+                order_type,
+                price.as_deref(),
+                &quantity,
+                tif,
+                reduce_only,
+            )?;
+            // No `acknowledge_real_funds` and no `confirm`: a preview places
+            // nothing and rests nothing on the book, so there is no irreversible
+            // action to gate. Prompting here would train the reflex that answers
+            // the real prompt on `order place` without reading it.
+            let preview = client
+                .preview_order(&request)
+                .await
+                .context("failed to preview order")?;
+            emit(format, output::order_preview(&preview), || {
+                output::order_preview_json(&preview)
+            });
+        }
+        OrderCommand::History { limit } => {
+            require_authenticated(authenticated, "order history")?;
+            let orders = client
+                .fetch_order_history(limit)
+                .await
+                .context("failed to fetch order history")?;
+            emit(format, output::order_history(&orders), || {
+                output::order_history_json(&orders)
+            });
+        }
         OrderCommand::Cancel {
             order_id,
             market,
@@ -652,6 +733,50 @@ async fn handle_account(
                 output::credit_json(&result)
             });
         }
+        AccountCommand::EquityHistory { limit } => {
+            require_authenticated(authenticated, "account equity-history")?;
+            let points = client
+                .fetch_equity_history(limit)
+                .await
+                .context("failed to fetch equity history")?;
+            emit(format, output::equity_history(&points), || {
+                output::equity_history_json(&points)
+            });
+        }
+        AccountCommand::Funding { limit } => {
+            require_authenticated(authenticated, "account funding")?;
+            let entries = client
+                .fetch_account_funding(limit)
+                .await
+                .context("failed to fetch account funding")?;
+            emit(format, output::account_funding(&entries), || {
+                output::account_funding_json(&entries)
+            });
+        }
+        AccountCommand::Faucet => {
+            // Same ordering as `account credit`, and for the same reason: "there
+            // is no faucet for real funds" holds whether or not credentials are
+            // configured, and it is the more useful of the two errors. Checking
+            // credentials first would send a mainnet user to fix the wrong thing.
+            guardrails::refuse_faucet_without_play_funds(target)?;
+            require_authenticated(authenticated, "account faucet")?;
+            let result = client
+                .claim_faucet()
+                .await
+                .context("failed to claim the faucet")?;
+            emit(format, output::faucet(&result), || {
+                output::faucet_json(&result)
+            });
+        }
+        AccountCommand::Deposits { action } => {
+            handle_deposits(client, authenticated, action, format).await?;
+        }
+        AccountCommand::Margin { action } => {
+            handle_margin(client, authenticated, action, format).await?;
+        }
+        AccountCommand::CancelOnDisconnect { action } => {
+            handle_cancel_on_disconnect(client, authenticated, action, format).await?;
+        }
         AccountCommand::RateLimit => {
             require_authenticated(authenticated, "account rate-limit")?;
             let status = client
@@ -876,6 +1001,258 @@ async fn handle_agents(
                 output::cancel(&value, &format!("revoked agent {address}.")),
                 || serde_json::to_string_pretty(&value).unwrap_or_default(),
             );
+        }
+    }
+    Ok(())
+}
+
+/// Build an [`OrderRequest`] from the shared `place`/`preview` flags.
+///
+/// Extracted so the two commands cannot drift: a preview that validated its
+/// arguments differently from the placement it is previewing would report on an
+/// order the user is not about to submit, which is worse than no preview.
+fn build_order_request(
+    market: String,
+    side: cli::SideArg,
+    order_type: cli::OrderTypeArg,
+    price: Option<&str>,
+    quantity: &str,
+    tif: cli::TifArg,
+    reduce_only: bool,
+) -> Result<OrderRequest> {
+    use cli::OrderTypeArg;
+    let quantity = parse_amount("quantity", quantity)?;
+    let mut request = match order_type {
+        OrderTypeArg::Limit => {
+            let p = price.context("--price is required for a limit order")?;
+            let price = parse_amount("price", p)?;
+            OrderRequest::limit(market, side.into(), price, quantity, tif.into())
+        }
+        OrderTypeArg::Market => {
+            if price.is_some() {
+                eprintln!("note: --price is ignored for a market order");
+            }
+            OrderRequest::market(market, side.into(), quantity)
+        }
+    };
+    if reduce_only {
+        request.reduce_only = Some(true);
+    }
+    Ok(request)
+}
+
+/// Handle `account deposits` (history, and the spec'd `/deposits` creation).
+async fn handle_deposits(
+    client: &Client,
+    authenticated: bool,
+    action: DepositsCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        DepositsCommand::List { limit } => {
+            require_authenticated(authenticated, "account deposits list")?;
+            let entries = client
+                .fetch_deposits(limit)
+                .await
+                .context("failed to fetch deposits")?;
+            emit(format, output::deposits(&entries), || {
+                output::deposits_json(&entries)
+            });
+        }
+        DepositsCommand::Create { amount, asset, yes } => {
+            require_authenticated(authenticated, "account deposits create")?;
+            let amount = parse_amount("amount", &amount)?;
+            let asset = match asset.as_deref() {
+                // An empty `--asset ""` would be rejected by the SDK, but only
+                // after the prompt; refuse it here so the user is not asked to
+                // confirm a request that cannot be sent.
+                Some(a) if a.trim().is_empty() => {
+                    anyhow::bail!("--asset must not be empty")
+                }
+                other => other,
+            };
+            let label = match asset {
+                Some(a) => format!("Deposit {amount} {a}"),
+                None => format!("Deposit {amount}"),
+            };
+            if !confirm(&label, yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let result = client
+                .create_deposit(amount, asset)
+                .await
+                .context("failed to create deposit")?;
+            emit(format, output::deposit_created(&result), || {
+                output::deposit_created_json(&result)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Handle `account margin add|remove` (`POST /account/margin`).
+///
+/// Both directions are confirmed. `remove` in particular moves collateral out of
+/// a live position and so *raises* its liquidation risk, which the prompt says
+/// out loud rather than leaving the user to infer from the direction word.
+async fn handle_margin(
+    client: &Client,
+    authenticated: bool,
+    action: MarginCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    let (market_id, amount, yes, adding) = match action {
+        MarginCommand::Add {
+            market_id,
+            amount,
+            yes,
+        } => (market_id, amount, yes, true),
+        MarginCommand::Remove {
+            market_id,
+            amount,
+            yes,
+        } => (market_id, amount, yes, false),
+    };
+    let what = if adding {
+        "account margin add"
+    } else {
+        "account margin remove"
+    };
+    require_authenticated(authenticated, what)?;
+    let amount = parse_amount("amount", &amount)?;
+    let prompt = if adding {
+        format!("Add {amount} margin to {market_id}")
+    } else {
+        format!("Remove {amount} margin from {market_id} (this RAISES its liquidation risk)")
+    };
+    if !confirm(&prompt, yes)? {
+        eprintln!("aborted.");
+        return Ok(());
+    }
+    // `adjust_margin` directly rather than the `add_margin` / `remove_margin`
+    // wrappers: the wrappers only fix `direction`, which the subcommand already
+    // decided, and routing every direction through one call keeps METHOD_OP at
+    // one row per operation instead of three rows two of which nothing calls.
+    let direction = if adding {
+        MarginDirection::Add
+    } else {
+        MarginDirection::Remove
+    };
+    let result = client
+        .adjust_margin(&market_id, direction, amount)
+        .await
+        .with_context(|| format!("failed to adjust margin on {market_id}"))?;
+    emit(format, output::margin_adjustment(&result), || {
+        output::margin_adjustment_json(&result)
+    });
+    Ok(())
+}
+
+/// Handle `account cancel-on-disconnect show|set`.
+async fn handle_cancel_on_disconnect(
+    client: &Client,
+    authenticated: bool,
+    action: CancelOnDisconnectCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        CancelOnDisconnectCommand::Show => {
+            require_authenticated(authenticated, "account cancel-on-disconnect show")?;
+            let status = client
+                .fetch_cancel_on_disconnect()
+                .await
+                .context("failed to fetch cancel-on-disconnect status")?;
+            emit(format, output::cancel_on_disconnect(&status), || {
+                output::cancel_on_disconnect_json(&status)
+            });
+        }
+        CancelOnDisconnectCommand::Set { enabled, yes } => {
+            require_authenticated(authenticated, "account cancel-on-disconnect set")?;
+            // Disabling is the dangerous direction — it removes a protection
+            // that is flattening orders today — so it is the one spelled out.
+            let prompt = if enabled {
+                "Enable cancel-on-disconnect".to_string()
+            } else {
+                "DISABLE cancel-on-disconnect (resting orders will survive a dropped connection)"
+                    .to_string()
+            };
+            if !confirm(&prompt, yes)? {
+                eprintln!("aborted.");
+                return Ok(());
+            }
+            let status = client
+                .set_cancel_on_disconnect(enabled)
+                .await
+                .context("failed to set cancel-on-disconnect")?;
+            emit(format, output::cancel_on_disconnect(&status), || {
+                output::cancel_on_disconnect_json(&status)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Handle the `bridge` subcommands. `assets` is public; the rest are
+/// account-scoped and need credentials.
+async fn run_bridge(
+    action: BridgeCommand,
+    client: &Client,
+    authenticated: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        BridgeCommand::Assets => {
+            let assets = client
+                .fetch_bridge_assets()
+                .await
+                .context("failed to fetch bridge assets")?;
+            emit(format, output::bridge_assets(&assets), || {
+                output::bridge_assets_json(&assets)
+            });
+        }
+        BridgeCommand::Addresses => {
+            require_authenticated(authenticated, "bridge addresses")?;
+            let addresses = client
+                .fetch_bridge_deposit_addresses()
+                .await
+                .context("failed to fetch bridge deposit addresses")?;
+            emit(format, output::bridge_addresses(&addresses), || {
+                output::bridge_addresses_json(&addresses)
+            });
+        }
+        BridgeCommand::NewAddress { chain } => {
+            require_authenticated(authenticated, "bridge new-address")?;
+            // Get-or-create and idempotent per (account, chain), so there is
+            // nothing to undo and no prompt: re-running returns the same address
+            // rather than minting a second one.
+            let address = client
+                .create_bridge_deposit_address(&chain)
+                .await
+                .with_context(|| format!("failed to get a deposit address on {chain}"))?;
+            emit(format, output::bridge_address(&address), || {
+                output::bridge_address_json(&address)
+            });
+        }
+        BridgeCommand::Deposits => {
+            require_authenticated(authenticated, "bridge deposits")?;
+            let deposits = client
+                .fetch_bridge_deposits()
+                .await
+                .context("failed to fetch bridge deposits")?;
+            emit(format, output::bridge_deposits(&deposits), || {
+                output::bridge_deposits_json(&deposits)
+            });
+        }
+        BridgeCommand::Deposit { id } => {
+            require_authenticated(authenticated, "bridge deposit")?;
+            let deposit = client
+                .fetch_bridge_deposit(&id)
+                .await
+                .with_context(|| format!("failed to fetch bridge deposit {id}"))?;
+            emit(format, output::bridge_deposit(&deposit), || {
+                output::bridge_deposit_json(&deposit)
+            });
         }
     }
     Ok(())

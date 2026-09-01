@@ -2,7 +2,11 @@
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use nexus_exchange::rest::{MAX_FILLS_LIMIT, MAX_PORTFOLIO_HISTORY_LIMIT};
+use nexus_exchange::rest::{
+    MAX_ACCOUNT_FUNDING_LIMIT, MAX_CLOSED_POSITIONS_LIMIT, MAX_DEPOSITS_LIMIT,
+    MAX_EQUITY_HISTORY_LIMIT, MAX_FILLS_LIMIT, MAX_FUNDING_SAMPLES_LIMIT, MAX_ORDER_HISTORY_LIMIT,
+    MAX_PORTFOLIO_HISTORY_LIMIT,
+};
 use nexus_exchange::types::{OrderType, PortfolioWindow, Side, TimeInForce};
 use nexus_exchange::{Config, CustomNetwork, Funds, Network, SigningDomain};
 use serde::{Deserialize, Serialize};
@@ -1350,6 +1354,36 @@ pub enum Command {
         action: AgentsCommand,
     },
 
+    /// Aggregate venue statistics: throughput, uptime, and unique-trader counts.
+    Stats,
+
+    /// Recent venue throughput samples (fills per bucket), oldest first.
+    StatsHistory,
+
+    /// Funding *premium* observations for a market — the samples taken between
+    /// settled funding windows. Use `funding-rates` for the settled windows.
+    FundingSamples {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Maximum number of samples to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_FUNDING_SAMPLES_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// List your closed positions with realized PnL, most recent first.
+    PositionsClosed {
+        /// Maximum number of positions to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_CLOSED_POSITIONS_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Cross-chain bridge: supported assets, deposit addresses, and tracked
+    /// deposits.
+    Bridge {
+        #[command(subcommand)]
+        action: BridgeCommand,
+    },
+
     // There are deliberately no `funding-payments`, `transfers` or `sub-accounts`
     // commands. `GET /funding-payments` is in no spec version (ENG-3817), and
     // `/transfers` and `/sub-accounts` have neither a contract nor a served route:
@@ -1398,6 +1432,13 @@ pub enum MarketCommand {
         market_id: String,
     },
 
+    /// Risk parameters for a market: max leverage and the initial/maintenance
+    /// margin rates the engine sizes and liquidates against.
+    RiskParams {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
     /// ADL settlement events for a market, most recent first. Unlike the other
     /// `market` reads, this endpoint is HMAC-gated server-side, so it requires
     /// credentials.
@@ -1438,6 +1479,43 @@ pub enum OrderCommand {
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Dry-run an order without placing it: margin required, projected equity,
+    /// liquidation price, leverage, expected fill VWAP and fees.
+    ///
+    /// Takes the same flags as `place`. Nothing is submitted and nothing rests
+    /// on the book, so there is no confirmation prompt.
+    Preview {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        #[arg(long)]
+        market: String,
+        /// Order side.
+        #[arg(long, value_enum)]
+        side: SideArg,
+        /// Order type.
+        #[arg(long = "type", value_enum, default_value_t = OrderTypeArg::Limit)]
+        order_type: OrderTypeArg,
+        /// Limit price (required for `--type limit`).
+        #[arg(long)]
+        price: Option<String>,
+        /// Order quantity (base units).
+        #[arg(long)]
+        quantity: String,
+        /// Time in force.
+        #[arg(long, value_enum, default_value_t = TifArg::Gtc)]
+        tif: TifArg,
+        /// Only reduce an existing position; never open or flip one.
+        #[arg(long)]
+        reduce_only: bool,
+    },
+
+    /// List your historical (terminal) orders, most recent first. Use `orders`
+    /// for the ones still open.
+    History {
+        /// Maximum number of orders to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_ORDER_HISTORY_LIMIT as i64))]
+        limit: Option<u32>,
     },
 
     /// Cancel a single order by id (requires `--market`), every open order in
@@ -1566,6 +1644,47 @@ pub enum AccountCommand {
         amount: Option<String>,
     },
 
+    /// Equity time series for the account, oldest first.
+    EquityHistory {
+        /// Maximum number of points to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_EQUITY_HISTORY_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Funding payments credited to or debited from the account, most recent
+    /// first. A `pay` direction is a debit; `receive` is a credit.
+    Funding {
+        /// Maximum number of entries to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_ACCOUNT_FUNDING_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Claim the testnet faucet for the account.
+    ///
+    /// Distinct from `account credit`: the faucet is a fixed server-side grant
+    /// on its own cooldown, while `credit` draws against a daily allowance you
+    /// can size with `--amount`.
+    Faucet,
+
+    /// Deposit history and spec'd deposit creation.
+    Deposits {
+        #[command(subcommand)]
+        action: DepositsCommand,
+    },
+
+    /// Add or remove isolated margin on an open position.
+    Margin {
+        #[command(subcommand)]
+        action: MarginCommand,
+    },
+
+    /// Read or set cancel-on-disconnect, which flattens resting orders if the
+    /// `/ws` connection drops and is not re-established in time.
+    CancelOnDisconnect {
+        #[command(subcommand)]
+        action: CancelOnDisconnectCommand,
+    },
+
     /// Show the caller's rate-limit status.
     RateLimit,
 
@@ -1607,6 +1726,107 @@ pub enum AuthCommand {
         /// and process list.
         #[arg(long, env = "NEXUS_PRIVATE_KEY", hide_env_values = true)]
         private_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DepositsCommand {
+    /// List the account's deposit history, most recent first.
+    List {
+        /// Maximum number of entries to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_DEPOSITS_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Credit collateral to the account over the spec'd `/deposits` route.
+    ///
+    /// Distinct from `account deposit`, which posts to the older
+    /// `/account/deposit`. This one returns the authoritative post-deposit
+    /// balance rather than an acknowledgement.
+    Create {
+        /// Amount to deposit.
+        amount: String,
+        /// Asset to deposit. Defaults to the server's choice (`USDX`) when omitted.
+        #[arg(long)]
+        asset: Option<String>,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarginCommand {
+    /// Add isolated margin to an open position, lowering its liquidation risk.
+    Add {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Amount of margin to add.
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Remove isolated margin from an open position, returning it to free
+    /// collateral. This RAISES the position's liquidation risk.
+    Remove {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Amount of margin to remove.
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CancelOnDisconnectCommand {
+    /// Show whether cancel-on-disconnect is enabled, whether it is active, and
+    /// the grace window.
+    Show,
+
+    /// Enable or disable cancel-on-disconnect.
+    ///
+    /// `active` may stay false even after enabling: the exchange can have the
+    /// feature switched off deployment-wide, and the response reports what
+    /// actually took effect rather than what was asked for.
+    Set {
+        /// `true` to enable, `false` to disable.
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BridgeCommand {
+    /// List supported bridge chains and their deposit/withdraw assets. Public.
+    Assets,
+
+    /// List the account's bridge deposit addresses.
+    Addresses,
+
+    /// Get or create the account's deposit address on a chain.
+    ///
+    /// Idempotent per (account, chain): repeated calls return the same address,
+    /// so this is safe to re-run.
+    NewAddress {
+        /// Chain to derive the deposit address on, e.g. `ethereum`.
+        #[arg(long)]
+        chain: String,
+    },
+
+    /// List the account's tracked cross-chain deposits, most recent first.
+    Deposits,
+
+    /// Show a single tracked bridge deposit by id.
+    Deposit {
+        /// Bridge deposit id.
+        id: String,
     },
 }
 
@@ -4001,5 +4221,178 @@ mod tests {
             let target = cli.target(&file).unwrap();
             assert_eq!(cli.credentials(&file, &target).unwrap().0, expected);
         }
+    }
+
+    // ── ENG-9198: the operations added to reach 88.2% spec coverage ──
+
+    #[test]
+    fn new_read_commands_parse() {
+        for argv in [
+            vec!["nexus", "stats"],
+            vec!["nexus", "stats-history"],
+            vec!["nexus", "funding-samples", "BTC-USDX-PERP"],
+            vec!["nexus", "positions-closed"],
+            vec!["nexus", "market", "risk-params", "BTC-USDX-PERP"],
+            vec!["nexus", "order", "history"],
+            vec!["nexus", "account", "equity-history"],
+            vec!["nexus", "account", "funding"],
+            vec!["nexus", "account", "faucet"],
+            vec!["nexus", "account", "deposits", "list"],
+            vec!["nexus", "account", "cancel-on-disconnect", "show"],
+            vec!["nexus", "bridge", "assets"],
+            vec!["nexus", "bridge", "addresses"],
+            vec!["nexus", "bridge", "deposits"],
+            vec!["nexus", "bridge", "deposit", "dep_1"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_ok(), "should parse: {argv:?}");
+        }
+    }
+
+    #[test]
+    fn market_scoped_reads_require_their_market() {
+        assert!(Cli::try_parse_from(["nexus", "funding-samples"]).is_err());
+        assert!(Cli::try_parse_from(["nexus", "market", "risk-params"]).is_err());
+        assert!(Cli::try_parse_from(["nexus", "bridge", "deposit"]).is_err());
+    }
+
+    #[test]
+    fn new_page_limits_are_bounded_by_the_sdk_maximums() {
+        // Bounded by clap, so an out-of-range page size is refused before
+        // anything is signed or sent. Zero is out of range at the bottom for the
+        // same reason: the API's range starts at 1.
+        for (argv, max) in [
+            (vec!["nexus", "order", "history"], MAX_ORDER_HISTORY_LIMIT),
+            (
+                vec!["nexus", "positions-closed"],
+                MAX_CLOSED_POSITIONS_LIMIT,
+            ),
+            (
+                vec!["nexus", "account", "equity-history"],
+                MAX_EQUITY_HISTORY_LIMIT,
+            ),
+            (
+                vec!["nexus", "account", "funding"],
+                MAX_ACCOUNT_FUNDING_LIMIT,
+            ),
+            (
+                vec!["nexus", "account", "deposits", "list"],
+                MAX_DEPOSITS_LIMIT,
+            ),
+            (
+                vec!["nexus", "funding-samples", "BTC-USDX-PERP"],
+                MAX_FUNDING_SAMPLES_LIMIT,
+            ),
+        ] {
+            let ok = [argv.clone(), vec!["--limit", "1"]].concat();
+            assert!(Cli::try_parse_from(&ok).is_ok(), "1 should parse: {argv:?}");
+
+            let at_max = max.to_string();
+            let edge = [argv.clone(), vec!["--limit", &at_max]].concat();
+            assert!(
+                Cli::try_parse_from(&edge).is_ok(),
+                "{max} should parse: {argv:?}"
+            );
+
+            let over = (max + 1).to_string();
+            let too_big = [argv.clone(), vec!["--limit", &over]].concat();
+            assert!(
+                Cli::try_parse_from(&too_big).is_err(),
+                "{} should be refused: {argv:?}",
+                max + 1
+            );
+
+            let zero = [argv.clone(), vec!["--limit", "0"]].concat();
+            assert!(
+                Cli::try_parse_from(&zero).is_err(),
+                "0 should be refused: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_on_disconnect_set_takes_an_explicit_bool() {
+        // The value is required and must be a bool: `set` with no argument would
+        // otherwise be ambiguous about which way it flips a live protection.
+        assert!(Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set", "maybe"])
+                .is_err()
+        );
+        for v in ["true", "false"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set", v]).is_ok(),
+                "{v} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn margin_and_deposit_mutations_take_market_amount_and_yes() {
+        assert!(Cli::try_parse_from(["nexus", "account", "margin", "add"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nexus", "account", "margin", "add", "BTC-USDX-PERP"]).is_err()
+        );
+        for dir in ["add", "remove"] {
+            assert!(Cli::try_parse_from([
+                "nexus",
+                "account",
+                "margin",
+                dir,
+                "BTC-USDX-PERP",
+                "100",
+                "--yes",
+            ])
+            .is_ok());
+        }
+        assert!(Cli::try_parse_from(["nexus", "account", "deposits", "create"]).is_err());
+        assert!(Cli::try_parse_from([
+            "nexus", "account", "deposits", "create", "50", "--asset", "USDX", "--yes",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn order_preview_mirrors_place_and_takes_no_confirmation_flag() {
+        // Same required flags as `place`...
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "limit",
+            "--price",
+            "50000",
+            "--quantity",
+            "0.1",
+        ])
+        .is_ok());
+        // ...and a limit preview still needs a market and a quantity.
+        assert!(Cli::try_parse_from(["nexus", "order", "preview", "--side", "buy"]).is_err());
+        // No `--yes`: a preview places nothing, so there is nothing to confirm.
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--quantity",
+            "0.1",
+            "--yes",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn bridge_new_address_requires_a_chain() {
+        assert!(Cli::try_parse_from(["nexus", "bridge", "new-address"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nexus", "bridge", "new-address", "--chain", "ethereum"]).is_ok()
+        );
     }
 }

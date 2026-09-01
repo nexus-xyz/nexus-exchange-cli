@@ -301,11 +301,15 @@ nexus orderbook BTC-USDX-PERP       # bids/asks
 nexus trades BTC-USDX-PERP --limit 50
 nexus candles BTC-USDX-PERP --timeframe 1m --limit 100
 nexus health                        # indexer health snapshot
+nexus stats                         # venue throughput, uptime, unique traders
+nexus stats-history                 # recent throughput samples
+nexus funding-samples BTC-USDX-PERP --limit 100   # funding PREMIUM observations
 
 # Per-market data
 nexus market summary                       # 24h volume + halt state per market
 nexus market status BTC-USDX-PERP          # lifecycle / halt status
 nexus market mark-price BTC-USDX-PERP      # current mark price
+nexus market risk-params BTC-USDX-PERP     # max leverage, initial/maintenance margin
 nexus market adl-events BTC-USDX-PERP --limit 50   # ADL settlements (needs credentials)
 
 # Authenticated account (see Credentials below)
@@ -319,6 +323,11 @@ nexus positions                     # open positions, with per-position risk det
 nexus fills --limit 50              # recent executions (server-side page, max 1000)
 nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
+nexus order history --limit 100     # terminal orders (the ones no longer open)
+nexus positions-closed --limit 50   # closed positions with realized PnL
+nexus account equity-history --limit 200   # equity time series
+nexus account funding --limit 100   # funding payments (pay = debit, receive = credit)
+nexus account deposits list         # deposit history
 nexus withdrawals                   # withdrawal history
 
 # Trading (prompts for confirmation; pass --yes to skip)
@@ -327,6 +336,11 @@ nexus order place --market BTC-USDX-PERP --side buy --type limit \
 # By-id order commands are routed per market, so they require --market.
 nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
 nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
+# `preview` takes the same flags as `place` but submits nothing, so it needs no
+# confirmation: it reports required margin, projected equity/liquidation/leverage,
+# expected fill VWAP and fees.
+nexus order preview --market BTC-USDX-PERP --side buy --type limit \
+  --price 84000 --quantity 0.01
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
 nexus order cancel --market BTC-USDX-PERP        # flatten one market
@@ -341,6 +355,21 @@ nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
+nexus account faucet                # claim the testnet faucet (play funds only)
+nexus account deposits create 1000 --asset USDX   # spec'd /deposits route
+nexus account margin add BTC-USDX-PERP 250        # add isolated margin
+nexus account margin remove BTC-USDX-PERP 100     # RAISES liquidation risk
+nexus account cancel-on-disconnect show           # is CoD enabled AND active?
+nexus account cancel-on-disconnect set true
+
+# Cross-chain bridge (deposits)
+nexus bridge assets                 # supported chains and their assets (public)
+nexus bridge addresses              # your deposit addresses
+nexus bridge new-address --chain ethereum   # get-or-create; idempotent per chain
+nexus bridge deposits               # tracked cross-chain deposits
+nexus bridge deposit <DEPOSIT_ID>   # one tracked deposit
+# Bridge WALLET operations (link/challenge) are not available: nexus-exchange
+# 0.11.0 wraps no method for them, and the CLI issues no HTTP of its own.
 # Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
 # withdrawn (ENG-7740): no endpoint accepts a margin-mode change, so the command
 # could only ever fail. Tracking: ENG-7614.
@@ -884,8 +913,8 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints a coverage number: the CLI currently exercises **40 of 68**
-spec operations (**58.8%**), measured against the pinned `v0.8.1` spec.
+The check also prints a coverage number: the CLI currently exercises **60 of 68**
+spec operations (**88.2%**), measured against the pinned `v0.8.1` spec.
 
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two

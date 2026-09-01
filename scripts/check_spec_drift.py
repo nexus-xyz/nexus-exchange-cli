@@ -199,6 +199,40 @@ METHOD_OP = {
     # made them invisible to every invariant here (ENG-12786, invariant 9).
     "sign_in": ("POST", "/auth/login"),  # no /api/v1 variant yet
     "register_agent": ("POST", "/agents/register"),  # no /api/v1 variant yet
+    # venue statistics (public)
+    "fetch_stats": ("GET", "/stats"),  # no /api/v1 variant yet
+    "fetch_stats_history": ("GET", "/stats/history"),  # no /api/v1 variant yet
+    # market risk & the funding PREMIUM series (distinct from the settled
+    # windows `fetch_funding_rate_history` reads)
+    "fetch_market_risk_params": ("GET", "/markets/{market_id}/risk-params"),  # no /api/v1 variant yet
+    "fetch_funding_premium_samples": (
+        "GET",
+        "/api/v1/markets/{market_id}/funding-samples",
+    ),
+    # account history & settings
+    "fetch_equity_history": ("GET", "/api/v1/account/equity-history"),
+    "fetch_cancel_on_disconnect": ("GET", "/api/v1/account/cancel-on-disconnect"),
+    "set_cancel_on_disconnect": ("PUT", "/api/v1/account/cancel-on-disconnect"),
+    "fetch_order_history": ("GET", "/api/v1/orders/history"),
+    "fetch_closed_positions": ("GET", "/api/v1/positions/closed"),
+    "preview_order": ("POST", "/api/v1/orders/preview"),
+    "fetch_account_funding": ("GET", "/funding"),  # no /api/v1 variant yet
+    "fetch_deposits": ("GET", "/deposits"),  # no /api/v1 variant yet
+    "create_deposit": ("POST", "/deposits"),  # no /api/v1 variant yet
+    "claim_faucet": ("POST", "/faucet"),  # no /api/v1 variant yet
+    # Isolated-margin adjustment. `account margin add|remove` both call
+    # `adjust_margin` and differ only in the `direction` they pass, so there is
+    # one row here. The SDK's `add_margin` / `remove_margin` wrappers are
+    # deliberately NOT listed: no command calls them, and a row nothing calls is
+    # exactly what invariant 9's self-test rejects.
+    "adjust_margin": ("POST", "/account/margin"),  # no /api/v1 variant yet
+    # bridge (Phase A: deposits). This domain is /api/v1-native — it has no
+    # host-root mount at all, so `canonical_op` must not be read as implying one.
+    "fetch_bridge_assets": ("GET", "/api/v1/bridge/assets"),
+    "fetch_bridge_deposit_addresses": ("GET", "/api/v1/bridge/deposit-addresses"),
+    "create_bridge_deposit_address": ("POST", "/api/v1/bridge/deposit-addresses"),
+    "fetch_bridge_deposits": ("GET", "/api/v1/bridge/deposits"),
+    "fetch_bridge_deposit": ("GET", "/api/v1/bridge/deposits/{id}"),
     # websocket
     "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # NOTE: ten SDK methods are deliberately unmapped, because no command calls
@@ -265,6 +299,12 @@ NON_REST_TARGETS = {
 #   PUT/GET/DELETE /admin/tiers* — admin-only tier management; out of CLI scope.
 #   POST /ws-tokens — deprecated; superseded by POST /ws/token (which we use).
 #   GET  /stream — deprecated SSE stream; superseded by the /ws upgrade.
+#
+# Not listed above because they are not a CLI decision (ENG-9198): the three
+# bridge WALLET operations — GET/POST /api/v1/bridge/wallets and
+# POST /api/v1/bridge/wallets/challenge — are spec'd but `nexus-exchange` 0.11.0
+# wraps no method for them, and the CLI issues no HTTP of its own. They become
+# reachable when the SDK wraps them, not before.
 
 
 def normalize_path(p):
