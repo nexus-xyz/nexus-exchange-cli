@@ -292,3 +292,94 @@ fn batch_orders_example_is_valid_json_array() {
         }
     }
 }
+
+/// The eight operations that keep coverage at 60/68 rather than 68/68, and why
+/// each is out (ENG-9198). Split by *who* can change it, because the two halves
+/// are not the same kind of gap:
+///
+///   * `admin/tiers` (3) and the two deprecated WebSocket ops are CLI decisions,
+///     documented at the foot of `check_spec_drift.py`. They stay out.
+///   * the three bridge WALLET ops are NOT a CLI decision: `nexus-exchange`
+///     0.11.0 wraps no method for them and the CLI issues no HTTP of its own, so
+///     no command can reach them until the SDK does.
+///
+/// Asserting them absent keeps a future contributor from "fixing" the ratio by
+/// adding a line here, which would claim an operation no command can serve.
+#[test]
+fn the_operations_outside_cli_coverage_stay_out_of_endpoints_txt() {
+    let ops = endpoints();
+    for (method, path, why) in [
+        ("GET", "/admin/tiers", "admin-only; out of CLI scope"),
+        ("PUT", "/admin/tiers", "admin-only; out of CLI scope"),
+        (
+            "DELETE",
+            "/admin/tiers/{address}",
+            "admin-only; out of CLI scope",
+        ),
+        (
+            "POST",
+            "/ws-tokens",
+            "deprecated; superseded by POST /ws/token",
+        ),
+        (
+            "GET",
+            "/stream",
+            "deprecated SSE; superseded by the /ws upgrade",
+        ),
+        (
+            "GET",
+            "/api/v1/bridge/wallets",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+        (
+            "POST",
+            "/api/v1/bridge/wallets",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+        (
+            "POST",
+            "/api/v1/bridge/wallets/challenge",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+    ] {
+        assert!(
+            !ops.contains(&(method.to_string(), path.to_string())),
+            "{method} {path} must stay out of endpoints.txt ({why})"
+        );
+    }
+}
+
+/// The operations ENG-9198 added. A regression that drops one would otherwise
+/// only show up as a slightly lower percentage in the drift run's summary, which
+/// is easy to wave through; naming them makes the loss a named failure.
+#[test]
+fn eng_9198_operations_are_listed_in_endpoints_txt() {
+    let ops = endpoints();
+    for (method, path) in [
+        ("GET", "/stats"),
+        ("GET", "/stats/history"),
+        ("GET", "/markets/{market_id}/risk-params"),
+        ("GET", "/api/v1/markets/{market_id}/funding-samples"),
+        ("GET", "/api/v1/account/equity-history"),
+        ("GET", "/api/v1/account/cancel-on-disconnect"),
+        ("PUT", "/api/v1/account/cancel-on-disconnect"),
+        ("GET", "/api/v1/orders/history"),
+        ("GET", "/api/v1/positions/closed"),
+        ("POST", "/api/v1/orders/preview"),
+        ("GET", "/funding"),
+        ("GET", "/deposits"),
+        ("POST", "/deposits"),
+        ("POST", "/faucet"),
+        ("POST", "/account/margin"),
+        ("GET", "/api/v1/bridge/assets"),
+        ("GET", "/api/v1/bridge/deposit-addresses"),
+        ("POST", "/api/v1/bridge/deposit-addresses"),
+        ("GET", "/api/v1/bridge/deposits"),
+        ("GET", "/api/v1/bridge/deposits/{id}"),
+    ] {
+        assert!(
+            ops.contains(&(method.to_string(), path.to_string())),
+            "endpoints.txt is missing {method} {path} (added by ENG-9198)"
+        );
+    }
+}
