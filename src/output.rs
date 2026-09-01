@@ -6,10 +6,14 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountFees, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent, AgentInfo,
-    ApiKeyInfo, CreditResult, DepositResult, Fill, FundingSample, HealthStatus, MarkPrice, Market,
-    MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
-    PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side, Ticker, Trade, Withdrawal,
+    AccountFees, AccountFunding, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent,
+    AgentInfo, ApiKeyInfo, BridgeAssetsResponse, BridgeDeposit, BridgeDepositAddress,
+    CancelOnDisconnectStatus, ClosedPosition, CreditResult, DepositResponse, DepositResult,
+    EquityPoint, FaucetResponse, Fill, FundingPremiumSample, FundingSample, FundsEntry,
+    HealthStatus, MarginAdjustment, MarkPrice, Market, MarketRiskParams, MarketStatus,
+    MarketSummary, Ohlcv, Order, OrderBook, OrderHistoryEntry, OrderPreview, OrderResponse,
+    OrderResult, PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side, StatsSnapshot,
+    ThroughputSample, Ticker, Trade, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -1451,6 +1455,677 @@ pub fn withdrawals_json(ws: &[Withdrawal]) -> String {
 // on the live venue where documented routes 401, and neither has ever been in the
 // spec (ENG-7800). `Transfer` and `SubAccount` no longer reach this module.
 
+// ───────────────────────── venue stats ─────────────────────────
+
+/// Render the aggregate venue statistics snapshot (`GET /stats`).
+///
+/// `health` is a free-form server string, so it goes through [`safe`] before it
+/// reaches the terminal.
+pub fn stats(s: &StatsSnapshot) -> String {
+    let rows = [
+        ("health", safe(&s.health)),
+        ("connected", s.connected.to_string()),
+        ("uptime (s)", s.uptime_seconds.to_string()),
+        ("events received", s.events_received.to_string()),
+        ("events/sec", format!("{:.2}", s.events_per_sec)),
+        ("fills total", s.fills_total.to_string()),
+        ("liquidations", s.liquidations_total.to_string()),
+        ("gap count", s.gap_count.to_string()),
+        ("highest sequence", s.highest_sequence_seen.to_string()),
+        ("last event", opt_ms_iso(&s.last_event_ms)),
+        ("traders 24h", opt(&s.unique_traders_24h)),
+        ("traders 7d", opt(&s.unique_traders_7d)),
+        ("traders 30d", opt(&s.unique_traders_30d)),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<18}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn stats_json(s: &StatsSnapshot) -> String {
+    pretty(&json!({
+        "health": s.health,
+        "connected": s.connected,
+        "uptime_seconds": s.uptime_seconds,
+        "events_received": s.events_received,
+        "events_per_sec": s.events_per_sec,
+        "fills_total": s.fills_total,
+        "liquidations_total": s.liquidations_total,
+        "gap_count": s.gap_count,
+        "highest_sequence_seen": s.highest_sequence_seen,
+        "last_event_ms": s.last_event_ms,
+        "last_event": opt_ms_iso_json(&s.last_event_ms),
+        "unique_traders_24h": s.unique_traders_24h,
+        "unique_traders_7d": s.unique_traders_7d,
+        "unique_traders_30d": s.unique_traders_30d,
+    }))
+}
+
+/// Render venue throughput samples (`GET /stats/history`).
+///
+/// `timestamp` is passed through as the server's raw integer, matching
+/// [`funding_rates`]: the spec does not fix its unit, and relabelling it as a
+/// date would be a guess.
+pub fn stats_history(ss: &[ThroughputSample]) -> String {
+    if ss.is_empty() {
+        return "No throughput samples returned.".to_string();
+    }
+    let mut out = format!("{:<20}  {:>12}\n", "TIME(ms)", "FILLS");
+    for s in ss {
+        out.push_str(&format!("{:<20}  {:>12}\n", s.timestamp, s.fills));
+    }
+    out.push_str(&format!("\n{} sample(s).", ss.len()));
+    out
+}
+
+pub fn stats_history_json(ss: &[ThroughputSample]) -> String {
+    let value: Value = ss
+        .iter()
+        .map(|s| json!({ "timestamp": s.timestamp, "fills": s.fills }))
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── funding ─────────────────────────
+
+/// Render funding *premium* observations (`GET /markets/{id}/funding-samples`).
+pub fn funding_samples(fs: &[FundingPremiumSample]) -> String {
+    if fs.is_empty() {
+        return "No funding premium samples returned.".to_string();
+    }
+    let mut out = format!("{:<20}  {:>18}\n", "TIME(ms)", "PREMIUM INDEX");
+    for f in fs {
+        out.push_str(&format!("{:<20}  {:>18}\n", f.timestamp, f.premium_index));
+    }
+    out.push_str(&format!("\n{} sample(s).", fs.len()));
+    out
+}
+
+pub fn funding_samples_json(fs: &[FundingPremiumSample]) -> String {
+    let value: Value = fs
+        .iter()
+        .map(|f| {
+            json!({
+                "timestamp": f.timestamp,
+                "premium_index": f.premium_index.to_string(),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render the account's funding payments (`GET /funding`).
+///
+/// `direction` is rendered from the SDK's enum via its `Debug` form rather than
+/// a hand-written match, so a variant added to a later spec still prints instead
+/// of being silently mapped onto one of today's two.
+pub fn account_funding(fs: &[AccountFunding]) -> String {
+    if fs.is_empty() {
+        return "No funding payments returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<9}  {:>16}  {:>14}  {:>16}  {:<20}\n",
+        "MARKET", "DIRECTION", "AMOUNT", "RATE", "POSITION SIZE", "TIME(ms)"
+    );
+    for f in fs {
+        out.push_str(&format!(
+            "{:<16}  {:<9}  {:>16}  {:>14}  {:>16}  {:<20}\n",
+            safe(&f.market_id),
+            format!("{:?}", f.direction).to_lowercase(),
+            f.amount,
+            f.funding_rate,
+            f.position_size,
+            f.timestamp,
+        ));
+    }
+    out.push_str(&format!("\n{} payment(s).", fs.len()));
+    out
+}
+
+pub fn account_funding_json(fs: &[AccountFunding]) -> String {
+    let value: Value = fs
+        .iter()
+        .map(|f| {
+            json!({
+                "market_id": f.market_id,
+                "direction": format!("{:?}", f.direction).to_lowercase(),
+                "amount": f.amount.to_string(),
+                "funding_rate": f.funding_rate.to_string(),
+                "position_size": f.position_size.to_string(),
+                "timestamp": f.timestamp,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ───────────────────────── market risk ─────────────────────────
+
+/// Render a market's risk parameters (`GET /markets/{id}/risk-params`).
+pub fn market_risk_params(r: &MarketRiskParams) -> String {
+    let rows = [
+        ("market", safe(&r.market_id)),
+        ("max leverage", format!("{}x", r.max_leverage)),
+        ("initial margin", r.initial_margin_rate.to_string()),
+        ("maintenance margin", r.maintenance_margin_rate.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<20}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn market_risk_params_json(r: &MarketRiskParams) -> String {
+    pretty(&json!({
+        "market_id": r.market_id,
+        "max_leverage": r.max_leverage,
+        "initial_margin_rate": r.initial_margin_rate.to_string(),
+        "maintenance_margin_rate": r.maintenance_margin_rate.to_string(),
+    }))
+}
+
+// ───────────────────────── account history ─────────────────────────
+
+/// Render the account equity time series (`GET /api/v1/account/equity-history`).
+pub fn equity_history(ps: &[EquityPoint]) -> String {
+    if ps.is_empty() {
+        return "No equity points returned.".to_string();
+    }
+    let mut out = format!("{:<24}  {:>18}\n", "TIME", "EQUITY");
+    for p in ps {
+        out.push_str(&format!(
+            "{:<24}  {:>18}\n",
+            opt_ms_iso(&p.timestamp_ms),
+            opt(&p.equity),
+        ));
+    }
+    out.push_str(&format!("\n{} point(s).", ps.len()));
+    out
+}
+
+pub fn equity_history_json(ps: &[EquityPoint]) -> String {
+    let value: Value = ps
+        .iter()
+        .map(|p| {
+            json!({
+                "timestamp_ms": p.timestamp_ms,
+                "timestamp": opt_ms_iso_json(&p.timestamp_ms),
+                "equity": opt_json(&p.equity),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render the account's deposit history (`GET /deposits`).
+pub fn deposits(es: &[FundsEntry]) -> String {
+    if es.is_empty() {
+        return "No deposits returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<12}  {:<11}  {:<10}  {:>16}  {:<8}  {:<20}\n",
+        "ID", "KIND", "STATUS", "AMOUNT", "ASSET", "TIME(ms)"
+    );
+    for e in es {
+        out.push_str(&format!(
+            "{:<12}  {:<11}  {:<10}  {:>16}  {:<8}  {:<20}\n",
+            e.id,
+            format!("{:?}", e.kind).to_lowercase(),
+            format!("{:?}", e.status).to_lowercase(),
+            e.amount,
+            safe(&e.asset),
+            e.timestamp,
+        ));
+    }
+    out.push_str(&format!("\n{} entr(y/ies).", es.len()));
+    out
+}
+
+pub fn deposits_json(es: &[FundsEntry]) -> String {
+    let value: Value = es
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e.id,
+                "kind": format!("{:?}", e.kind).to_lowercase(),
+                "status": format!("{:?}", e.status).to_lowercase(),
+                "account": e.account,
+                "amount": e.amount.to_string(),
+                "asset": e.asset,
+                "timestamp": e.timestamp,
+                "tx_hash": e.tx_hash,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render the result of a spec'd deposit (`POST /deposits`).
+///
+/// The server answers with the authoritative post-deposit balance, so that is
+/// what is shown — it is a balance, not the amount that was credited.
+pub fn deposit_created(d: &DepositResponse) -> String {
+    format!("Deposit accepted. Balance is now {}.", d.balance)
+}
+
+pub fn deposit_created_json(d: &DepositResponse) -> String {
+    pretty(&json!({ "balance": d.balance.to_string() }))
+}
+
+/// Render a faucet claim (`POST /faucet`).
+pub fn faucet(f: &FaucetResponse) -> String {
+    format!(
+        "Claimed {} from the faucet.\nNext claim available at {} (server-reported; a claim inside the cooldown answers 429).",
+        f.amount,
+        ms_to_iso8601(f.available_at_ms),
+    )
+}
+
+pub fn faucet_json(f: &FaucetResponse) -> String {
+    pretty(&json!({
+        "amount": f.amount.to_string(),
+        "available_at_ms": f.available_at_ms,
+        "available_at": ms_to_iso8601(f.available_at_ms),
+    }))
+}
+
+/// Render an isolated-margin adjustment (`POST /account/margin`).
+pub fn margin_adjustment(m: &MarginAdjustment) -> String {
+    let rows = [
+        ("market", safe(&m.market_id)),
+        ("allocated margin", m.allocated_margin.to_string()),
+        ("collateral", m.collateral.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<20}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn margin_adjustment_json(m: &MarginAdjustment) -> String {
+    pretty(&json!({
+        "market_id": m.market_id,
+        "allocated_margin": m.allocated_margin.to_string(),
+        "collateral": m.collateral.to_string(),
+    }))
+}
+
+/// Render cancel-on-disconnect state (`GET`/`PUT` on
+/// `/api/v1/account/cancel-on-disconnect`).
+///
+/// `enabled` and `active` are reported separately and both are shown: the
+/// exchange can have the feature switched off deployment-wide, in which case an
+/// account that asked for it reads `enabled=true, active=false`. Collapsing the
+/// two would claim protection the venue is not applying.
+pub fn cancel_on_disconnect(c: &CancelOnDisconnectStatus) -> String {
+    let mut out = format!(
+        "enabled             {}\nactive              {}\ngrace (s)           {}",
+        c.enabled,
+        c.active,
+        opt(&c.grace_secs),
+    );
+    if c.enabled && !c.active {
+        out.push_str(
+            "\n\nEnabled for this account but NOT active: the exchange has cancel-on-disconnect \
+             switched off deployment-wide. Resting orders will NOT be flattened on a dropped \
+             connection.",
+        );
+    }
+    out
+}
+
+pub fn cancel_on_disconnect_json(c: &CancelOnDisconnectStatus) -> String {
+    pretty(&json!({
+        "enabled": c.enabled,
+        "active": c.active,
+        "grace_secs": c.grace_secs,
+    }))
+}
+
+/// Render historical (terminal) orders (`GET /api/v1/orders/history`).
+pub fn order_history(os: &[OrderHistoryEntry]) -> String {
+    if os.is_empty() {
+        return "No historical orders returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<20}  {:<16}  {:<5}  {:>14}  {:>12}  {:>12}  {:<12}\n",
+        "ID", "MARKET", "SIDE", "PRICE", "SIZE", "FILLED", "STATUS"
+    );
+    for o in os {
+        out.push_str(&format!(
+            "{:<20}  {:<16}  {:<5}  {:>14}  {:>12}  {:>12}  {:<12}\n",
+            safe(&opt(&o.id)),
+            safe(&opt(&o.market_id)),
+            o.side.map(side_str).unwrap_or("-"),
+            opt(&o.price),
+            opt(&o.size),
+            opt(&o.filled_qty),
+            safe(&opt(&o.status)),
+        ));
+    }
+    out.push_str(&format!("\n{} order(s).", os.len()));
+    out
+}
+
+pub fn order_history_json(os: &[OrderHistoryEntry]) -> String {
+    let value: Value = os
+        .iter()
+        .map(|o| {
+            json!({
+                "id": o.id,
+                "market_id": o.market_id,
+                "side": o.side.map(side_str),
+                "order_type": o.order_type,
+                "price": opt_json(&o.price),
+                "size": opt_json(&o.size),
+                "filled_qty": opt_json(&o.filled_qty),
+                "status": o.status,
+                "cancellation_reason": o.cancellation_reason,
+                "created_at_ms": o.created_at_ms,
+                "completed_at_ms": o.completed_at_ms,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render closed positions (`GET /api/v1/positions/closed`).
+pub fn closed_positions(ps: &[ClosedPosition]) -> String {
+    if ps.is_empty() {
+        return "No closed positions returned.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<5}  {:>12}  {:>14}  {:>14}  {:>14}  {:<24}\n",
+        "MARKET", "SIDE", "SIZE", "ENTRY", "EXIT", "REALIZED PNL", "CLOSED"
+    );
+    for p in ps {
+        out.push_str(&format!(
+            "{:<16}  {:<5}  {:>12}  {:>14}  {:>14}  {:>14}  {:<24}\n",
+            safe(&opt(&p.market_id)),
+            safe(&opt(&p.side)),
+            opt(&p.size),
+            opt(&p.entry_price),
+            opt(&p.exit_price),
+            opt(&p.realized_pnl),
+            opt_ms_iso(&p.closed_at_ms),
+        ));
+    }
+    out.push_str(&format!("\n{} position(s).", ps.len()));
+    out
+}
+
+pub fn closed_positions_json(ps: &[ClosedPosition]) -> String {
+    let value: Value = ps
+        .iter()
+        .map(|p| {
+            json!({
+                "market_id": p.market_id,
+                "side": p.side,
+                "size": opt_json(&p.size),
+                "entry_price": opt_json(&p.entry_price),
+                "exit_price": opt_json(&p.exit_price),
+                "realized_pnl": opt_json(&p.realized_pnl),
+                "closed_at_ms": p.closed_at_ms,
+                "closed_at": opt_ms_iso_json(&p.closed_at_ms),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+/// Render an order preview (`POST /api/v1/orders/preview`).
+///
+/// A preview that the engine would reject is not an error — the request
+/// succeeded and the answer is "no". It is rendered as a refusal with the
+/// server's reason so the two outcomes cannot be confused.
+pub fn order_preview(p: &OrderPreview) -> String {
+    let verdict = match p.accepted {
+        Some(true) => "ACCEPTED (preview only — nothing was placed)".to_string(),
+        Some(false) => format!("REJECTED — {}", safe(&opt(&p.reject_reason)),),
+        None => "verdict not reported by the server".to_string(),
+    };
+    let rows = [
+        ("required margin", opt(&p.required_initial_margin)),
+        ("post-trade equity", opt(&p.projected_post_trade_equity)),
+        (
+            "post-trade liq. price",
+            opt(&p.projected_post_trade_liquidation_price),
+        ),
+        ("post-trade leverage", opt(&p.projected_post_trade_leverage)),
+        ("expected fill VWAP", opt(&p.expected_fill_vwap)),
+        ("projected fees", opt(&p.projected_fees)),
+    ];
+    let body = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<24}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{verdict}\n\n{body}")
+}
+
+pub fn order_preview_json(p: &OrderPreview) -> String {
+    pretty(&json!({
+        "accepted": p.accepted,
+        "reject_reason": p.reject_reason,
+        "required_initial_margin": opt_json(&p.required_initial_margin),
+        "projected_post_trade_equity": opt_json(&p.projected_post_trade_equity),
+        "projected_post_trade_liquidation_price": opt_json(&p.projected_post_trade_liquidation_price),
+        "projected_post_trade_leverage": opt_json(&p.projected_post_trade_leverage),
+        "expected_fill_vwap": opt_json(&p.expected_fill_vwap),
+        "projected_fees": opt_json(&p.projected_fees),
+    }))
+}
+
+// ───────────────────────── bridge ─────────────────────────
+
+/// Render the supported bridge chains and assets (`GET /api/v1/bridge/assets`).
+pub fn bridge_assets(r: &BridgeAssetsResponse) -> String {
+    if r.chains.is_empty() {
+        return "No bridge chains returned.".to_string();
+    }
+    let mut out = String::new();
+    for c in &r.chains {
+        out.push_str(&format!(
+            "{}{}\n",
+            safe(&c.chain),
+            c.chain_id
+                .map(|id| format!(" (chain id {id})"))
+                .unwrap_or_default(),
+        ));
+        for (label, assets) in [
+            ("deposit", &c.deposit_assets),
+            ("withdraw", &c.withdraw_assets),
+        ] {
+            if assets.is_empty() {
+                out.push_str(&format!("  {label:<9} (none)\n"));
+                continue;
+            }
+            for a in assets {
+                out.push_str(&format!(
+                    "  {:<9} {:<8} min {:>14}  {:>3} conf  fee {:>12}\n",
+                    label,
+                    safe(&a.symbol),
+                    a.min_amount,
+                    a.confirmations,
+                    opt(&a.fee),
+                ));
+            }
+        }
+    }
+    out.push_str(&format!("\n{} chain(s).", r.chains.len()));
+    out
+}
+
+pub fn bridge_assets_json(r: &BridgeAssetsResponse) -> String {
+    let asset = |a: &nexus_exchange::types::BridgeAsset| {
+        json!({
+            "symbol": a.symbol,
+            "decimals": a.decimals,
+            "min_amount": a.min_amount.to_string(),
+            "confirmations": a.confirmations,
+            "fee": opt_json(&a.fee),
+            "contract_address": a.contract_address,
+        })
+    };
+    let value: Value = r
+        .chains
+        .iter()
+        .map(|c| {
+            json!({
+                "chain": c.chain,
+                "chain_id": c.chain_id,
+                "deposit_assets": c.deposit_assets.iter().map(asset).collect::<Vec<_>>(),
+                "withdraw_assets": c.withdraw_assets.iter().map(asset).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    pretty(&json!({ "chains": value }))
+}
+
+/// Render one bridge deposit address, as returned by the get-or-create call.
+pub fn bridge_address(a: &BridgeDepositAddress) -> String {
+    format!(
+        "chain               {}\naddress             {}\naccepts             {}\ncreated at(ms)      {}",
+        safe(&a.chain),
+        safe(&a.address),
+        if a.accepts.is_empty() {
+            "-".to_string()
+        } else {
+            a.accepts.iter().map(|s| safe(s)).collect::<Vec<_>>().join(", ")
+        },
+        a.created_at,
+    )
+}
+
+pub fn bridge_address_json(a: &BridgeDepositAddress) -> String {
+    pretty(&bridge_address_value(a))
+}
+
+fn bridge_address_value(a: &BridgeDepositAddress) -> Value {
+    json!({
+        "address": a.address,
+        "chain": a.chain,
+        "accepts": a.accepts,
+        "account_id": a.account_id,
+        "created_at": a.created_at,
+    })
+}
+
+/// Render the account's bridge deposit addresses.
+pub fn bridge_addresses(as_: &[BridgeDepositAddress]) -> String {
+    if as_.is_empty() {
+        return "No bridge deposit addresses.".to_string();
+    }
+    let mut out = format!("{:<12}  {:<44}  {:<20}\n", "CHAIN", "ADDRESS", "ACCEPTS");
+    for a in as_ {
+        out.push_str(&format!(
+            "{:<12}  {:<44}  {:<20}\n",
+            safe(&a.chain),
+            safe(&a.address),
+            if a.accepts.is_empty() {
+                "-".to_string()
+            } else {
+                a.accepts
+                    .iter()
+                    .map(|s| safe(s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        ));
+    }
+    out.push_str(&format!("\n{} address(es).", as_.len()));
+    out
+}
+
+pub fn bridge_addresses_json(as_: &[BridgeDepositAddress]) -> String {
+    let value: Value = as_.iter().map(bridge_address_value).collect();
+    pretty(&value)
+}
+
+/// Render the account's tracked cross-chain deposits.
+pub fn bridge_deposits(ds: &[BridgeDeposit]) -> String {
+    if ds.is_empty() {
+        return "No bridge deposits.".to_string();
+    }
+    let mut out = format!(
+        "{:<20}  {:<10}  {:<8}  {:>16}  {:<12}  {:<9}\n",
+        "ID", "CHAIN", "ASSET", "AMOUNT", "STATUS", "CONF"
+    );
+    for d in ds {
+        out.push_str(&format!(
+            "{:<20}  {:<10}  {:<8}  {:>16}  {:<12}  {:<9}\n",
+            safe(&d.id),
+            safe(&d.chain),
+            safe(&d.asset),
+            d.amount,
+            safe(&d.status),
+            confirmations(d),
+        ));
+    }
+    out.push_str(&format!("\n{} deposit(s).", ds.len()));
+    out
+}
+
+/// `confirmations/required` when both are reported, and never a bare count: a
+/// lone `3` reads as "confirmed" when it may be 3 of 12.
+fn confirmations(d: &BridgeDeposit) -> String {
+    match (d.confirmations, d.required_confirmations) {
+        (Some(c), Some(r)) => format!("{c}/{r}"),
+        (Some(c), None) => format!("{c}/?"),
+        (None, Some(r)) => format!("?/{r}"),
+        (None, None) => "-".to_string(),
+    }
+}
+
+/// Render a single tracked bridge deposit.
+pub fn bridge_deposit(d: &BridgeDeposit) -> String {
+    let rows = [
+        ("id", safe(&d.id)),
+        ("chain", safe(&d.chain)),
+        ("asset", safe(&d.asset)),
+        ("amount", d.amount.to_string()),
+        ("status", safe(&d.status)),
+        ("confirmations", confirmations(d)),
+        ("address", safe(&d.address)),
+        ("tx hash", safe(&opt(&d.tx_hash))),
+        ("created at(ms)", d.created_at.to_string()),
+        ("updated at(ms)", d.updated_at.to_string()),
+        ("credited at(ms)", opt(&d.credited_at)),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<18}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn bridge_deposit_value(d: &BridgeDeposit) -> Value {
+    json!({
+        "id": d.id,
+        "account_id": d.account_id,
+        "chain": d.chain,
+        "asset": d.asset,
+        "amount": d.amount.to_string(),
+        "address": d.address,
+        "status": d.status,
+        "confirmations": d.confirmations,
+        "required_confirmations": d.required_confirmations,
+        "tx_hash": d.tx_hash,
+        "created_at": d.created_at,
+        "updated_at": d.updated_at,
+        "credited_at": d.credited_at,
+    })
+}
+
+pub fn bridge_deposit_json(d: &BridgeDeposit) -> String {
+    pretty(&bridge_deposit_value(d))
+}
+
+pub fn bridge_deposits_json(ds: &[BridgeDeposit]) -> String {
+    let value: Value = ds.iter().map(bridge_deposit_value).collect();
+    pretty(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2366,5 +3041,167 @@ mod tests {
         assert_eq!(rows[0]["order"]["id"], json!("o1"));
         assert_eq!(rows[1]["outcome"], json!("err"));
         assert_eq!(rows[1]["error"], json!("INSUFFICIENT_MARGIN"));
+    }
+
+    // ── ENG-9198: renderers for the newly covered operations ──
+
+    #[test]
+    fn cancel_on_disconnect_flags_enabled_but_inactive() {
+        let inactive: CancelOnDisconnectStatus =
+            serde_json::from_value(json!({"enabled": true, "active": false, "grace_secs": 30}))
+                .unwrap();
+        let out = cancel_on_disconnect(&inactive);
+        // Both flags are shown, and the divergence is called out: an account
+        // that asked for the protection but is not getting it must not read as
+        // protected.
+        assert!(out.contains("enabled"), "{out}");
+        assert!(out.contains("NOT active"), "{out}");
+
+        let active: CancelOnDisconnectStatus =
+            serde_json::from_value(json!({"enabled": true, "active": true, "grace_secs": 30}))
+                .unwrap();
+        assert!(!cancel_on_disconnect(&active).contains("NOT active"));
+    }
+
+    #[test]
+    fn bridge_confirmations_are_never_a_bare_count() {
+        // A lone `3` reads as "confirmed" when it may be 3 of 12, so every
+        // rendering carries the denominator or an explicit `?`.
+        let base = json!({
+            "id": "dep_1", "chain": "ethereum", "asset": "USDC",
+            "amount": "100", "status": "pending"
+        });
+        let cases = [
+            (
+                json!({"confirmations": 3, "required_confirmations": 12}),
+                "3/12",
+            ),
+            (json!({"confirmations": 3}), "3/?"),
+            (json!({"required_confirmations": 12}), "?/12"),
+            (json!({}), "-"),
+        ];
+        for (extra, want) in cases {
+            let mut v = base.clone();
+            for (k, val) in extra.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            let d: BridgeDeposit = serde_json::from_value(v).unwrap();
+            assert_eq!(confirmations(&d), want);
+        }
+    }
+
+    #[test]
+    fn order_preview_rejection_is_not_an_error() {
+        let rejected: OrderPreview = serde_json::from_value(json!({
+            "accepted": false,
+            "reject_reason": "insufficient margin",
+        }))
+        .unwrap();
+        let out = order_preview(&rejected);
+        assert!(out.contains("REJECTED"), "{out}");
+        assert!(out.contains("insufficient margin"), "{out}");
+
+        let accepted: OrderPreview = serde_json::from_value(json!({
+            "accepted": true,
+            "required_initial_margin": "500",
+        }))
+        .unwrap();
+        let out = order_preview(&accepted);
+        assert!(out.contains("ACCEPTED"), "{out}");
+        // Says out loud that nothing was submitted, so an accepted preview is
+        // never mistaken for a placed order.
+        assert!(out.contains("nothing was placed"), "{out}");
+    }
+
+    #[test]
+    fn server_strings_in_new_renderers_are_control_char_safe() {
+        // Every free-form server string these renderers echo goes through
+        // `safe`, so an ESC sequence cannot repaint or forge a line of terminal
+        // output (the same reasoning as the existing `safe` call sites).
+        let esc = "pending\u{1b}[2K\u{1b}[31mCREDITED";
+
+        let d: BridgeDeposit = serde_json::from_value(json!({
+            "id": "dep_1", "chain": "ethereum", "asset": "USDC",
+            "amount": "100", "status": esc,
+        }))
+        .unwrap();
+        for out in [
+            bridge_deposit(&d),
+            bridge_deposits(std::slice::from_ref(&d)),
+        ] {
+            assert!(!out.contains('\u{1b}'), "escape survived: {out:?}");
+        }
+
+        let a: BridgeDepositAddress = serde_json::from_value(json!({
+            "address": "0xabc", "chain": esc, "accepts": [esc],
+        }))
+        .unwrap();
+        for out in [
+            bridge_address(&a),
+            bridge_addresses(std::slice::from_ref(&a)),
+        ] {
+            assert!(!out.contains('\u{1b}'), "escape survived: {out:?}");
+        }
+
+        let r: MarketRiskParams = serde_json::from_value(json!({
+            "market_id": esc, "max_leverage": 20,
+            "initial_margin_rate": "0.05", "maintenance_margin_rate": "0.03",
+        }))
+        .unwrap();
+        assert!(!market_risk_params(&r).contains('\u{1b}'));
+
+        let st: StatsSnapshot = serde_json::from_value(json!({ "health": esc })).unwrap();
+        assert!(!stats(&st).contains('\u{1b}'));
+
+        let o: Vec<OrderHistoryEntry> = serde_json::from_value(json!([{
+            "id": esc, "market_id": esc, "status": esc,
+        }]))
+        .unwrap();
+        assert!(!order_history(&o).contains('\u{1b}'));
+
+        let c: Vec<ClosedPosition> = serde_json::from_value(json!([{
+            "market_id": esc, "side": esc,
+        }]))
+        .unwrap();
+        assert!(!closed_positions(&c).contains('\u{1b}'));
+
+        let pv: OrderPreview =
+            serde_json::from_value(json!({ "accepted": false, "reject_reason": esc })).unwrap();
+        assert!(!order_preview(&pv).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn empty_lists_render_a_sentence_not_a_bare_header() {
+        assert_eq!(stats_history(&[]), "No throughput samples returned.");
+        assert_eq!(funding_samples(&[]), "No funding premium samples returned.");
+        assert_eq!(account_funding(&[]), "No funding payments returned.");
+        assert_eq!(equity_history(&[]), "No equity points returned.");
+        assert_eq!(deposits(&[]), "No deposits returned.");
+        assert_eq!(order_history(&[]), "No historical orders returned.");
+        assert_eq!(closed_positions(&[]), "No closed positions returned.");
+        assert_eq!(bridge_addresses(&[]), "No bridge deposit addresses.");
+        assert_eq!(bridge_deposits(&[]), "No bridge deposits.");
+    }
+
+    #[test]
+    fn new_json_renderers_keep_decimals_as_strings() {
+        // Money round-trips as the exact string the exchange sent, never as a
+        // JSON float.
+        let d: Vec<ClosedPosition> = serde_json::from_value(json!([{
+            "market_id": "BTC-USDX-PERP", "realized_pnl": "-12.3456789",
+        }]))
+        .unwrap();
+        let v: Value = serde_json::from_str(&closed_positions_json(&d)).unwrap();
+        assert_eq!(v[0]["realized_pnl"], json!("-12.3456789"));
+
+        let m: MarginAdjustment = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "allocated_margin": "1000.5",
+            "collateral": "2000.25",
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&margin_adjustment_json(&m)).unwrap();
+        assert_eq!(v["allocated_margin"], json!("1000.5"));
+        assert_eq!(keys(&v), ["allocated_margin", "collateral", "market_id"]);
     }
 }

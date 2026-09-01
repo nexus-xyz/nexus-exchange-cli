@@ -115,3 +115,35 @@ DELETE /agents/{address}
 # No /api/v1 variant — the token mint and upgrade stay on the gateway:
 POST /ws/token
 GET /ws
+
+# ── venue statistics (public) ──
+GET /stats
+GET /stats/history
+
+# ── market risk & funding premium ──
+# risk-params has no /api/v1 variant — stay on the gateway:
+GET /markets/{market_id}/risk-params
+GET /api/v1/markets/{market_id}/funding-samples
+
+# ── account history & settings ──
+GET /api/v1/account/equity-history
+GET /api/v1/account/cancel-on-disconnect
+PUT /api/v1/account/cancel-on-disconnect
+GET /api/v1/orders/history
+GET /api/v1/positions/closed
+POST /api/v1/orders/preview
+# No /api/v1 variant — stay on the gateway:
+GET /funding
+GET /deposits
+POST /deposits
+POST /faucet
+POST /account/margin
+
+# ── bridge (Phase A: deposits) ──
+# The bridge domain is /api/v1-native: it has no host-root mount at all, so these
+# are the only paths the spec documents for it.
+GET /api/v1/bridge/assets
+GET /api/v1/bridge/deposit-addresses
+POST /api/v1/bridge/deposit-addresses
+GET /api/v1/bridge/deposits
+GET /api/v1/bridge/deposits/{id}
