@@ -14,17 +14,26 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
 - **The squash commit's subject is the PR title**, so release-please reads the
   title, not your commit messages. A title it can't parse contributes nothing to
   the version bump and lands under "Other" in the changelog.
-- Declare a breaking change with `!` before the colon (`feat!:`). A
-  `BREAKING CHANGE:` footer works only in a **commit** body — the squash body
-  comes from the branch's commit messages, never the PR description, so a footer
-  written only in the description is dropped at merge.
+- Declare a breaking change with `!` before the colon (`feat!:`) **and** a
+  `BREAKING CHANGE:` footer saying what breaks and how to migrate. The `!` alone
+  only bumps the version: with no footer, release-please falls back to the
+  subject line, so the changelog's breaking section repeats the title and tells
+  the reader nothing. `feat(cli)!: delete the phantom code-only ops` shipped that
+  way in 0.5.0 and withdrew nine commands without naming one of them.
+- The footer works only in a **commit** body — the squash body comes from the
+  branch's commit messages, never the PR description, so a footer written only in
+  the description is dropped at merge.
 
 ## Pull requests
 
 - One concern per PR; link its tracking issue (`ENG-XXXX`) in the title.
 - Write the title as a [conventional commit](https://www.conventionalcommits.org/)
-  (`feat:`, `fix:`, `docs:`, `chore:`, `ci:`) — it becomes the commit subject on
-  `main`, so it is what drives the release. See [Merging](#merging).
+  (`feat:`, `fix:`, `deps:`, `docs:`, `chore:`, `ci:`) — it becomes the commit
+  subject on `main`, so it is what drives the release. See [Merging](#merging).
+- Dependency bumps use `deps:`, **not** `chore(deps):`. Release-please keys its
+  changelog sections on the type and hides `chore`, so a `chore(deps):` bump is
+  invisible in the release notes — which is how every `nexus-exchange` bump
+  through 0.4.0 went unrecorded. `sdk-autobump` emits `deps:` for this reason.
 - Respond to review comments before merging.
 
 ## Checks (before pushing)
