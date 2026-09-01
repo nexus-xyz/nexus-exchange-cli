@@ -412,7 +412,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.10.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.11.0";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
