@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.4.0...v0.5.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** nine commands are withdrawn — `account leverage`, `funding-payments`, `transfers list`, `transfers create`, `sub-accounts list`, `sub-accounts create`, `order cancel-batch`, `order get-by-client-id` and `order cancel-by-client-id`. The pinned spec (v0.8.1, also the latest published release) defines none of them, and several route nowhere on the venue either, so they could not have worked for any caller — they were kept green by the `CODE_ONLY_OPS` spec-drift hatch, which is now empty and sealed. **There is no replacement for these operations: they are not in the contract.** Cancelling many orders is still available as `order cancel --all`, or one `order cancel <ORDER_ID> --market <MARKET>` per order. See [#67](https://github.com/nexus-xyz/nexus-exchange-cli/issues/67) for the per-operation detail.
+
+### Features
+
+* **cli:** delete the phantom code-only ops, seal the allowlist (ENG-12369) ([#67](https://github.com/nexus-xyz/nexus-exchange-cli/issues/67)) ([13930f1](https://github.com/nexus-xyz/nexus-exchange-cli/commit/13930f1919d37170f51fe78adfda487e43b83a33))
+
+
+### Bug Fixes
+
+* **drift:** count operations, not path-ops, in the coverage ratio (ENG-10035) ([#62](https://github.com/nexus-xyz/nexus-exchange-cli/issues/62)) ([7e56089](https://github.com/nexus-xyz/nexus-exchange-cli/commit/7e560894fd4466309c2fd42c5587ed3b50c65fe0))
+* **drift:** fail on an SDK call METHOD_OP has no row for (ENG-12786) ([#70](https://github.com/nexus-xyz/nexus-exchange-cli/issues/70)) ([1994fa7](https://github.com/nexus-xyz/nexus-exchange-cli/commit/1994fa7029f85d61b4f27550704d1ed4e12a70ea))
+* **release:** stop the once-per-release phantom release PR (ENG-3921) ([#64](https://github.com/nexus-xyz/nexus-exchange-cli/issues/64)) ([0a8b181](https://github.com/nexus-xyz/nexus-exchange-cli/commit/0a8b1817b0f614b8e13a2a2e208f45e23132cb31))
+
+
+### Dependencies
+
+* `nexus-exchange` 0.10.0 → 0.11.0 ([#71](https://github.com/nexus-xyz/nexus-exchange-cli/issues/71)) ([cc10d29](https://github.com/nexus-xyz/nexus-exchange-cli/commit/cc10d2987632f0e7dc1b84be790841a53f2c9092)). The targeted spec is unchanged at **v0.8.1**. The SDK gains `stp`, `max_slippage_bps` and `cancellation_reason` on its order types, which this release does not yet surface as flags, and narrows the reason `Network::Mainnet` is refused — the refusal itself is unchanged, and mainnet remains unreachable.
+
 ## [0.4.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.3.0...v0.4.0) (2026-08-18)
 
 
