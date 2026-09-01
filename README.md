@@ -429,7 +429,7 @@ nexus --network dev markets                      # a custom network you declared
 
 | Network | Funds | Notes |
 |---|---|---|
-| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet, and its base uses a different path layout than the one the SDK signs. Use a [custom network](#custom-networks) to target a host you control. |
+| `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet. Use a [custom network](#custom-networks) to target a host you control. |
 | `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
 | `local` | play | A locally run indexer. A developer convenience, never a fallback. |
 | *`LABEL`* | declared | A [custom network](#custom-networks) you describe in the config file — your own environment, a preview host, a sandbox. |
@@ -792,7 +792,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.10.0`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.11.0`**.
 
 <!-- api-version-sync:end -->
 
