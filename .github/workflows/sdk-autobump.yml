@@ -313,7 +313,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
           git add Cargo.toml Cargo.lock .api-version README.md
-          git commit -m "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})"
+          git commit -m "deps: nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})"
           git push --set-upstream origin "$branch"
 
           # `gh pr merge --auto` needs a PR to arm, so arming can only happen AFTER
@@ -377,11 +377,11 @@ jobs:
 
           # Retry without the label rather than losing the PR if it is missing.
           gh pr create --base main --head "$branch" "${draft[@]}" \
-            --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
+            --title "deps: nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
             --body-file "$RUNNER_TEMP/pr-body.md" \
             --label "$label" \
           || gh pr create --base main --head "$branch" "${draft[@]}" \
-            --title "chore(deps): nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
+            --title "deps: nexus-exchange ${NEW_VERSION} (spec ${NEW_TAG})" \
             --body-file "$RUNNER_TEMP/pr-body.md"
 
           if [ "$VERDICT" = "breaking" ] || [ "$COMPILES" != "clean" ]; then
