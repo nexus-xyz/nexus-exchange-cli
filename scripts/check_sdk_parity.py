@@ -37,7 +37,7 @@ both a PATCH and (elsewhere) PUT operations and neither file agreed with the oth
    claiming 0.9.0 while shipping 0.9.1, green.
 
 Subset, not equality, on purpose: the SDK wraps considerably more than the CLI
-exposes (bridge deposits, ADL history, admin tiers). Those are coverage gaps to
+exposes (order history, closed positions, admin tiers). Those are coverage gaps to
 report, not failures — the CLI is not required to surface everything the SDK can
 do. The count is printed so the gap stays visible.
 

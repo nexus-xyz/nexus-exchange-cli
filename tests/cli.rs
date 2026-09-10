@@ -536,6 +536,8 @@ fn public_commands_route_to_a_fetch() {
             "failed to fetch market status",
         ),
         (&["health"], "failed to fetch health"),
+        // `bridge assets` is the one bridge read that needs no credentials.
+        (&["bridge", "assets"], "failed to fetch bridge assets"),
     ];
     for (args, want) in cases {
         let mut full = vec!["--base-url", dead];
@@ -578,6 +580,21 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
         ),
         (&["keys", "list"], "failed to fetch API keys"),
         (&["agents", "list"], "failed to fetch agents"),
+        // Both bridge pairs: the bare command lists, the narrowing flag selects
+        // one — and each half is a different SDK method, so both need covering.
+        (
+            &["bridge", "deposit-address"],
+            "failed to fetch bridge deposit addresses",
+        ),
+        (
+            &["bridge", "deposit-address", "--chain", "base"],
+            "failed to get bridge deposit address for base",
+        ),
+        (&["bridge", "deposits"], "failed to fetch bridge deposits"),
+        (
+            &["bridge", "deposits", "--id", "dep_123"],
+            "failed to fetch bridge deposit dep_123",
+        ),
         (
             &["market", "adl-events", "BTC-USDX-PERP"],
             "failed to fetch ADL events",
@@ -663,6 +680,10 @@ fn new_authenticated_commands_are_gated_without_credentials() {
     for args in [
         ["market", "adl-events", "BTC-USDX-PERP"].as_slice(),
         ["account", "adl-history", "0xabc"].as_slice(),
+        ["bridge", "deposit-address"].as_slice(),
+        ["bridge", "deposit-address", "--chain", "base"].as_slice(),
+        ["bridge", "deposits"].as_slice(),
+        ["bridge", "deposits", "--id", "dep_123"].as_slice(),
     ] {
         let out = run(args);
         assert_ne!(out.code, Some(0), "`{args:?}` should be refused");
@@ -1217,6 +1238,60 @@ fn an_unsafe_label_is_refused_as_a_usage_error() {
             Some(2),
             "--network {bad:?} should be a usage error; got: {}",
             out.stderr
+        );
+    }
+}
+
+/// `bridge assets` is public: with no credentials it must reach the network
+/// rather than stop at the auth gate. The gate is the easy thing to over-apply
+/// when a command group is mostly authenticated, and the failure mode is a
+/// public read that refuses to run.
+#[test]
+fn bridge_assets_is_public_and_needs_no_credentials() {
+    let out = run(&["--base-url", "http://127.0.0.1:1", "bridge", "assets"]);
+    assert_ne!(out.code, Some(0), "should fail against a dead port");
+    assert!(
+        out.stderr.contains("failed to fetch bridge assets"),
+        "should reach the fetch, got: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("authenticated command"),
+        "`bridge assets` must not be gated on credentials, got: {}",
+        out.stderr
+    );
+}
+
+/// The bridge is deposit-only in Phase A, and the CLI must not advertise more
+/// than it can do: no withdrawal command, and no wallet-linking command (the
+/// spec defines `/api/v1/bridge/wallets`, but the SDK wraps no method for it, so
+/// nothing could reach it). Both must be usage errors, not silent no-ops.
+#[test]
+fn bridge_exposes_no_withdraw_or_wallet_command() {
+    for sub in ["withdraw", "wallets", "wallet"] {
+        let out = run(&["bridge", sub]);
+        assert_eq!(
+            out.code,
+            Some(2),
+            "`bridge {sub}` should be a usage error, got {:?}",
+            out.code
+        );
+    }
+
+    let help = run(&["bridge", "--help"]);
+    assert_eq!(help.code, Some(0));
+    for absent in ["withdraw", "wallets"] {
+        assert!(
+            !help.stdout.contains(absent),
+            "`bridge --help` should not mention {absent:?}: {}",
+            help.stdout
+        );
+    }
+    for present in ["assets", "deposit-address", "deposits"] {
+        assert!(
+            help.stdout.contains(present),
+            "`bridge --help` should list {present:?}: {}",
+            help.stdout
         );
     }
 }

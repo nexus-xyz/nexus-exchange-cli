@@ -199,6 +199,13 @@ METHOD_OP = {
     # made them invisible to every invariant here (ENG-12786, invariant 9).
     "sign_in": ("POST", "/auth/login"),  # no /api/v1 variant yet
     "register_agent": ("POST", "/agents/register"),  # no /api/v1 variant yet
+    # bridge (Phase A: deposits) — /api/v1 only; the gateway never proxied it,
+    # so no row here has a bare-path variant.
+    "fetch_bridge_assets": ("GET", "/api/v1/bridge/assets"),
+    "create_bridge_deposit_address": ("POST", "/api/v1/bridge/deposit-addresses"),
+    "fetch_bridge_deposit_addresses": ("GET", "/api/v1/bridge/deposit-addresses"),
+    "fetch_bridge_deposits": ("GET", "/api/v1/bridge/deposits"),
+    "fetch_bridge_deposit": ("GET", "/api/v1/bridge/deposits/{id}"),
     # websocket
     "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
     # NOTE: ten SDK methods are deliberately unmapped, because no command calls

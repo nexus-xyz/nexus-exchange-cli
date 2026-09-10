@@ -364,6 +364,16 @@ nexus agents revoke <AGENT_ADDRESS>
 # groups 404 against the live venue where documented routes return 401, and no
 # spec version defines them. Tracking: ENG-7800.
 
+# Cross-chain deposits (bridge Phase A; see Credentials below)
+nexus bridge assets                          # chains and their bridgeable assets
+nexus bridge deposit-address                 # your existing deposit addresses
+nexus bridge deposit-address --chain base    # get-or-create the one for a chain
+nexus bridge deposits                        # tracked deposits and their status
+nexus bridge deposits --id <DEPOSIT_ID>      # one deposit, with its tx hash
+# Deposit-only by design: the bridge serves no withdrawal endpoint yet, so there
+# is no `nexus bridge withdraw`. The spec's wallet-linking operations
+# (`/api/v1/bridge/wallets`) have no SDK wrapper, so no command can reach them.
+
 # Live streaming over WebSocket (Ctrl-C to stop)
 nexus ws trades --market BTC-USDX-PERP      # public channels need --market
 nexus ws orders fills positions             # account channels (need credentials)
@@ -884,8 +894,8 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints a coverage number: the CLI currently exercises **40 of 68**
-spec operations (**58.8%**), measured against the pinned `v0.8.1` spec.
+The check also prints a coverage number: the CLI currently exercises **45 of 68**
+spec operations (**66.2%**), measured against the pinned `v0.8.1` spec.
 
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two
@@ -894,11 +904,12 @@ per operation. Counting both put every mount in the denominator while the numera
 could only ever hold one of each, so a surface covering everything perfectly still
 scored well under 100% and the number could never read full. That is
 [ENG-10035](https://linear.app/nexus-labs/issue/ENG-10035); the twins are now
-collapsed. At `v0.8.1` the literal count was `40 of 101 (39.6%)` against the same
-40 commands.
+collapsed. At `v0.8.1` the literal count was `45 of 101 (44.6%)` against the same
+command surface.
 
 The remainder are genuinely untargeted operations, not bookkeeping — the admin,
-stats, bridge and funding surfaces, `orders/preview`, `orders/history`,
+stats and funding surfaces, the bridge's wallet-linking half (its deposit half is
+covered by `nexus bridge`), `orders/preview`, `orders/history`,
 `positions/closed`, `cancel-on-disconnect`, the auth/token endpoints, and more.
 `check_spec_drift.py` prints the full list on every run, under
 `Not covered by the CLI`; that output is the enumeration, deliberately not a copy

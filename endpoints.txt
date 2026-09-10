@@ -111,6 +111,18 @@ POST /keys
 DELETE /keys/{key_id}
 DELETE /agents/{address}
 
+# ── bridge (Phase A: deposits) ──
+# Defined by the pinned spec and wrapped by the SDK; `nexus bridge` targets them
+# (ENG-5852, parent ENG-5639). Bridge is /api/v1-only — the gateway never
+# proxied it, so there is no dual-stack row here. The spec also defines
+# /api/v1/bridge/wallets{,/challenge}; the SDK wraps no wallet-linking method,
+# so no command can reach them and they stay out of this file.
+GET /api/v1/bridge/assets
+POST /api/v1/bridge/deposit-addresses
+GET /api/v1/bridge/deposit-addresses
+GET /api/v1/bridge/deposits
+GET /api/v1/bridge/deposits/{id}
+
 # ── websocket ──
 # No /api/v1 variant — the token mint and upgrade stay on the gateway:
 POST /ws/token

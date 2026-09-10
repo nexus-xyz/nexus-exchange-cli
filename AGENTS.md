@@ -82,5 +82,7 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
   check sees that, so always `cargo check` after one.
 - A CLI command can only reach what the SDK wraps, so `endpoints.txt` is capped by
   `nexus-exchange`. The checks catch a manifest that *mismatches* the SDK; they
-  cannot see a wrapper the CLI never grew a command for (bridge deposits, today).
+  cannot see a wrapper the CLI never grew a command for (order history, closed
+  positions and cancel-on-disconnect, today — bridge deposits were that example
+  until ENG-5852 added `nexus bridge`).
 - Pre-1.0 versioning: bump minor on breaking changes, patch on features/fixes.

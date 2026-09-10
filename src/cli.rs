@@ -1350,6 +1350,14 @@ pub enum Command {
         action: AgentsCommand,
     },
 
+    /// Cross-chain deposits: bridgeable assets, deposit addresses, deposit
+    /// status. Withdrawals are a later phase and have no endpoint yet, so this
+    /// group is deposit-only (ENG-5852, parent ENG-5639).
+    Bridge {
+        #[command(subcommand)]
+        action: BridgeCommand,
+    },
+
     // There are deliberately no `funding-payments`, `transfers` or `sub-accounts`
     // commands. `GET /funding-payments` is in no spec version (ENG-3817), and
     // `/transfers` and `/sub-accounts` have neither a contract nor a served route:
@@ -1682,6 +1690,41 @@ pub enum AgentsCommand {
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
+    },
+}
+
+/// Bridge subcommands (`GET /api/v1/bridge/*`). Phase A of the bridge covers
+/// deposits only: assets, per-account deposit addresses, and tracked deposits.
+///
+/// Two of these take an optional narrowing argument rather than splitting into a
+/// separate command, because each pair is one concept at two granularities and
+/// the SDK wraps both: `deposit-address` lists every address the account holds
+/// and, with `--chain`, resolves the one for that chain; `deposits` lists the
+/// tracked deposits and, with `--id`, fetches one.
+#[derive(Debug, Subcommand)]
+pub enum BridgeCommand {
+    /// List the supported chains and their bridgeable assets. Public — no
+    /// credentials needed.
+    Assets,
+
+    /// Show your deposit addresses. With `--chain`, get (or create) the address
+    /// for that chain; without it, list the ones that already exist.
+    DepositAddress {
+        /// Chain to get-or-create the deposit address on, e.g. `ethereum` or
+        /// `base`. Take the value from `nexus bridge assets` rather than
+        /// guessing — the server rejects a chain it does not bridge.
+        ///
+        /// Get-or-create is idempotent per (account, chain): asking twice
+        /// returns the same address, so there is no confirmation prompt.
+        #[arg(long)]
+        chain: Option<String>,
+    },
+
+    /// List your tracked cross-chain deposits, or show one with `--id`.
+    Deposits {
+        /// Deposit id, as returned in the list. Shows just that deposit.
+        #[arg(long)]
+        id: Option<String>,
     },
 }
 

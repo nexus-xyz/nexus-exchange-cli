@@ -156,6 +156,9 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
         ("GET", "/status"),
         ("GET", "/keys"),
         ("GET", "/ws"),
+        // Bridge is /api/v1-only — the gateway never proxied it, so this row has
+        // no dual-stack twin to fall back on if the line is dropped (ENG-5852).
+        ("GET", "/api/v1/bridge/deposits"),
         ("POST", "/ws/token"),
         // `order amend`. Listed here deliberately: this op spent time misfiled as
         // ahead-of-spec under the wrong verb (PUT), which kept a covered operation
@@ -261,6 +264,7 @@ fn examples_exist_and_reference_the_binary() {
         "examples/account.sh",
         "examples/trading.sh",
         "examples/keys_and_agents.sh",
+        "examples/bridge.sh",
         "examples/streaming.sh",
         "examples/north_star.sh",
     ] {
