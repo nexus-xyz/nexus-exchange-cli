@@ -199,8 +199,14 @@ METHOD_OP = {
     # made them invisible to every invariant here (ENG-12786, invariant 9).
     "sign_in": ("POST", "/auth/login"),  # no /api/v1 variant yet
     "register_agent": ("POST", "/agents/register"),  # no /api/v1 variant yet
-    # websocket
-    "mint_web_socket_token": ("POST", "/ws/token"),  # no /api/v1 variant yet
+    # websocket. `connect_ws` is the authenticated stream opener: it issues the
+    # token mint (`POST /ws/token`, no /api/v1 variant yet) and then opens the
+    # upgrade, re-minting a fresh single-use token before every reconnect
+    # (ENG-5291). The mint is the REST half and is mapped here; the upgrade half
+    # is `GET /ws`, which has no named REST method and is covered by
+    # NON_REST_TARGETS. The CLI no longer calls `mint_web_socket_token` directly —
+    # doing so is what left the spent token baked into the connect URL.
+    "connect_ws": ("POST", "/ws/token"),
     # NOTE: ten SDK methods are deliberately unmapped, because no command calls
     # them any more. Each targeted an operation no spec version has ever defined:
     #

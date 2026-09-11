@@ -1,11 +1,21 @@
 //! WebSocket streaming (`GET /ws`), over the SDK's streaming client.
 //!
-//! Flow: mint a short-lived single-use token over REST (when authenticated),
-//! hand the SDK a [`Config`] whose `ws_url` carries that token, and let
-//! [`Client::connect`](nexus_exchange::Client::connect) own the socket — the
-//! upgrade, subscription replay, automatic reconnect-with-backoff, ping/pong
-//! keep-alive, and bounded buffering. This module only builds the subscription
-//! frames, renders the [`Event`]s the SDK yields, and stops on Ctrl-C.
+//! Flow: hand the SDK the resolved [`Config`] and let
+//! [`Client::connect_ws`](nexus_exchange::Client::connect_ws) (authenticated) or
+//! [`Client::connect`](nexus_exchange::Client::connect) (public) own the socket —
+//! the token mint, the upgrade, subscription replay, automatic
+//! reconnect-with-backoff, ping/pong keep-alive, and bounded buffering. This
+//! module only builds the subscription frames, renders the [`Event`]s the SDK
+//! yields, and stops on Ctrl-C.
+//!
+//! The upgrade token is minted over REST (`POST /ws/token`) and rides in the
+//! query string, because the `/ws` upgrade accepts it nowhere else. It is
+//! short-lived and **single-use**, so it authenticates exactly one socket: a
+//! token baked into the connect URL is spent by the first connection and the
+//! first automatic reconnect replaying it is rejected (ENG-5291). The CLI
+//! therefore never mints, formats or holds one — `connect_ws` mints inside the
+//! reconnect loop, so every attempt presents a fresh token, and the SDK also
+//! owns redacting the value out of anything it reports.
 
 use anyhow::{Context, Result};
 use nexus_exchange::ws::Event;
@@ -43,9 +53,11 @@ impl Subscription {
 
 /// Connect, subscribe, and stream until Ctrl-C is pressed.
 ///
-/// `config` is the resolved SDK config (network / base URL / credentials); a
-/// clone with the token-bearing `ws_url` drives the streaming client. The
-/// `client` (which holds the same credentials) mints the token.
+/// `config` is the resolved SDK config (network / base URL / credentials) and
+/// `client` is built from it, so the WebSocket origin read here is the one the
+/// client streams against. Reading it up front turns "this network has no
+/// WebSocket endpoint" into a clean error before anything is sent, rather than a
+/// background disconnect event.
 pub async fn stream(
     client: &Client,
     config: &Config,
@@ -58,24 +70,34 @@ pub async fn stream(
         .ws_url()
         .context("the selected network has no WebSocket endpoint")?;
 
-    // Account channels need a signed token; public channels can stream without
-    // one. Only mint when we actually have credentials.
-    let ws_url = if authenticated {
-        let token = client
-            .mint_web_socket_token()
-            .await
-            .context("failed to mint a websocket token")?;
-        format!("{}?token={}", ws_origin, encode_token(&token.token))
-    } else {
-        ws_origin.to_string()
-    };
-
-    // Never log the token (it is a bearer credential); show only the host path.
-    eprintln!("connecting to {} ...", redacted(&ws_url));
+    // Safe to log as-is: the origin carries no token — the SDK appends one per
+    // connection attempt and never hands it back, so there is nothing here to
+    // redact. This call site deliberately does NOT run through a `redacted()`
+    // helper the way the old token-bearing URL did (review on #76).
+    //
+    // The one input that could put a secret in this string is a custom network
+    // whose configured `ws_url` already contains `?token=`. That is not a leak
+    // this can prevent: the value is the user's own, sitting in plaintext in
+    // their config file, and the SDK would append a second `token` parameter
+    // and produce a broken URL regardless. Re-adding a redactor here would
+    // reintroduce the local helper this change removed, to hide a string the
+    // user typed themselves.
+    eprintln!("connecting to {ws_origin} ...");
 
     let frames: Vec<Value> = subs.iter().map(Subscription::frame).collect();
-    let ws_client = Client::new(config.clone().with_ws_url(ws_url));
-    let mut sub = ws_client.connect(frames);
+
+    // Account channels need a signed token; public channels stream without one.
+    // `connect_ws` mints the first token and re-mints before every reconnect,
+    // which is why the CLI hands the socket over instead of baking a token into
+    // the URL itself — see the module docs (ENG-5291).
+    let mut sub = if authenticated {
+        client
+            .connect_ws(frames)
+            .await
+            .context("failed to open an authenticated websocket stream")?
+    } else {
+        client.connect(frames)
+    };
     eprintln!("streaming events (Ctrl-C to stop)");
 
     loop {
@@ -147,52 +169,9 @@ fn humanize(v: &Value) -> String {
     }
 }
 
-/// Percent-encode a token for use in a query value (defensive — tokens are
-/// already URL-safe hex).
-fn encode_token(token: &str) -> String {
-    token
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-/// Strip the token from a URL so it can be logged safely.
-///
-/// The token rides in the query string because the server's `/ws` upgrade only
-/// accepts it there — there is no header-based alternative on this endpoint, and
-/// browsers can't set headers on a `WebSocket` handshake anyway. Residual
-/// exposure: query strings can surface in proxy/access logs, shell history, and
-/// crash dumps more readily than headers. We mitigate by minting a short-lived,
-/// single-use token per connection, redacting it here from anything we log, and
-/// never persisting it.
-fn redacted(url: &str) -> String {
-    match url.split_once("?token=") {
-        Some((head, _)) => format!("{head}?token=<redacted>"),
-        None => url.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn token_is_never_logged() {
-        let r = redacted("wss://h/api/exchange/ws?token=supersecret");
-        assert!(!r.contains("supersecret"));
-        assert!(r.contains("<redacted>"));
-    }
-
-    #[test]
-    fn encode_token_escapes_non_unreserved() {
-        assert_eq!(encode_token("abc123"), "abc123");
-        assert_eq!(encode_token("a/b c"), "a%2Fb%20c");
-    }
 
     #[test]
     fn frame_includes_market_and_since_when_set() {
