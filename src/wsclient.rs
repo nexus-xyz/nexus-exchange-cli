@@ -71,7 +71,17 @@ pub async fn stream(
         .context("the selected network has no WebSocket endpoint")?;
 
     // Safe to log as-is: the origin carries no token — the SDK appends one per
-    // connection attempt and never hands it back.
+    // connection attempt and never hands it back, so there is nothing here to
+    // redact. This call site deliberately does NOT run through a `redacted()`
+    // helper the way the old token-bearing URL did (review on #76).
+    //
+    // The one input that could put a secret in this string is a custom network
+    // whose configured `ws_url` already contains `?token=`. That is not a leak
+    // this can prevent: the value is the user's own, sitting in plaintext in
+    // their config file, and the SDK would append a second `token` parameter
+    // and produce a broken URL regardless. Re-adding a redactor here would
+    // reintroduce the local helper this change removed, to hide a string the
+    // user typed themselves.
     eprintln!("connecting to {ws_origin} ...");
 
     let frames: Vec<Value> = subs.iter().map(Subscription::frame).collect();
