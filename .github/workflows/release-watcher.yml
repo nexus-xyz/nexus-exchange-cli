@@ -107,13 +107,36 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    # Mirrors release.yml's own build job. Each line below that looks like
+    # boilerplate is load-bearing on at least one planned target, and a watcher
+    # that diverges from the pipeline it watches reports on something else
+    # (review of #78).
+    container: ${{ matrix.container && matrix.container.image || null }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust non-interactively if not already installed
+        if: ${{ matrix.container }}
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - uses: swatinem/rust-cache@v2
         with:
           key: release-watcher-${{ join(matrix.targets, '-') }}
+          cache-provider: ${{ matrix.cache_provider }}
+      # `install_dist` is an OBJECT in the plan, not a string — `.run` is the
+      # command. Without it this step expands to nothing, `dist build` fails on
+      # every target with a missing command, and the watcher opens its issue
+      # every Monday for a reason that has nothing to do with the release
+      # pipeline: the cry-wolf failure ENG-11186 exists to remove.
       - name: Install dist
-        run: ${{ matrix.install_dist }}
+        run: ${{ matrix.install_dist.run }}
+      # Where a cross toolchain arrives — `aarch64-unknown-linux-gnu` is in
+      # dist-workspace.toml and does not build without this.
+      - name: Install dependencies
+        run: |
+          ${{ matrix.packages_install }}
       # No tag: this is a dry build of the current default branch, not a release.
       # `--artifacts=local` is the same half release.yml builds per target.
       - name: Build
