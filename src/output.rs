@@ -7,7 +7,8 @@
 
 use nexus_exchange::types::{
     AccountFees, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent, AgentInfo,
-    ApiKeyInfo, CreditResult, DepositResult, Fill, FundingSample, HealthStatus, MarkPrice, Market,
+    ApiKeyInfo, BridgeAsset, BridgeAssetsResponse, BridgeDeposit, BridgeDepositAddress,
+    CreditResult, DepositResult, Fill, FundingSample, HealthStatus, MarkPrice, Market,
     MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
     PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side, Ticker, Trade, Withdrawal,
 };
@@ -1446,6 +1447,273 @@ pub fn withdrawals_json(ws: &[Withdrawal]) -> String {
     pretty(&value)
 }
 
+// ───────────────────────── bridge ─────────────────────────
+//
+// Every string in these tables is server-chosen and free-form — a chain name, an
+// asset symbol, a deposit status, an opaque deposit id — so all of them go
+// through `safe()` before reaching a terminal. Timestamps are rendered ISO-8601
+// UTC under their wire field names, matching `market_status`'s `halted_at`; the
+// raw milliseconds are never the interesting value here.
+
+/// Render the bridgeable assets per chain (`GET /api/v1/bridge/assets`).
+///
+/// Deposit and withdraw assets are listed in one table with a `DIRECTION`
+/// column. Withdrawals are a later phase and no endpoint serves them yet, so a
+/// `withdraw` row states an eventual capability, not something this CLI can do —
+/// which the footer says in words rather than leaving the reader to infer.
+pub fn bridge_assets(r: &BridgeAssetsResponse) -> String {
+    if r.chains.is_empty() {
+        return "No bridge chains.".to_string();
+    }
+    let mut out = format!(
+        "{:<20}  {:<9}  {:<8}  {:>8}  {:>16}  {:>6}  {:>12}  {:<44}\n",
+        "CHAIN", "DIRECTION", "ASSET", "DECIMALS", "MIN AMOUNT", "CONF", "FEE", "CONTRACT"
+    );
+    let mut assets = 0usize;
+    let mut has_withdraw = false;
+    for c in &r.chains {
+        let chain = match c.chain_id {
+            Some(id) => format!("{} ({id})", safe(&c.chain)),
+            None => safe(&c.chain),
+        };
+        let rows = c
+            .deposit_assets
+            .iter()
+            .map(|a| ("deposit", a))
+            .chain(c.withdraw_assets.iter().map(|a| ("withdraw", a)));
+        for (direction, a) in rows {
+            has_withdraw |= direction == "withdraw";
+            assets += 1;
+            out.push_str(&format!(
+                "{:<20}  {:<9}  {:<8}  {:>8}  {:>16}  {:>6}  {:>12}  {:<44}\n",
+                chain,
+                direction,
+                safe(&a.symbol),
+                a.decimals,
+                a.min_amount,
+                a.confirmations,
+                opt(&a.fee),
+                a.contract_address
+                    .as_deref()
+                    .map(safe)
+                    .unwrap_or_else(|| "-".to_string()),
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\n{} chain(s), {} asset(s).",
+        r.chains.len(),
+        assets
+    ));
+    if has_withdraw {
+        out.push_str(
+            "\n`withdraw` rows list the eventual capability; the bridge serves deposits only \
+             today, and this CLI exposes no withdrawal command.",
+        );
+    }
+    out
+}
+
+pub fn bridge_assets_json(r: &BridgeAssetsResponse) -> String {
+    fn assets(list: &[BridgeAsset]) -> Value {
+        list.iter()
+            .map(|a| {
+                json!({
+                    "symbol": a.symbol,
+                    "decimals": a.decimals,
+                    "min_amount": a.min_amount.to_string(),
+                    "confirmations": a.confirmations,
+                    "fee": opt_json(&a.fee),
+                    "contract_address": a.contract_address,
+                })
+            })
+            .collect()
+    }
+    let chains: Value = r
+        .chains
+        .iter()
+        .map(|c| {
+            json!({
+                "chain": c.chain,
+                "chain_id": c.chain_id,
+                "deposit_assets": assets(&c.deposit_assets),
+                "withdraw_assets": assets(&c.withdraw_assets),
+            })
+        })
+        .collect();
+    pretty(&json!({ "chains": chains }))
+}
+
+/// Comma-joined accepted assets, or `-` when the server sent none.
+fn accepts(list: &[String]) -> String {
+    if list.is_empty() {
+        return "-".to_string();
+    }
+    list.iter().map(|s| safe(s)).collect::<Vec<_>>().join(",")
+}
+
+fn deposit_address_value(a: &BridgeDepositAddress) -> Value {
+    json!({
+        "address": a.address,
+        "chain": a.chain,
+        "accepts": a.accepts,
+        "account_id": a.account_id,
+        "created_at": ms_to_iso8601(a.created_at),
+    })
+}
+
+/// Render one deposit address (`POST /api/v1/bridge/deposit-addresses`), the
+/// get-or-create result for a single chain.
+pub fn bridge_deposit_address(a: &BridgeDepositAddress) -> String {
+    let rows = [
+        ("address", safe(&a.address)),
+        ("chain", safe(&a.chain)),
+        ("accepts", accepts(&a.accepts)),
+        ("account id", safe(&a.account_id)),
+        ("created", ms_to_iso8601(a.created_at)),
+    ];
+    let mut out = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<14}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push_str(
+        "\n\nSend only the accepted assets, on this chain, to this address. \
+         Anything else is not credited.",
+    );
+    out
+}
+
+pub fn bridge_deposit_address_json(a: &BridgeDepositAddress) -> String {
+    pretty(&deposit_address_value(a))
+}
+
+/// Render the account's deposit addresses
+/// (`GET /api/v1/bridge/deposit-addresses`).
+pub fn bridge_deposit_addresses(addrs: &[BridgeDepositAddress]) -> String {
+    if addrs.is_empty() {
+        return "No bridge deposit addresses. Create one with \
+                `nexus bridge deposit-address --chain <CHAIN>`."
+            .to_string();
+    }
+    let mut out = format!(
+        "{:<44}  {:<16}  {:<16}  {:<22}\n",
+        "ADDRESS", "CHAIN", "ACCEPTS", "CREATED (UTC)"
+    );
+    for a in addrs {
+        out.push_str(&format!(
+            "{:<44}  {:<16}  {:<16}  {:<22}\n",
+            safe(&a.address),
+            safe(&a.chain),
+            accepts(&a.accepts),
+            ms_to_iso8601(a.created_at),
+        ));
+    }
+    out.push_str(&format!("\n{} address(es).", addrs.len()));
+    out
+}
+
+pub fn bridge_deposit_addresses_json(addrs: &[BridgeDepositAddress]) -> String {
+    let value: Value = addrs.iter().map(deposit_address_value).collect();
+    pretty(&value)
+}
+
+/// Confirmations as `seen/required`, with `-` for either half the server has not
+/// reported. A deposit that is not yet on chain has neither, and printing `0/0`
+/// would read as "confirmed, nothing required".
+fn confirmations(seen: &Option<u32>, required: &Option<u32>) -> String {
+    format!("{}/{}", opt(seen), opt(required))
+}
+
+fn deposit_value(d: &BridgeDeposit) -> Value {
+    json!({
+        "id": d.id,
+        "account_id": d.account_id,
+        "chain": d.chain,
+        "asset": d.asset,
+        // Decimal as a string, like every other money field here, so no
+        // precision is lost on the way to a script.
+        "amount": d.amount.to_string(),
+        "address": d.address,
+        "status": d.status,
+        "confirmations": d.confirmations,
+        "required_confirmations": d.required_confirmations,
+        "tx_hash": d.tx_hash,
+        "created_at": ms_to_iso8601(d.created_at),
+        "updated_at": ms_to_iso8601(d.updated_at),
+        "credited_at": opt_ms_iso_json(&d.credited_at),
+    })
+}
+
+/// Render the tracked cross-chain deposits (`GET /api/v1/bridge/deposits`).
+///
+/// `tx_hash` is deliberately not a column — it is 66 characters and would push
+/// everything else off a normal terminal. `nexus bridge deposits --id <ID>` shows
+/// it, and `--output json` always carries it.
+pub fn bridge_deposits(ds: &[BridgeDeposit]) -> String {
+    if ds.is_empty() {
+        return "No bridge deposits.".to_string();
+    }
+    let mut out = format!(
+        "{:<24}  {:<16}  {:<8}  {:>16}  {:<12}  {:>9}  {:<22}\n",
+        "ID", "CHAIN", "ASSET", "AMOUNT", "STATUS", "CONF", "CREATED (UTC)"
+    );
+    for d in ds {
+        out.push_str(&format!(
+            "{:<24}  {:<16}  {:<8}  {:>16}  {:<12}  {:>9}  {:<22}\n",
+            safe(&d.id),
+            safe(&d.chain),
+            safe(&d.asset),
+            d.amount,
+            safe(&d.status),
+            confirmations(&d.confirmations, &d.required_confirmations),
+            ms_to_iso8601(d.created_at),
+        ));
+    }
+    out.push_str(&format!("\n{} deposit(s).", ds.len()));
+    out
+}
+
+pub fn bridge_deposits_json(ds: &[BridgeDeposit]) -> String {
+    let value: Value = ds.iter().map(deposit_value).collect();
+    pretty(&value)
+}
+
+/// Render a single tracked deposit (`GET /api/v1/bridge/deposits/{id}`).
+pub fn bridge_deposit(d: &BridgeDeposit) -> String {
+    let rows = [
+        ("id", safe(&d.id)),
+        ("status", safe(&d.status)),
+        ("chain", safe(&d.chain)),
+        ("asset", safe(&d.asset)),
+        ("amount", d.amount.to_string()),
+        (
+            "confirmations",
+            confirmations(&d.confirmations, &d.required_confirmations),
+        ),
+        ("address", safe(&d.address)),
+        ("account id", safe(&d.account_id)),
+        (
+            "tx hash",
+            d.tx_hash
+                .as_deref()
+                .map(safe)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        ("created", ms_to_iso8601(d.created_at)),
+        ("updated", ms_to_iso8601(d.updated_at)),
+        ("credited", opt_ms_iso(&d.credited_at)),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<16}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn bridge_deposit_json(d: &BridgeDeposit) -> String {
+    pretty(&deposit_value(d))
+}
+
 // The transfer and sub-account renderers were removed with the `transfers` and
 // `sub-accounts` commands in ENG-12369 (closing ENG-8123): both route groups 404
 // on the live venue where documented routes 401, and neither has ever been in the
@@ -2366,5 +2634,190 @@ mod tests {
         assert_eq!(rows[0]["order"]["id"], json!("o1"));
         assert_eq!(rows[1]["outcome"], json!("err"));
         assert_eq!(rows[1]["error"], json!("INSUFFICIENT_MARGIN"));
+    }
+
+    // ───────────────────────── bridge ─────────────────────────
+
+    fn bridge_assets_fixture() -> BridgeAssetsResponse {
+        serde_json::from_value(json!({
+            "chains": [{
+                "chain": "base",
+                "chain_id": 8453,
+                "deposit_assets": [{
+                    "symbol": "USDC",
+                    "decimals": 6,
+                    "min_amount": "10",
+                    "confirmations": 12,
+                    "fee": "0",
+                    "contract_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+                }],
+                // A withdraw-only entry with the optional halves absent, so the
+                // `-` rendering and the `null` JSON are both exercised.
+                "withdraw_assets": [{
+                    "symbol": "USDX",
+                    "decimals": 18,
+                    "min_amount": "1",
+                    "confirmations": 12
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn bridge_deposit_fixture() -> BridgeDeposit {
+        serde_json::from_value(json!({
+            "id": "dep_1",
+            "account_id": "0xabc",
+            "chain": "base",
+            "asset": "USDC",
+            "amount": "125.5",
+            "address": "0xdead",
+            "status": "confirming",
+            "confirmations": 3,
+            "required_confirmations": 12,
+            "tx_hash": "0xfeed",
+            "created_at": 1_700_000_000_000i64,
+            "updated_at": 1_700_000_060_000i64
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn bridge_assets_lists_both_directions_and_marks_withdraw_as_unavailable() {
+        let out = bridge_assets(&bridge_assets_fixture());
+        assert!(out.contains("base (8453)"), "chain id is shown: {out}");
+        assert!(out.contains("deposit") && out.contains("withdraw"));
+        assert!(out.contains("1 chain(s), 2 asset(s)."), "tally: {out}");
+        // The withdraw row must not read as something the CLI can do.
+        assert!(
+            out.contains("no withdrawal command"),
+            "withdraw rows need the caveat: {out}"
+        );
+        // An absent fee/contract is `-`, never a fabricated zero or empty cell.
+        assert!(out.contains('-'), "missing optionals render as `-`: {out}");
+    }
+
+    #[test]
+    fn bridge_assets_json_keeps_money_as_strings_and_nulls_absent_optionals() {
+        let v: Value = serde_json::from_str(&bridge_assets_json(&bridge_assets_fixture())).unwrap();
+        let chain = &v["chains"][0];
+        assert_eq!(chain["chain"], json!("base"));
+        assert_eq!(chain["chain_id"], json!(8453));
+        let dep = &chain["deposit_assets"][0];
+        assert_eq!(dep["min_amount"], json!("10"), "decimals stay strings");
+        assert_eq!(dep["fee"], json!("0"));
+        assert_eq!(dep["decimals"], json!(6), "counts stay JSON numbers");
+        let wd = &chain["withdraw_assets"][0];
+        assert_eq!(wd["fee"], Value::Null, "an absent fee is null, not 0");
+        assert_eq!(wd["contract_address"], Value::Null);
+    }
+
+    #[test]
+    fn bridge_assets_renders_an_empty_response_without_a_table() {
+        let empty: BridgeAssetsResponse = serde_json::from_value(json!({ "chains": [] })).unwrap();
+        assert_eq!(bridge_assets(&empty), "No bridge chains.");
+    }
+
+    #[test]
+    fn bridge_deposit_address_json_shape() {
+        let a: BridgeDepositAddress = serde_json::from_value(json!({
+            "address": "0xdead",
+            "chain": "base",
+            "accepts": ["USDC", "USDX"],
+            "account_id": "0xabc",
+            "created_at": 1_700_000_000_000i64
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&bridge_deposit_address_json(&a)).unwrap();
+        assert_eq!(
+            keys(&v),
+            ["accepts", "account_id", "address", "chain", "created_at"]
+        );
+        assert_eq!(
+            v["created_at"],
+            json!("2023-11-14T22:13:20Z"),
+            "timestamps are ISO-8601 UTC, as in market_status"
+        );
+        assert!(bridge_deposit_address(&a).contains("USDC,USDX"));
+    }
+
+    #[test]
+    fn bridge_deposits_report_confirmations_as_seen_over_required() {
+        let out = bridge_deposits(&[bridge_deposit_fixture()]);
+        assert!(out.contains("3/12"), "conf as seen/required: {out}");
+        assert!(out.contains("1 deposit(s)."));
+        // The tx hash belongs to the detail view, not the table.
+        assert!(
+            !out.contains("0xfeed"),
+            "tx hash stays out of the table: {out}"
+        );
+        assert!(bridge_deposit(&bridge_deposit_fixture()).contains("0xfeed"));
+    }
+
+    /// A deposit not yet seen on chain reports neither count. `0/0` would read as
+    /// "confirmed, nothing required", so both halves must show `-`.
+    #[test]
+    fn an_unseen_deposit_shows_dashes_not_zeroes_for_confirmations() {
+        let mut d = bridge_deposit_fixture();
+        d.confirmations = None;
+        d.required_confirmations = None;
+        d.tx_hash = None;
+        assert!(bridge_deposits(&[d.clone()]).contains("-/-"));
+        let detail = bridge_deposit(&d);
+        assert!(detail.contains("-/-"), "detail view too: {detail}");
+
+        let v: Value = serde_json::from_str(&bridge_deposit_json(&d)).unwrap();
+        assert_eq!(v["confirmations"], Value::Null);
+        assert_eq!(v["required_confirmations"], Value::Null);
+        assert_eq!(v["tx_hash"], Value::Null);
+        assert_eq!(v["credited_at"], Value::Null, "uncredited is null, not 0");
+    }
+
+    #[test]
+    fn bridge_deposit_json_shape() {
+        let v: Value =
+            serde_json::from_str(&bridge_deposit_json(&bridge_deposit_fixture())).unwrap();
+        assert_eq!(
+            keys(&v),
+            [
+                "account_id",
+                "address",
+                "amount",
+                "asset",
+                "chain",
+                "confirmations",
+                "created_at",
+                "credited_at",
+                "id",
+                "required_confirmations",
+                "status",
+                "tx_hash",
+                "updated_at",
+            ]
+        );
+        assert_eq!(v["amount"], json!("125.5"), "money stays a string");
+        assert_eq!(v["created_at"], json!("2023-11-14T22:13:20Z"));
+    }
+
+    /// Chain, asset and status are open strings the server chooses, so an escape
+    /// sequence in one must not reach the terminal intact.
+    #[test]
+    fn bridge_output_neutralizes_control_characters() {
+        let mut d = bridge_deposit_fixture();
+        d.status = "credited\u{1b}[2K".to_string();
+        for out in [bridge_deposits(&[d.clone()]), bridge_deposit(&d)] {
+            assert!(!out.contains('\u{1b}'), "ESC must not survive: {out:?}");
+            assert!(out.contains("credited?[2K"));
+        }
+    }
+
+    #[test]
+    fn empty_bridge_lists_say_so_and_point_somewhere() {
+        assert_eq!(bridge_deposits(&[]), "No bridge deposits.");
+        let addrs = bridge_deposit_addresses(&[]);
+        assert!(
+            addrs.contains("--chain"),
+            "the empty case should name the command that fixes it: {addrs}"
+        );
     }
 }

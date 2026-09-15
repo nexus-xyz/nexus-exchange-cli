@@ -21,8 +21,8 @@ use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest};
 use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
-    AccountCommand, AgentsCommand, AuthCommand, Cli, Command, KeysCommand, MarketCommand,
-    OrderCommand, OutputFormat, Target,
+    AccountCommand, AgentsCommand, AuthCommand, BridgeCommand, Cli, Command, KeysCommand,
+    MarketCommand, OrderCommand, OutputFormat, Target,
 };
 use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
@@ -261,6 +261,9 @@ async fn main() -> Result<()> {
         Command::Agents { action } => {
             handle_agents(&client, authenticated, action, format, &target).await?
         }
+
+        // ── bridge ──
+        Command::Bridge { action } => handle_bridge(&client, authenticated, action, format).await?,
 
         // ── websocket ──
         Command::Ws {
@@ -1005,6 +1008,74 @@ fn margin_read_error(err: nexus_exchange::Error, context: &'static str) -> anyho
     } else {
         err
     }
+}
+
+/// Handle the `nexus bridge` subcommands (Phase A: deposits).
+///
+/// `assets` is public; everything else is account-scoped and gated on
+/// credentials. `deposit-address` and `deposits` each cover two SDK methods —
+/// the list and the single-item read — selected by the optional narrowing flag.
+async fn handle_bridge(
+    client: &Client,
+    authenticated: bool,
+    action: BridgeCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    match action {
+        BridgeCommand::Assets => {
+            let assets = client
+                .fetch_bridge_assets()
+                .await
+                .context("failed to fetch bridge assets")?;
+            emit(format, output::bridge_assets(&assets), || {
+                output::bridge_assets_json(&assets)
+            });
+        }
+        BridgeCommand::DepositAddress { chain: Some(chain) } => {
+            require_authenticated(authenticated, "bridge deposit-address")?;
+            // Get-or-create, idempotent per (account, chain) — no confirmation
+            // prompt, because a repeat call returns the same address and nothing
+            // is spent, revoked or overwritten.
+            let address = client
+                .create_bridge_deposit_address(&chain)
+                .await
+                .with_context(|| format!("failed to get bridge deposit address for {chain}"))?;
+            emit(format, output::bridge_deposit_address(&address), || {
+                output::bridge_deposit_address_json(&address)
+            });
+        }
+        BridgeCommand::DepositAddress { chain: None } => {
+            require_authenticated(authenticated, "bridge deposit-address")?;
+            let addresses = client
+                .fetch_bridge_deposit_addresses()
+                .await
+                .context("failed to fetch bridge deposit addresses")?;
+            emit(format, output::bridge_deposit_addresses(&addresses), || {
+                output::bridge_deposit_addresses_json(&addresses)
+            });
+        }
+        BridgeCommand::Deposits { id: Some(id) } => {
+            require_authenticated(authenticated, "bridge deposits")?;
+            let deposit = client
+                .fetch_bridge_deposit(&id)
+                .await
+                .with_context(|| format!("failed to fetch bridge deposit {id}"))?;
+            emit(format, output::bridge_deposit(&deposit), || {
+                output::bridge_deposit_json(&deposit)
+            });
+        }
+        BridgeCommand::Deposits { id: None } => {
+            require_authenticated(authenticated, "bridge deposits")?;
+            let deposits = client
+                .fetch_bridge_deposits()
+                .await
+                .context("failed to fetch bridge deposits")?;
+            emit(format, output::bridge_deposits(&deposits), || {
+                output::bridge_deposits_json(&deposits)
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Fail fast when an account-scoped command is invoked without credentials.
