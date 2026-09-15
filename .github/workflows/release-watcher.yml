@@ -1,0 +1,196 @@
+# Weekly watcher on the release pipeline (ENG-11186).
+#
+# WHAT GAP THIS CLOSES, AND WHICH IT DOES NOT
+#
+# `release.yml` triggers on `pull_request` and on version tags only. Because
+# `dist-workspace.toml` sets `pr-run-mode = "upload"`, its full cross-platform
+# build already runs on every PR — so the ENG-9357 break was not undetected. It
+# was detected continuously, by every author, for ten days, and nothing acted on
+# it: no release job is in `main`'s required set, so a red
+# `build-local-artifacts` blocks no PR, dismisses no approval, and notifies
+# nobody.
+#
+# This workflow closes exactly one half of that: **a break that arrives with no
+# PR traffic, and a failure that tells someone.** It does NOT make a red release
+# build blocking. Promoting the PR-time build to a required check is the cheaper
+# and arguably more correct fix, and it is a policy call — a genuinely broken
+# release pipeline would then block all PRs — so it belongs to whoever owns that
+# decision, not to this file. ENG-11186 records both options.
+#
+# WHY IT RUNS THE REAL MATRIX AND NOT `dist plan`
+#
+# `ci.yml` already runs `dist plan` and `dist generate --check` on every PR, and
+# neither would have caught ENG-9357: that was a *build* failure on one target
+# (`x86_64-pc-windows-msvc`) from an externally-rejected OAuth exchange, with
+# nothing in this repo changed on either side of it. A scheduled `dist plan`
+# would have stayed green throughout and read as coverage. So this builds.
+#
+# WHY WEEKLY
+#
+# Sized to the incident rather than picked. The lapse was invisible for ten days
+# (2026-07-18 to 07-28), so a weekly cadence detects that shape in at most seven.
+# Daily would cost ~7x the runner minutes for a shorter tail on a break that also
+# shows on every PR, and this pod has two open tickets about cutting CI cost
+# (ENG-4337, ENG-4342). `workflow_dispatch` is here so a human never has to wait
+# for the cron.
+#
+# THE TARGET LIST IS DERIVED, NOT TYPED
+#
+# The matrix comes from `dist plan --output-format=json`, the same source
+# `release.yml`'s own `plan` job uses. A hand-copied target list is one a new
+# entry in `dist-workspace.toml` escapes silently — the failure mode this
+# workflow exists to prevent, reintroduced one level up.
+#
+# WHAT STILL HAS NO WATCHER
+#
+# This workflow does not watch itself. If the schedule stops firing — a disabled
+# workflow, a renamed default branch, GitHub dropping crons on an inactive repo —
+# nothing notices, and silence reads exactly like success. Stated rather than
+# solved: the honest fix for that is a check outside this repo, which is out of
+# scope here.
+
+name: Release Watcher
+
+on:
+  schedule:
+    # Mondays 06:17 UTC. Offset off the hour and off `sdk-autobump.yml`'s
+    # 47 8 * * * so the two never contend for runners.
+    - cron: "17 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: release-watcher
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      - name: Plan, and derive the build matrix from it
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist generate --check
+          dist plan --output-format=json > plan.json
+          # `include` is what release.yml's own build job consumes. Refuse an
+          # empty or absent matrix loudly: a zero-target build would report
+          # success having compiled nothing, which is the exact shape this
+          # workflow exists to catch.
+          include="$(jq -c '.ci.github.artifacts_matrix.include // empty' plan.json)"
+          if [ -z "$include" ] || [ "$(jq 'length' <<<"$include")" -eq 0 ]; then
+            echo "::error::dist plan produced no artifacts matrix, so there is nothing to build and a green run here would mean nothing. Check dist-workspace.toml's targets."
+            exit 1
+          fi
+          echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release plan"
+            echo
+            echo "\`dist generate --check\` clean · $(jq 'length' <<<"$include") build target(s):"
+            echo
+            jq -r '.[] | "- `" + (.targets | join(", ")) + "` on `" + .runner + "`"' <<<"$include"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    # Mirrors release.yml's own build job. Each line below that looks like
+    # boilerplate is load-bearing on at least one planned target, and a watcher
+    # that diverges from the pipeline it watches reports on something else
+    # (review of #78).
+    container: ${{ matrix.container && matrix.container.image || null }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust non-interactively if not already installed
+        if: ${{ matrix.container }}
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: release-watcher-${{ join(matrix.targets, '-') }}
+          cache-provider: ${{ matrix.cache_provider }}
+      # `install_dist` is an OBJECT in the plan, not a string — `.run` is the
+      # command. Without it this step expands to nothing, `dist build` fails on
+      # every target with a missing command, and the watcher opens its issue
+      # every Monday for a reason that has nothing to do with the release
+      # pipeline: the cry-wolf failure ENG-11186 exists to remove.
+      - name: Install dist
+        run: ${{ matrix.install_dist.run }}
+      # Where a cross toolchain arrives — `aarch64-unknown-linux-gnu` is in
+      # dist-workspace.toml and does not build without this.
+      - name: Install dependencies
+        run: |
+          ${{ matrix.packages_install }}
+      # No tag: this is a dry build of the current default branch, not a release.
+      # `--artifacts=local` is the same half release.yml builds per target.
+      - name: Build
+        run: dist build --print=linkage --output-format=json ${{ matrix.dist_args }}
+      - name: Record the verdict
+        if: always()
+        run: |
+          echo "### \`${{ join(matrix.targets, ', ') }}\` — ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    needs: [plan, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TITLE="Release pipeline is broken on the default branch"
+          # One issue, reused. A new issue per run would be noise nobody reads,
+          # which is how the original ten-day lapse stayed invisible.
+          existing="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [ "$PLAN_RESULT" = "success" ] && [ "$BUILD_RESULT" = "success" ]; then
+            echo "::notice::release pipeline green across every planned target"
+            echo "Release pipeline green across every planned target. $RUN_URL" >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$REPO" \
+                --body "Recovered: the weekly watcher is green across every planned target. $RUN_URL"
+              gh issue close "$existing" --repo "$REPO" --reason completed
+            fi
+            exit 0
+          fi
+
+          BODY="The weekly release watcher failed. plan=\`$PLAN_RESULT\` build=\`$BUILD_RESULT\`.
+
+          $RUN_URL
+
+          Why this matters more than one red run: no job from \`release.yml\` is in this repo's required set, so a broken release pipeline blocks no PR and dismisses no approval. It stays broken until a human looks. That is ENG-11186, and it is why this watcher exists.
+
+          This issue is reused rather than reopened per run — it closes itself when the watcher next goes green."
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$BODY"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+          fi
+          # Fail the run too: an issue is the durable signal, a red run is the
+          # immediate one, and the workflow's own status is what a human scanning
+          # the Actions tab sees.
+          exit 1
