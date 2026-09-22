@@ -296,3 +296,106 @@ fn batch_orders_example_is_valid_json_array() {
         }
     }
 }
+
+/// The eight operations that keep coverage at 60/68 rather than 68/68, and why
+/// each is out (ENG-9198). Split by *who* can change it, because the halves are
+/// not the same kind of gap:
+///
+///   * `admin/tiers` (3) and the two deprecated WebSocket ops are CLI decisions,
+///     documented at the foot of `check_spec_drift.py`. They stay out.
+///   * the three bridge WALLET ops are NOT a CLI decision: `nexus-exchange`
+///     0.11.0 wraps no method for them and the CLI issues no HTTP of its own, so
+///     no command can reach them until the SDK does.
+///
+/// Asserting them absent keeps a future contributor from "fixing" the ratio by
+/// adding a line here, which would claim an operation no command can serve.
+#[test]
+fn the_operations_outside_cli_coverage_stay_out_of_endpoints_txt() {
+    let ops = endpoints();
+    for (method, path, why) in [
+        ("GET", "/admin/tiers", "admin-only; out of CLI scope"),
+        ("PUT", "/admin/tiers", "admin-only; out of CLI scope"),
+        (
+            "DELETE",
+            "/admin/tiers/{address}",
+            "admin-only; out of CLI scope",
+        ),
+        (
+            "POST",
+            "/ws-tokens",
+            "deprecated; superseded by POST /ws/token",
+        ),
+        (
+            "GET",
+            "/stream",
+            "deprecated SSE; superseded by the /ws upgrade",
+        ),
+        (
+            "GET",
+            "/api/v1/bridge/wallets",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+        (
+            "POST",
+            "/api/v1/bridge/wallets",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+        (
+            "POST",
+            "/api/v1/bridge/wallets/challenge",
+            "no nexus-exchange 0.11.0 wrapper",
+        ),
+    ] {
+        assert!(
+            !ops.contains(&(method.to_string(), path.to_string())),
+            "{method} {path} must stay out of endpoints.txt ({why})"
+        );
+    }
+}
+
+/// The five mutations ENG-9198 ported from #74. A regression that drops one
+/// would otherwise only show up as a slightly lower percentage in the drift
+/// run's summary, which is easy to wave through.
+#[test]
+fn eng_9198_mutations_are_listed_in_endpoints_txt() {
+    let ops = endpoints();
+    for (method, path) in [
+        ("POST", "/api/v1/orders/preview"),
+        ("PUT", "/api/v1/account/cancel-on-disconnect"),
+        ("POST", "/deposits"),
+        ("POST", "/faucet"),
+        ("POST", "/account/margin"),
+    ] {
+        assert!(
+            ops.contains(&(method.to_string(), path.to_string())),
+            "endpoints.txt is missing {method} {path} (added by ENG-9198)"
+        );
+    }
+}
+
+/// `POST /orders/preview` is in the spec's `trading` rate-limit class: it is
+/// billed like an order. So the CLI issues it from exactly one place — the
+/// explicit `order preview` arm — and never implicitly from `order place` or
+/// anywhere else, where it would spend the caller's trading budget unasked.
+#[test]
+fn order_preview_is_called_from_exactly_one_place() {
+    let main = read("src/main.rs");
+    let code: Vec<&str> = main
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    let calls = code
+        .iter()
+        .filter(|l| l.contains(".preview_order("))
+        .count();
+    assert_eq!(
+        calls, 1,
+        "preview_order must be called exactly once in src/main.rs (the `order preview` arm)"
+    );
+    for src in ["src/wsclient.rs", "src/output.rs", "src/cli.rs"] {
+        assert!(
+            !read(src).contains(".preview_order("),
+            "{src} must not issue an order preview"
+        );
+    }
+}

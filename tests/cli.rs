@@ -941,6 +941,66 @@ fn the_faucet_still_works_on_play_funds() {
     );
 }
 
+/// `account faucet` (`POST /faucet`) is a second mint path beside `account
+/// credit`, so it must hit the same guard in the same order: refused on the
+/// network axis before the credential check, and naming itself.
+#[test]
+fn account_faucet_is_refused_on_mainnet_before_the_auth_gate() {
+    let out = run(&["--network", "mainnet", "account", "faucet"]);
+    assert_ne!(out.code, Some(0), "the faucet must fail on mainnet");
+    assert!(
+        out.stderr.contains("`account faucet`"),
+        "the refusal must name the command that was run; got: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("account deposit"),
+        "the refusal must name the real-funds alternative; got: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("no credentials are configured"),
+        "the faucet refusal should not be masked by the auth gate; got: {}",
+        out.stderr
+    );
+
+    let out = run(&["--network", "testnet", "account", "faucet"]);
+    assert!(
+        out.stderr.contains("no credentials are configured"),
+        "testnet should reach the auth gate, not a faucet refusal; got: {}",
+        out.stderr
+    );
+}
+
+/// The collateral-moving mutations are confirmed, so with no terminal and no
+/// `--yes` they must stop before anything is sent; reaching the network would
+/// surface as a `failed to ...` error instead.
+#[test]
+fn eng_9198_mutations_refuse_non_interactively_without_yes() {
+    for args in [
+        &["account", "margin", "add", "BTC-USDX-PERP", "1"][..],
+        &["account", "margin", "remove", "BTC-USDX-PERP", "1"][..],
+        &["account", "deposits", "create", "1"][..],
+        &["account", "cancel-on-disconnect", "set", "false"][..],
+    ] {
+        let mut argv = vec!["--network", "local", "--api-key", "k", "--api-secret", "s"];
+        argv.extend_from_slice(args);
+        let out = run(&argv);
+        assert_ne!(out.code, Some(0), "{args:?} must not succeed");
+        assert!(
+            out.stderr
+                .contains("refusing to proceed without confirmation"),
+            "{args:?} must stop at the confirmation gate: {}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("failed to"),
+            "{args:?} reached the network without confirmation: {}",
+            out.stderr
+        );
+    }
+}
+
 /// A first mainnet trade with no terminal and no `--yes` must stop, rather than
 /// silently trading because nobody was there to answer.
 #[test]

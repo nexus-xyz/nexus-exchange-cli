@@ -8,12 +8,12 @@
 use nexus_exchange::types::{
     AccountFees, AccountFunding, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent,
     AgentInfo, ApiKeyInfo, BridgeAsset, BridgeAssetsResponse, BridgeDeposit, BridgeDepositAddress,
-    CancelOnDisconnectStatus, ClosedPosition, CreditResult, Decimal, DepositResult, EquityPoint,
-    Fill, FundingDirection, FundingPremiumSample, FundingSample, FundsEntry, FundsKind,
-    FundsStatus, HealthStatus, MarkPrice, Market, MarketRiskParams, MarketStatus, MarketSummary,
-    Ohlcv, Order, OrderBook, OrderHistoryEntry, OrderResponse, OrderResult, PortfolioHistory,
-    Position, PriceLevel, RateLimitStatus, Side, StatsSnapshot, ThroughputSample, Ticker, Trade,
-    Withdrawal,
+    CancelOnDisconnectStatus, ClosedPosition, CreditResult, Decimal, DepositResponse,
+    DepositResult, EquityPoint, FaucetResponse, Fill, FundingDirection, FundingPremiumSample,
+    FundingSample, FundsEntry, FundsKind, FundsStatus, HealthStatus, MarginAdjustment, MarkPrice,
+    Market, MarketRiskParams, MarketStatus, MarketSummary, Ohlcv, Order, OrderBook,
+    OrderHistoryEntry, OrderPreview, OrderResponse, OrderResult, PortfolioHistory, Position,
+    PriceLevel, RateLimitStatus, Side, StatsSnapshot, ThroughputSample, Ticker, Trade, Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -2157,6 +2157,101 @@ pub fn cancel_on_disconnect_json(s: &CancelOnDisconnectStatus) -> String {
     }))
 }
 
+/// Render the result of a spec'd deposit (`POST /deposits`).
+///
+/// The server answers with the authoritative post-deposit balance, so that is
+/// what is shown — it is a balance, not the amount that was credited.
+pub fn deposit_created(d: &DepositResponse) -> String {
+    format!("Deposit accepted. Balance is now {}.", d.balance)
+}
+
+pub fn deposit_created_json(d: &DepositResponse) -> String {
+    pretty(&json!({ "balance": d.balance.to_string() }))
+}
+
+/// Render a faucet claim (`POST /faucet`).
+pub fn faucet(f: &FaucetResponse) -> String {
+    format!(
+        "Claimed {} from the faucet.\nNext claim available at {} (server-reported; a claim inside the cooldown answers 429).",
+        f.amount,
+        ms_to_iso8601(f.available_at_ms),
+    )
+}
+
+pub fn faucet_json(f: &FaucetResponse) -> String {
+    pretty(&json!({
+        "amount": f.amount.to_string(),
+        "available_at_ms": f.available_at_ms,
+        "available_at": ms_to_iso8601(f.available_at_ms),
+    }))
+}
+
+/// Render an isolated-margin adjustment (`POST /account/margin`).
+pub fn margin_adjustment(m: &MarginAdjustment) -> String {
+    let rows = [
+        ("market", safe(&m.market_id)),
+        ("allocated margin", m.allocated_margin.to_string()),
+        ("collateral", m.collateral.to_string()),
+    ];
+    rows.iter()
+        .map(|(k, v)| format!("{k:<20}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn margin_adjustment_json(m: &MarginAdjustment) -> String {
+    pretty(&json!({
+        "market_id": m.market_id,
+        "allocated_margin": m.allocated_margin.to_string(),
+        "collateral": m.collateral.to_string(),
+    }))
+}
+
+/// Render an order preview (`POST /api/v1/orders/preview`).
+///
+/// A preview that the engine would reject is not an error — the request
+/// succeeded and the answer is "no". It is rendered as a refusal with the
+/// server's reason so the two outcomes cannot be confused. An unreported
+/// verdict is not "accepted" either: the SDK's own `is_accepted` treats `None`
+/// as not vouched for, and so does this.
+pub fn order_preview(p: &OrderPreview) -> String {
+    let verdict = match p.accepted {
+        Some(true) => "ACCEPTED (preview only — nothing was placed)".to_string(),
+        Some(false) => format!("REJECTED — {}", safe(&opt(&p.reject_reason))),
+        None => "verdict not reported by the server (treat as NOT accepted)".to_string(),
+    };
+    let rows = [
+        ("required margin", opt(&p.required_initial_margin)),
+        ("post-trade equity", opt(&p.projected_post_trade_equity)),
+        (
+            "post-trade liq. price",
+            opt(&p.projected_post_trade_liquidation_price),
+        ),
+        ("post-trade leverage", opt(&p.projected_post_trade_leverage)),
+        ("expected fill VWAP", opt(&p.expected_fill_vwap)),
+        ("projected fees", opt(&p.projected_fees)),
+    ];
+    let body = rows
+        .iter()
+        .map(|(k, v)| format!("{k:<24}{v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{verdict}\n\n{body}")
+}
+
+pub fn order_preview_json(p: &OrderPreview) -> String {
+    pretty(&json!({
+        "accepted": p.accepted,
+        "reject_reason": p.reject_reason,
+        "required_initial_margin": opt_json(&p.required_initial_margin),
+        "projected_post_trade_equity": opt_json(&p.projected_post_trade_equity),
+        "projected_post_trade_liquidation_price": opt_json(&p.projected_post_trade_liquidation_price),
+        "projected_post_trade_leverage": opt_json(&p.projected_post_trade_leverage),
+        "expected_fill_vwap": opt_json(&p.expected_fill_vwap),
+        "projected_fees": opt_json(&p.projected_fees),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3257,5 +3352,76 @@ mod tests {
             addrs.contains("--chain"),
             "the empty case should name the command that fixes it: {addrs}"
         );
+    }
+
+    // ── ENG-9198: renderers for the five mutations ported from #74 ──
+
+    #[test]
+    fn order_preview_rejection_is_not_an_error() {
+        let rejected: OrderPreview = serde_json::from_value(json!({
+            "accepted": false,
+            "reject_reason": "insufficient margin",
+        }))
+        .unwrap();
+        let out = order_preview(&rejected);
+        assert!(out.contains("REJECTED"), "{out}");
+        assert!(out.contains("insufficient margin"), "{out}");
+
+        let accepted: OrderPreview = serde_json::from_value(json!({
+            "accepted": true,
+            "required_initial_margin": "500",
+        }))
+        .unwrap();
+        let out = order_preview(&accepted);
+        assert!(out.contains("ACCEPTED"), "{out}");
+        // Says out loud that nothing was submitted, so an accepted preview is
+        // never mistaken for a placed order.
+        assert!(out.contains("nothing was placed"), "{out}");
+
+        let silent: OrderPreview = serde_json::from_value(json!({})).unwrap();
+        let out = order_preview(&silent);
+        assert!(!out.contains("ACCEPTED"), "{out}");
+        assert!(out.contains("NOT accepted"), "{out}");
+    }
+
+    #[test]
+    fn server_strings_in_mutation_renderers_are_control_char_safe() {
+        let esc = "BTC\u{1b}[2K\u{1b}[31mCREDITED";
+        let pv: OrderPreview =
+            serde_json::from_value(json!({ "accepted": false, "reject_reason": esc })).unwrap();
+        assert!(!order_preview(&pv).contains('\u{1b}'));
+
+        let m: MarginAdjustment = serde_json::from_value(json!({
+            "market_id": esc, "allocated_margin": "1", "collateral": "2",
+        }))
+        .unwrap();
+        assert!(!margin_adjustment(&m).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn mutation_json_renderers_keep_decimals_as_strings() {
+        // Money round-trips as the exact string the exchange sent, never as a
+        // JSON float.
+        let m: MarginAdjustment = serde_json::from_value(json!({
+            "market_id": "BTC-USDX-PERP",
+            "allocated_margin": "1000.5",
+            "collateral": "2000.25",
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&margin_adjustment_json(&m)).unwrap();
+        assert_eq!(v["allocated_margin"], json!("1000.5"));
+        assert_eq!(keys(&v), ["allocated_margin", "collateral", "market_id"]);
+
+        let d: DepositResponse = serde_json::from_value(json!({ "balance": "123.456" })).unwrap();
+        let v: Value = serde_json::from_str(&deposit_created_json(&d)).unwrap();
+        assert_eq!(v["balance"], json!("123.456"));
+
+        let f: FaucetResponse = serde_json::from_value(json!({
+            "amount": "1000", "available_at_ms": 1_700_000_000_000_i64,
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&faucet_json(&f)).unwrap();
+        assert_eq!(v["amount"], json!("1000"));
+        assert_eq!(v["available_at_ms"], json!(1_700_000_000_000_i64));
     }
 }
