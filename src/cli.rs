@@ -1508,6 +1508,39 @@ pub enum OrderCommand {
         yes: bool,
     },
 
+    /// Dry-run an order without placing it: margin required, projected equity,
+    /// liquidation price, leverage, expected fill VWAP and fees.
+    ///
+    /// Takes the same flags as `place` (built by the same code, so the two
+    /// cannot validate differently). Nothing is placed and no margin is
+    /// reserved, so there is no confirmation prompt — but the request is signed
+    /// and counts against your **trading** rate-limit bucket like an order
+    /// does, so it is sent exactly once, never retried, and never issued
+    /// implicitly by `place`.
+    Preview {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        #[arg(long)]
+        market: String,
+        /// Order side.
+        #[arg(long, value_enum)]
+        side: SideArg,
+        /// Order type.
+        #[arg(long = "type", value_enum)]
+        order_type: OrderTypeArg,
+        /// Limit price (required for `--type limit`).
+        #[arg(long)]
+        price: Option<String>,
+        /// Order quantity (base units).
+        #[arg(long)]
+        quantity: String,
+        /// Time in force.
+        #[arg(long, value_enum, default_value_t = TifArg::Gtc)]
+        tif: TifArg,
+        /// Only reduce an existing position; never open or flip one.
+        #[arg(long)]
+        reduce_only: bool,
+    },
+
     /// Cancel a single order by id (requires `--market`), every open order in
     /// one market with `--market` alone, or all open orders with `--all`.
     Cancel {
@@ -1634,6 +1667,14 @@ pub enum AccountCommand {
         amount: Option<String>,
     },
 
+    /// Claim the testnet faucet (`POST /faucet`). Play funds only.
+    ///
+    /// Distinct from `account credit`: the faucet is a fixed server-side grant
+    /// on its own cooldown, while `credit` draws against a daily allowance you
+    /// can size with `--amount`. Refused on any network that is not declared
+    /// play funds with a faucet, exactly as `credit` is.
+    Faucet,
+
     /// Account equity over time, oldest first.
     ///
     /// Narrower than `portfolio-history`, which also carries cumulative PnL and
@@ -1651,22 +1692,36 @@ pub enum AccountCommand {
         limit: Option<u32>,
     },
 
-    /// Your deposit history, most recent first.
+    /// Your deposit history, most recent first; `deposits create` makes one.
     ///
-    /// The ledger of completed deposits. To make one, see `account deposit`
-    /// (collateral) or `bridge` (cross-chain).
+    /// With no subcommand this lists the ledger of completed deposits. To make
+    /// one, see `account deposits create` (the spec'd `/deposits` route),
+    /// `account deposit` (the older `/account/deposit`) or `bridge`
+    /// (cross-chain).
+    #[command(args_conflicts_with_subcommands = true)]
     Deposits {
         /// Maximum number of deposits to return.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_DEPOSITS_LIMIT as i64))]
         limit: Option<u32>,
+        #[command(subcommand)]
+        action: Option<DepositsCommand>,
     },
 
-    /// Show whether cancel-on-disconnect is armed for this account.
+    /// Add or remove isolated margin on an open position.
+    Margin {
+        #[command(subcommand)]
+        action: MarginCommand,
+    },
+
+    /// Show whether cancel-on-disconnect is armed; `set` changes it.
     ///
     /// `enabled` is your setting; `active` is whether the exchange is honouring
     /// it, which is false when the venue has the feature switched off
     /// deployment-wide. Both are reported because they disagree.
-    CancelOnDisconnect,
+    CancelOnDisconnect {
+        #[command(subcommand)]
+        action: Option<CancelOnDisconnectCommand>,
+    },
 
     /// Show the caller's rate-limit status.
     RateLimit,
@@ -1693,6 +1748,68 @@ pub enum AccountCommand {
     // routes it -- api-module serves `POST /leverage`, so the command failed for
     // every caller. ENG-7318 is documenting the served route; when a PUBLISHED
     // spec version carries it, add the command back at the path that spec defines.
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DepositsCommand {
+    /// Credit collateral to the account over the spec'd `/deposits` route.
+    ///
+    /// Distinct from `account deposit`, which posts to the older
+    /// `/account/deposit`. This one returns the authoritative post-deposit
+    /// balance rather than an acknowledgement.
+    Create {
+        /// Amount to deposit.
+        amount: String,
+        /// Asset to deposit. The server defaults to `USDX` when omitted.
+        #[arg(long)]
+        asset: Option<String>,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarginCommand {
+    /// Add isolated margin to an open position, lowering its liquidation risk.
+    Add {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Amount of margin to add.
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Remove isolated margin from an open position, returning it to free
+    /// collateral. This RAISES the position's liquidation risk.
+    Remove {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Amount of margin to remove.
+        amount: String,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CancelOnDisconnectCommand {
+    /// Enable or disable cancel-on-disconnect.
+    ///
+    /// `active` may stay false even after enabling: the exchange can have the
+    /// feature switched off deployment-wide, and the response reports what
+    /// actually took effect rather than what was asked for.
+    Set {
+        /// `true` to enable, `false` to disable.
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+        /// Skip the confirmation prompt (required when not run interactively).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -4138,5 +4255,139 @@ mod tests {
             let target = cli.target(&file).unwrap();
             assert_eq!(cli.credentials(&file, &target).unwrap().0, expected);
         }
+    }
+
+    // ── ENG-9198: the five mutations ported from #74 ──
+
+    #[test]
+    fn cancel_on_disconnect_set_takes_an_explicit_bool() {
+        // The value is required and must be a bool: `set` with no argument would
+        // otherwise be ambiguous about which way it flips a live protection.
+        assert!(Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set", "maybe"])
+                .is_err()
+        );
+        for v in ["true", "false"] {
+            assert!(
+                Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect", "set", v]).is_ok(),
+                "{v} should parse"
+            );
+        }
+        // The bare read added in #79 keeps working.
+        assert!(matches!(
+            Cli::try_parse_from(["nexus", "account", "cancel-on-disconnect"])
+                .unwrap()
+                .command,
+            Command::Account {
+                action: AccountCommand::CancelOnDisconnect { action: None }
+            }
+        ));
+    }
+
+    #[test]
+    fn deposits_lists_bare_and_creates_under_a_subcommand() {
+        // `account deposits [--limit N]` is still the ledger read from #79...
+        match Cli::try_parse_from(["nexus", "account", "deposits", "--limit", "5"])
+            .unwrap()
+            .command
+        {
+            Command::Account {
+                action:
+                    AccountCommand::Deposits {
+                        limit: Some(5),
+                        action: None,
+                    },
+            } => {}
+            other => panic!("unexpected parse: {other:?}"),
+        }
+        // ...and `create` is the mutation, which needs an amount.
+        assert!(Cli::try_parse_from(["nexus", "account", "deposits", "create"]).is_err());
+        assert!(Cli::try_parse_from([
+            "nexus", "account", "deposits", "create", "50", "--asset", "USDX", "--yes",
+        ])
+        .is_ok());
+        // A read flag on a write is refused rather than silently ignored.
+        assert!(Cli::try_parse_from([
+            "nexus", "account", "deposits", "--limit", "5", "create", "50",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn margin_mutations_take_market_amount_and_yes() {
+        assert!(Cli::try_parse_from(["nexus", "account", "margin"]).is_err());
+        assert!(Cli::try_parse_from(["nexus", "account", "margin", "add"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nexus", "account", "margin", "add", "BTC-USDX-PERP"]).is_err()
+        );
+        for dir in ["add", "remove"] {
+            assert!(Cli::try_parse_from([
+                "nexus",
+                "account",
+                "margin",
+                dir,
+                "BTC-USDX-PERP",
+                "100",
+                "--yes",
+            ])
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn account_faucet_takes_no_arguments() {
+        assert!(Cli::try_parse_from(["nexus", "account", "faucet"]).is_ok());
+        assert!(Cli::try_parse_from(["nexus", "account", "faucet", "--amount", "5"]).is_err());
+    }
+
+    #[test]
+    fn order_preview_mirrors_place_and_takes_no_confirmation_flag() {
+        // Same required flags as `place`...
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "limit",
+            "--price",
+            "50000",
+            "--quantity",
+            "0.1",
+        ])
+        .is_ok());
+        // ...including `--type`, which `place` also requires.
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--quantity",
+            "0.1",
+        ])
+        .is_err());
+        // No `--yes`: a preview places nothing, so there is nothing to confirm.
+        assert!(Cli::try_parse_from([
+            "nexus",
+            "order",
+            "preview",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "0.1",
+            "--yes",
+        ])
+        .is_err());
     }
 }

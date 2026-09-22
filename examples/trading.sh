@@ -34,6 +34,13 @@ nexus order get <ORDER_ID> --market "$MARKET"         # GET /orders/{id}
 # Amend an open order in place (atomic cancel-replace); set only what changes.
 nexus order amend <ORDER_ID> --market "$MARKET" --price 83500 --yes    # PUT /orders/{id}
 
+# Dry-run an order: same flags as `place`, nothing is placed, so no --yes. It
+# is signed and counts against the TRADING rate-limit bucket, so the CLI sends
+# it exactly once and `place` never issues one on your behalf.
+nexus order preview \
+  --market "$MARKET" --side buy --type limit \
+  --price 84000 --quantity 0.01                     # POST /api/v1/orders/preview
+
 # Submit several orders at once from a JSON array (see batch_orders.json).
 nexus order batch examples/batch_orders.json --yes  # POST /orders/batch
 cat examples/batch_orders.json | nexus order batch - --yes   # ...or from stdin
@@ -52,6 +59,14 @@ nexus order cancel --all --yes                            # DELETE /api/v1/order
 # ── account settings ──
 nexus account deposit 1000 --yes                 # POST /account/deposit
 nexus account credit                             # POST /account/credit (testnet faucet)
+nexus account faucet                             # POST /faucet (play funds only)
+nexus account deposits create 1000 --yes         # POST /deposits (spec'd route)
+# Isolated margin on an open, isolated position. `remove` RAISES liquidation risk.
+nexus account margin add "$MARKET" 250 --yes     # POST /account/margin
+nexus account margin remove "$MARKET" 100 --yes  # POST /account/margin
+# Cancel-on-disconnect: flatten resting orders if the /ws connection drops.
+nexus account cancel-on-disconnect set true --yes    # PUT /api/v1/account/cancel-on-disconnect
+nexus account cancel-on-disconnect                   # GET: `enabled` AND `active`
 # No margin-mode example: `nexus account margin-mode` was withdrawn in ENG-7740
 # because no endpoint accepts a margin-mode change. ENG-7614 tracks the engine
 # work that has to land before the command can return.

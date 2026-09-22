@@ -109,6 +109,8 @@ POST /api/v1/orders/batch
 DELETE /api/v1/orders/{order_id}
 DELETE /api/v1/orders
 POST /api/v1/account/credit
+POST /api/v1/orders/preview
+PUT /api/v1/account/cancel-on-disconnect
 # No /api/v1 variant — stay on the gateway:
 # `order amend` — the SDK issues PATCH on the gateway path (v1 exposes no amend),
 # via `signed_patch_with_query("/orders/{id}")`. Was mis-mapped as PUT and parked
@@ -117,6 +119,9 @@ POST /api/v1/account/credit
 # ENG-7927, which is why the merge briefly carried this line twice.
 PATCH /orders/{order_id}
 POST /account/deposit
+POST /deposits
+POST /faucet
+POST /account/margin
 POST /keys
 DELETE /keys/{key_id}
 DELETE /agents/{address}

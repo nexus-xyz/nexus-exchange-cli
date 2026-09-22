@@ -25,7 +25,8 @@
 //! written and tested now rather than retrofitted onto a live real-funds host.
 //!
 //! One of them is not merely early. `fund()` refuses on mainnet inside the SDK,
-//! but the CLI's faucet command calls `claim_credit()`, which carries **no**
+//! but the CLI's two faucet commands call `claim_credit()` (`account credit`)
+//! and `claim_faucet()` (`account faucet`), neither of which carries **any**
 //! per-network guard of its own — it is covered only by the blanket gate that
 //! the cutover deletes. [`refuse_faucet_without_play_funds`] is therefore a real
 //! guard rather than a duplicated one — and it is the only one of the three that
@@ -100,24 +101,28 @@ pub fn announce_network(target: &Target) {
 ///     faucet" — a private stage may be seeded by other means, and claiming
 ///     credit from one that is not there is a confusing 404 rather than a refusal
 ///     that says why.
-pub fn refuse_faucet_without_play_funds(target: &Target) -> Result<()> {
+///
+/// `command` is the subcommand being refused (`account credit` or `account
+/// faucet`), so the error names what the user actually ran. Both commands mint
+/// play collateral and both go through here, ahead of the credential check.
+pub fn refuse_faucet_without_play_funds(target: &Target, command: &str) -> Result<()> {
     let network = target.namespace();
     match target.funds() {
         Funds::Play if target.has_faucet() => Ok(()),
         Funds::Play => anyhow::bail!(
-            "`account credit` claims synthetic USDX from the faucet, and {network} does not \
+            "`{command}` claims synthetic USDX from the faucet, and {network} does not \
              declare one. Set \"faucet\": true for it under \"custom_networks\" if the \
              deployment has a faucet; otherwise fund the account the way that stage is seeded."
         ),
         Funds::Real => anyhow::bail!(
-            "`account credit` claims synthetic USDX from the faucet and is refused on \
+            "`{command}` claims synthetic USDX from the faucet and is refused on \
              {network}: there is no faucet for real funds. To add real collateral, deposit it \
              explicitly with `nexus account deposit <amount>`."
         ),
         // Includes every future classification: `Funds` is `#[non_exhaustive]`,
         // and the wildcard arm is the safe one on purpose.
         _ => anyhow::bail!(
-            "`account credit` mints funds, and this target does not declare whether it moves \
+            "`{command}` mints funds, and this target does not declare whether it moves \
              real ones, so it is refused rather than assumed safe. {}",
             match target.base_url_override() {
                 // `redact_userinfo` for the same reason as `announce_network`
@@ -224,13 +229,20 @@ mod tests {
         let empty = FileConfig::default();
         for play in ["testnet", "local"] {
             assert!(
-                refuse_faucet_without_play_funds(&target_for(&["--network", play], &empty)).is_ok(),
+                refuse_faucet_without_play_funds(
+                    &target_for(&["--network", play], &empty),
+                    "account credit"
+                )
+                .is_ok(),
                 "{play} is play funds with a faucet; the faucet must work"
             );
         }
-        let err = refuse_faucet_without_play_funds(&target_for(&["--network", "mainnet"], &empty))
-            .expect_err("the faucet must be refused on a real-funds network")
-            .to_string();
+        let err = refuse_faucet_without_play_funds(
+            &target_for(&["--network", "mainnet"], &empty),
+            "account credit",
+        )
+        .expect_err("the faucet must be refused on a real-funds network")
+        .to_string();
         assert!(
             err.contains("mainnet"),
             "the error must name the network: {err}"
@@ -249,9 +261,12 @@ mod tests {
     fn undeclared_funds_refuse_the_faucet() {
         for declared in ["unknown", "", "reel"] {
             let file = file_with("dev", declared, true);
-            let err = refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file))
-                .expect_err("undeclared funds must refuse, not assume play funds")
-                .to_string();
+            let err = refuse_faucet_without_play_funds(
+                &target_for(&["--network", "dev"], &file),
+                "account credit",
+            )
+            .expect_err("undeclared funds must refuse, not assume play funds")
+            .to_string();
             assert!(
                 err.contains("does not declare whether it moves real ones"),
                 "funds {declared:?} should refuse as unclassified; got: {err}"
@@ -268,10 +283,13 @@ mod tests {
     /// terms of the override rather than of the network whose key it borrows.
     #[test]
     fn a_base_url_override_refuses_the_faucet() {
-        let err = refuse_faucet_without_play_funds(&target_for(
-            &["--network", "local", "--base-url", "http://127.0.0.1:9090"],
-            &FileConfig::default(),
-        ))
+        let err = refuse_faucet_without_play_funds(
+            &target_for(
+                &["--network", "local", "--base-url", "http://127.0.0.1:9090"],
+                &FileConfig::default(),
+            ),
+            "account credit",
+        )
         .expect_err("an override carries no funds classification")
         .to_string();
         assert!(
@@ -289,15 +307,18 @@ mod tests {
     /// warning, it is a louder one.
     #[test]
     fn the_faucet_refusal_masks_a_password_in_the_override() {
-        let err = refuse_faucet_without_play_funds(&target_for(
-            &[
-                "--network",
-                "local",
-                "--base-url",
-                "https://alice:hunter2@exchange.example.com",
-            ],
-            &FileConfig::default(),
-        ))
+        let err = refuse_faucet_without_play_funds(
+            &target_for(
+                &[
+                    "--network",
+                    "local",
+                    "--base-url",
+                    "https://alice:hunter2@exchange.example.com",
+                ],
+                &FileConfig::default(),
+            ),
+            "account credit",
+        )
         .expect_err("an override carries no funds classification")
         .to_string();
         assert!(
@@ -316,18 +337,52 @@ mod tests {
     #[test]
     fn play_funds_without_a_faucet_still_refuse() {
         let file = file_with("dev", "play", false);
-        let err = refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file))
-            .expect_err("a stage with no declared faucet must refuse")
-            .to_string();
+        let err = refuse_faucet_without_play_funds(
+            &target_for(&["--network", "dev"], &file),
+            "account credit",
+        )
+        .expect_err("a stage with no declared faucet must refuse")
+        .to_string();
         assert!(
             err.contains("does not declare one"),
             "the error should say the faucet is undeclared; got: {err}"
         );
         // ...and declaring one lets it through.
         let file = file_with("dev", "play", true);
-        assert!(
-            refuse_faucet_without_play_funds(&target_for(&["--network", "dev"], &file)).is_ok()
-        );
+        assert!(refuse_faucet_without_play_funds(
+            &target_for(&["--network", "dev"], &file),
+            "account credit"
+        )
+        .is_ok());
+    }
+
+    /// `account faucet` (`POST /faucet`) is a second mint path beside `account
+    /// credit`, so it gets the same refusal on every network where the credit
+    /// path is refused — and the error names the command the user actually ran,
+    /// not its sibling.
+    #[test]
+    fn account_faucet_is_refused_wherever_credit_is() {
+        let empty = FileConfig::default();
+        let err = refuse_faucet_without_play_funds(
+            &target_for(&["--network", "mainnet"], &empty),
+            "account faucet",
+        )
+        .expect_err("the faucet must be refused on a real-funds network")
+        .to_string();
+        assert!(err.contains("`account faucet`"), "got: {err}");
+        assert!(!err.contains("`account credit`"), "got: {err}");
+
+        let file = file_with("dev", "play", false);
+        assert!(refuse_faucet_without_play_funds(
+            &target_for(&["--network", "dev"], &file),
+            "account faucet"
+        )
+        .is_err());
+        assert!(refuse_faucet_without_play_funds(
+            &target_for(&["--network", "testnet"], &empty),
+            "account faucet"
+        )
+        .is_ok());
     }
 
     /// The prompt must never fire on play funds — not even non-interactively,

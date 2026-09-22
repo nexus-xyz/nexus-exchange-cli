@@ -197,6 +197,18 @@ METHOD_OP = {
     "cancel_orders_for_market": ("DELETE", "/api/v1/orders"),
     "deposit": ("POST", "/account/deposit"),  # no /api/v1 variant yet
     "claim_credit": ("POST", "/api/v1/account/credit"),
+    # ENG-9198 mutations (ported from #74). Paths are where nexus-exchange 0.11.0
+    # sends them (src/rest.rs), not guessed from sibling rows.
+    "preview_order": ("POST", "/api/v1/orders/preview"),
+    "set_cancel_on_disconnect": ("PUT", "/api/v1/account/cancel-on-disconnect"),
+    "create_deposit": ("POST", "/deposits"),  # no /api/v1 variant yet
+    "claim_faucet": ("POST", "/faucet"),  # no /api/v1 variant yet
+    # `account margin add|remove` both call `adjust_margin` and differ only in the
+    # `direction` they pass, so there is one row here. The SDK's `add_margin` /
+    # `remove_margin` wrappers are deliberately NOT listed: no command calls
+    # them, and a row nothing calls is exactly what invariant 9's self-test
+    # rejects.
+    "adjust_margin": ("POST", "/account/margin"),  # no /api/v1 variant yet
     "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
     "delete_api_key": ("DELETE", "/keys/{key_id}"),  # no /api/v1 variant yet
     "revoke_agent": ("DELETE", "/agents/{address}"),  # no /api/v1 variant yet
@@ -290,6 +302,12 @@ NON_REST_TARGETS = {
 #   PUT/GET/DELETE /admin/tiers* — admin-only tier management; out of CLI scope.
 #   POST /ws-tokens — deprecated; superseded by POST /ws/token (which we use).
 #   GET  /stream — deprecated SSE stream; superseded by the /ws upgrade.
+#
+# Not listed above because they are not a CLI decision (ENG-9198): the three
+# bridge WALLET operations — GET/POST /api/v1/bridge/wallets and
+# POST /api/v1/bridge/wallets/challenge — are spec'd but `nexus-exchange` 0.11.0
+# wraps no method for them, and the CLI issues no HTTP of its own. They become
+# reachable when the SDK wraps them, not before.
 
 
 def normalize_path(p):

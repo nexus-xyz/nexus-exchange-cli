@@ -327,6 +327,12 @@ nexus order place --market BTC-USDX-PERP --side buy --type limit \
 # By-id order commands are routed per market, so they require --market.
 nexus order get <ORDER_ID> --market BTC-USDX-PERP          # fetch one order
 nexus order amend <ORDER_ID> --market BTC-USDX-PERP --price 85000 --quantity 0.02
+# `preview` takes the same flags as `place` but submits nothing, so it has no
+# prompt: required margin, projected equity/liquidation/leverage, fill VWAP, fees.
+# It is still signed and billed against the TRADING rate-limit bucket, so it is
+# sent once and never retried, and `place` never calls it for you.
+nexus order preview --market BTC-USDX-PERP --side buy --type limit \
+  --price 84000 --quantity 0.01
 nexus order batch orders.json       # submit a JSON array of orders ('-' = stdin)
 nexus order cancel <ORDER_ID> --market BTC-USDX-PERP
 nexus order cancel --market BTC-USDX-PERP        # flatten one market
@@ -339,6 +345,11 @@ nexus account fees                  # fee schedule (a negative maker fee is a re
 nexus account portfolio-history --window day     # day | week | month | all
 nexus account deposit 1000          # deposit collateral
 nexus account credit --amount 500   # claim testnet USDX (omit --amount for the daily max)
+nexus account faucet                # claim the testnet faucet grant (play funds only)
+nexus account deposits create 1000 --asset USDX   # the spec'd POST /deposits route
+nexus account margin add BTC-USDX-PERP 250        # add isolated margin to a position
+nexus account margin remove BTC-USDX-PERP 100     # RAISES its liquidation risk
+nexus account cancel-on-disconnect set true       # bare `cancel-on-disconnect` reads it
 nexus account rate-limit            # rate-limit tier / remaining tokens
 nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
 # Margin mode is NOT settable from the CLI. `nexus account margin-mode` was
@@ -894,8 +905,8 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints a coverage number: the CLI currently exercises **55 of 68**
-spec operations (**80.9%**), measured against the pinned `v0.8.1` spec.
+The check also prints a coverage number: the CLI currently exercises **60 of 68**
+spec operations (**88.2%**), measured against the pinned `v0.8.1` spec.
 
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two
