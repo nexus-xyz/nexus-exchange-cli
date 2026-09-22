@@ -894,8 +894,8 @@ Both checkers have their own self-tests —
 in turn and assert the check goes red. They run ahead of the checks they cover,
 because a green run only means something if a green run *can* fail.
 
-The check also prints a coverage number: the CLI currently exercises **45 of 68**
-spec operations (**66.2%**), measured against the pinned `v0.8.1` spec.
+The check also prints a coverage number: the CLI currently exercises **55 of 68**
+spec operations (**80.9%**), measured against the pinned `v0.8.1` spec.
 
 **The denominator counts operations, not paths.** The spec dual-mounts most
 operations — `GET /account` and `GET /api/v1/account` are one operation at two

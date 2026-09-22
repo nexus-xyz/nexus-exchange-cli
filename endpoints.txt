@@ -62,9 +62,13 @@ GET /api/v1/markets/{market_id}/candles
 GET /api/v1/markets/{market_id}/funding
 GET /api/v1/markets/{market_id}/mark-price
 GET /api/v1/markets/{market_id}/status
+GET /api/v1/markets/{market_id}/funding-samples
+GET /markets/{market_id}/risk-params
 # No /api/v1 variant yet — stay on the /api/exchange gateway (dual-stack):
 GET /markets
 GET /status
+GET /stats
+GET /stats/history
 
 # ── authenticated account (read) ──
 # Migrated to /api/v1:
@@ -73,13 +77,19 @@ GET /api/v1/account/summary
 GET /api/v1/account/state
 GET /api/v1/account/fees
 GET /api/v1/account/portfolio-history
+GET /api/v1/account/equity-history
+GET /api/v1/account/cancel-on-disconnect
 GET /api/v1/positions
+GET /api/v1/positions/closed
 GET /api/v1/fills
 GET /api/v1/orders
+GET /api/v1/orders/history
 GET /api/v1/account/rate-limit
 # No /api/v1 variant — stay on the gateway (v1 exposes no GET /orders/{id}):
 GET /orders/{order_id}
 GET /withdrawals
+GET /deposits
+GET /funding
 GET /keys
 GET /agents
 # ADL reads (HMAC-gated server-side despite the market scope); no /api/v1

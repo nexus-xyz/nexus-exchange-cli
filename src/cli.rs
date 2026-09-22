@@ -2,7 +2,11 @@
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use nexus_exchange::rest::{MAX_FILLS_LIMIT, MAX_PORTFOLIO_HISTORY_LIMIT};
+use nexus_exchange::rest::{
+    MAX_ACCOUNT_FUNDING_LIMIT, MAX_CLOSED_POSITIONS_LIMIT, MAX_DEPOSITS_LIMIT,
+    MAX_EQUITY_HISTORY_LIMIT, MAX_FILLS_LIMIT, MAX_FUNDING_SAMPLES_LIMIT, MAX_ORDER_HISTORY_LIMIT,
+    MAX_PORTFOLIO_HISTORY_LIMIT,
+};
 use nexus_exchange::types::{OrderType, PortfolioWindow, Side, TimeInForce};
 use nexus_exchange::{Config, CustomNetwork, Funds, Network, SigningDomain};
 use serde::{Deserialize, Serialize};
@@ -1297,11 +1301,35 @@ pub enum Command {
     /// Show the aggregate service health snapshot (`GET /status`).
     Health,
 
+    /// Venue-wide activity counters: fills, liquidations, ingest health and
+    /// unique-trader counts.
+    ///
+    /// This is the venue's own throughput, not your account's — no credentials
+    /// needed. For your activity see `fills` and `account summary`.
+    Stats,
+
+    /// Venue-wide fill throughput over time, oldest first.
+    ///
+    /// The time series behind the `fills_total` counter that `stats` reports as
+    /// a single number.
+    StatsHistory,
+
     /// Show your account summary (balance, collateral, equity, margin).
     Balance,
 
     /// List your open positions.
     Positions,
+
+    /// List positions you have already closed, most recent first, with the
+    /// realized PnL of each.
+    ///
+    /// Distinct from `positions`, which lists what is still open. A position
+    /// leaves one list and joins this one when it closes.
+    ClosedPositions {
+        /// Maximum number of closed positions to return.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=MAX_CLOSED_POSITIONS_LIMIT as i64))]
+        limit: u32,
+    },
 
     /// List your recent fills (executions).
     Fills {
@@ -1406,6 +1434,28 @@ pub enum MarketCommand {
         market_id: String,
     },
 
+    /// Risk parameters for a market: max leverage and the initial/maintenance
+    /// margin rates the engine enforces.
+    ///
+    /// These are the inputs behind a liquidation price, so they are worth
+    /// reading before sizing a position rather than after.
+    RiskParams {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+    },
+
+    /// Funding premium-index samples for a market, oldest first.
+    ///
+    /// The per-sample inputs that are averaged into the funding rate. Use
+    /// `funding-rates` for the settled rates themselves.
+    FundingSamples {
+        /// Market identifier, e.g. `BTC-USDX-PERP`.
+        market_id: String,
+        /// Maximum number of samples to return (server default 100).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_FUNDING_SAMPLES_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
     /// ADL settlement events for a market, most recent first. Unlike the other
     /// `market` reads, this endpoint is HMAC-gated server-side, so it requires
     /// credentials.
@@ -1420,6 +1470,16 @@ pub enum MarketCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum OrderCommand {
+    /// List orders that have reached a terminal state, most recent first.
+    ///
+    /// The counterpart to `orders`, which lists only what is still open. A
+    /// cancelled order reports why under CANCEL-REASON.
+    History {
+        /// Maximum number of orders to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_ORDER_HISTORY_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
     /// Submit a new order.
     Place {
         /// Market identifier, e.g. `BTC-USDX-PERP`.
@@ -1573,6 +1633,40 @@ pub enum AccountCommand {
         #[arg(long)]
         amount: Option<String>,
     },
+
+    /// Account equity over time, oldest first.
+    ///
+    /// Narrower than `portfolio-history`, which also carries cumulative PnL and
+    /// volume — this is equity alone, at a finer granularity.
+    EquityHistory {
+        /// Maximum number of points to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_EQUITY_HISTORY_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Funding payments you have paid or received, most recent first.
+    Funding {
+        /// Maximum number of entries to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_ACCOUNT_FUNDING_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Your deposit history, most recent first.
+    ///
+    /// The ledger of completed deposits. To make one, see `account deposit`
+    /// (collateral) or `bridge` (cross-chain).
+    Deposits {
+        /// Maximum number of deposits to return.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_DEPOSITS_LIMIT as i64))]
+        limit: Option<u32>,
+    },
+
+    /// Show whether cancel-on-disconnect is armed for this account.
+    ///
+    /// `enabled` is your setting; `active` is whether the exchange is honouring
+    /// it, which is false when the venue has the feature switched off
+    /// deployment-wide. Both are reported because they disagree.
+    CancelOnDisconnect,
 
     /// Show the caller's rate-limit status.
     RateLimit,
