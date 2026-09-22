@@ -157,6 +157,12 @@ METHOD_OP = {
     "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
     "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
     "health_check": ("GET", "/status"),  # v0.7.1 replaced /health with /status
+    # Venue-wide activity counters. Public like the market reads above, and
+    # on the bare gateway path — neither has an /api/v1 variant yet.
+    "fetch_stats": ("GET", "/stats"),
+    "fetch_stats_history": ("GET", "/stats/history"),
+    "fetch_market_risk_params": ("GET", "/markets/{market_id}/risk-params"),  # no /api/v1 variant yet
+    "fetch_funding_premium_samples": ("GET", "/api/v1/markets/{market_id}/funding-samples"),
     # ADL reads (HMAC-gated server-side despite the market scope)
     "fetch_market_adl_events": ("GET", "/markets/{market_id}/adl-events"),  # no /api/v1 variant yet
     "fetch_account_adl_history": ("GET", "/account/{address}/adl-history"),  # no /api/v1 variant yet
@@ -173,6 +179,12 @@ METHOD_OP = {
     "fetch_order": ("GET", "/orders/{order_id}"),  # v1 exposes no GET-by-id
     "fetch_withdrawals": ("GET", "/withdrawals"),  # no /api/v1 variant yet
     "fetch_rate_limit_status": ("GET", "/api/v1/account/rate-limit"),
+    "fetch_equity_history": ("GET", "/api/v1/account/equity-history"),
+    "fetch_cancel_on_disconnect": ("GET", "/api/v1/account/cancel-on-disconnect"),
+    "fetch_order_history": ("GET", "/api/v1/orders/history"),
+    "fetch_closed_positions": ("GET", "/api/v1/positions/closed"),
+    "fetch_deposits": ("GET", "/deposits"),  # no /api/v1 variant yet
+    "fetch_account_funding": ("GET", "/funding"),  # no /api/v1 variant yet
     "fetch_api_keys": ("GET", "/keys"),  # no /api/v1 variant yet
     "fetch_agents": ("GET", "/agents"),  # no /api/v1 variant yet
     # trading & account mutations

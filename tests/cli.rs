@@ -538,6 +538,18 @@ fn public_commands_route_to_a_fetch() {
         (&["health"], "failed to fetch health"),
         // `bridge assets` is the one bridge read that needs no credentials.
         (&["bridge", "assets"], "failed to fetch bridge assets"),
+        // Venue-wide counters are public, like the market reads above — they
+        // describe the exchange, not the caller.
+        (&["stats"], "failed to fetch venue stats"),
+        (&["stats-history"], "failed to fetch venue stats history"),
+        (
+            &["market", "risk-params", "BTC-USDX-PERP"],
+            "failed to fetch risk params",
+        ),
+        (
+            &["market", "funding-samples", "BTC-USDX-PERP"],
+            "failed to fetch funding samples",
+        ),
     ];
     for (args, want) in cases {
         let mut full = vec!["--base-url", dead];
@@ -580,6 +592,20 @@ fn authenticated_read_commands_route_to_a_fetch_when_credentialed() {
         ),
         (&["keys", "list"], "failed to fetch API keys"),
         (&["agents", "list"], "failed to fetch agents"),
+        // The account-scoped history reads. Each is a distinct SDK method, so
+        // each needs its own row — a shared prefix is not shared coverage.
+        (&["closed-positions"], "failed to fetch closed positions"),
+        (&["order", "history"], "failed to fetch order history"),
+        (
+            &["account", "equity-history"],
+            "failed to fetch equity history",
+        ),
+        (&["account", "funding"], "failed to fetch funding payments"),
+        (&["account", "deposits"], "failed to fetch deposits"),
+        (
+            &["account", "cancel-on-disconnect"],
+            "failed to fetch cancel-on-disconnect status",
+        ),
         // Both bridge pairs: the bare command lists, the narrowing flag selects
         // one — and each half is a different SDK method, so both need covering.
         (
@@ -680,6 +706,12 @@ fn new_authenticated_commands_are_gated_without_credentials() {
     for args in [
         ["market", "adl-events", "BTC-USDX-PERP"].as_slice(),
         ["account", "adl-history", "0xabc"].as_slice(),
+        ["closed-positions"].as_slice(),
+        ["order", "history"].as_slice(),
+        ["account", "equity-history"].as_slice(),
+        ["account", "funding"].as_slice(),
+        ["account", "deposits"].as_slice(),
+        ["account", "cancel-on-disconnect"].as_slice(),
         ["bridge", "deposit-address"].as_slice(),
         ["bridge", "deposit-address", "--chain", "base"].as_slice(),
         ["bridge", "deposits"].as_slice(),

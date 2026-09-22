@@ -149,6 +149,24 @@ async fn main() -> Result<()> {
                 output::funding_rates_json(&samples)
             });
         }
+        Command::Stats => {
+            let snapshot = client
+                .fetch_stats()
+                .await
+                .context("failed to fetch venue stats")?;
+            emit(format, output::stats(&snapshot), || {
+                output::stats_json(&snapshot)
+            });
+        }
+        Command::StatsHistory => {
+            let samples = client
+                .fetch_stats_history()
+                .await
+                .context("failed to fetch venue stats history")?;
+            emit(format, output::stats_history(&samples), || {
+                output::stats_history_json(&samples)
+            });
+        }
         Command::Health => {
             let health = client
                 .health_check()
@@ -209,6 +227,16 @@ async fn main() -> Result<()> {
                 .context("failed to fetch positions")?;
             emit(format, output::positions(&positions), || {
                 output::positions_json(&positions)
+            });
+        }
+        Command::ClosedPositions { limit } => {
+            require_authenticated(authenticated, "closed-positions")?;
+            let closed = client
+                .fetch_closed_positions(Some(limit))
+                .await
+                .context("failed to fetch closed positions")?;
+            emit(format, output::closed_positions(&closed), || {
+                output::closed_positions_json(&closed)
             });
         }
         Command::Fills { limit } => {
@@ -328,6 +356,24 @@ async fn handle_market(
                 output::mark_price_json(&mark)
             });
         }
+        MarketCommand::RiskParams { market_id } => {
+            let params = client
+                .fetch_market_risk_params(&market_id)
+                .await
+                .with_context(|| format!("failed to fetch risk params for {market_id}"))?;
+            emit(format, output::market_risk_params(&params), || {
+                output::market_risk_params_json(&params)
+            });
+        }
+        MarketCommand::FundingSamples { market_id, limit } => {
+            let samples = client
+                .fetch_funding_premium_samples(&market_id, limit)
+                .await
+                .with_context(|| format!("failed to fetch funding samples for {market_id}"))?;
+            emit(format, output::funding_samples(&samples), || {
+                output::funding_samples_json(&samples)
+            });
+        }
         MarketCommand::AdlEvents { market_id, limit } => {
             require_authenticated(authenticated, "market adl-events")?;
             let events = client
@@ -353,6 +399,16 @@ async fn handle_order(
     config_file: &FileConfig,
 ) -> Result<()> {
     match action {
+        OrderCommand::History { limit } => {
+            require_authenticated(authenticated, "order history")?;
+            let entries = client
+                .fetch_order_history(limit)
+                .await
+                .context("failed to fetch order history")?;
+            emit(format, output::order_history(&entries), || {
+                output::order_history_json(&entries)
+            });
+        }
         OrderCommand::Place {
             market,
             side,
@@ -653,6 +709,46 @@ async fn handle_account(
                 .context("failed to claim credit")?;
             emit(format, output::credit(&result), || {
                 output::credit_json(&result)
+            });
+        }
+        AccountCommand::EquityHistory { limit } => {
+            require_authenticated(authenticated, "account equity-history")?;
+            let points = client
+                .fetch_equity_history(limit)
+                .await
+                .context("failed to fetch equity history")?;
+            emit(format, output::equity_history(&points), || {
+                output::equity_history_json(&points)
+            });
+        }
+        AccountCommand::Funding { limit } => {
+            require_authenticated(authenticated, "account funding")?;
+            let entries = client
+                .fetch_account_funding(limit)
+                .await
+                .context("failed to fetch funding payments")?;
+            emit(format, output::account_funding(&entries), || {
+                output::account_funding_json(&entries)
+            });
+        }
+        AccountCommand::Deposits { limit } => {
+            require_authenticated(authenticated, "account deposits")?;
+            let entries = client
+                .fetch_deposits(limit)
+                .await
+                .context("failed to fetch deposits")?;
+            emit(format, output::funds_entries(&entries), || {
+                output::funds_entries_json(&entries)
+            });
+        }
+        AccountCommand::CancelOnDisconnect => {
+            require_authenticated(authenticated, "account cancel-on-disconnect")?;
+            let status = client
+                .fetch_cancel_on_disconnect()
+                .await
+                .context("failed to fetch cancel-on-disconnect status")?;
+            emit(format, output::cancel_on_disconnect(&status), || {
+                output::cancel_on_disconnect_json(&status)
             });
         }
         AccountCommand::RateLimit => {

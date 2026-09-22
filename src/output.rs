@@ -6,11 +6,14 @@
 //! exact value the exchange sent.
 
 use nexus_exchange::types::{
-    AccountFees, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent, AgentInfo,
-    ApiKeyInfo, BridgeAsset, BridgeAssetsResponse, BridgeDeposit, BridgeDepositAddress,
-    CreditResult, DepositResult, Fill, FundingSample, HealthStatus, MarkPrice, Market,
-    MarketStatus, MarketSummary, Ohlcv, Order, OrderBook, OrderResponse, OrderResult,
-    PortfolioHistory, Position, PriceLevel, RateLimitStatus, Side, Ticker, Trade, Withdrawal,
+    AccountFees, AccountFunding, AccountPortfolioSummary, AccountState, AccountSummary, AdlEvent,
+    AgentInfo, ApiKeyInfo, BridgeAsset, BridgeAssetsResponse, BridgeDeposit, BridgeDepositAddress,
+    CancelOnDisconnectStatus, ClosedPosition, CreditResult, Decimal, DepositResult, EquityPoint,
+    Fill, FundingDirection, FundingPremiumSample, FundingSample, FundsEntry, FundsKind,
+    FundsStatus, HealthStatus, MarkPrice, Market, MarketRiskParams, MarketStatus, MarketSummary,
+    Ohlcv, Order, OrderBook, OrderHistoryEntry, OrderResponse, OrderResult, PortfolioHistory,
+    Position, PriceLevel, RateLimitStatus, Side, StatsSnapshot, ThroughputSample, Ticker, Trade,
+    Withdrawal,
 };
 use serde_json::{json, Value};
 
@@ -1718,6 +1721,441 @@ pub fn bridge_deposit_json(d: &BridgeDeposit) -> String {
 // `sub-accounts` commands in ENG-12369 (closing ENG-8123): both route groups 404
 // on the live venue where documented routes 401, and neither has ever been in the
 // spec (ENG-7800). `Transfer` and `SubAccount` no longer reach this module.
+
+// ── venue stats ──────────────────────────────────────────────────────────────
+
+pub fn stats(s: &StatsSnapshot) -> String {
+    let mut out = String::from("Venue activity\n");
+    out.push_str(&format!("  health:             {}\n", safe(&s.health)));
+    out.push_str(&format!("  ingest connected:   {}\n", s.connected));
+    out.push_str(&format!("  events received:    {}\n", s.events_received));
+    out.push_str(&format!("  events/sec:         {:.2}\n", s.events_per_sec));
+    out.push_str(&format!("  fills total:        {}\n", s.fills_total));
+    out.push_str(&format!("  liquidations total: {}\n", s.liquidations_total));
+    out.push_str(&format!(
+        "  highest sequence:   {}\n",
+        s.highest_sequence_seen
+    ));
+    // A non-zero gap count means the indexer missed events, so every counter
+    // above is a lower bound. Say so rather than printing a bare number.
+    out.push_str(&format!(
+        "  sequence gaps:      {}{}\n",
+        s.gap_count,
+        if s.gap_count > 0 {
+            "  (counters above are lower bounds)"
+        } else {
+            ""
+        }
+    ));
+    out.push_str(&format!("  uptime (s):         {}\n", s.uptime_seconds));
+    out.push_str(&format!(
+        "  last event:         {}\n",
+        opt_ms_iso(&s.last_event_ms)
+    ));
+    out.push_str(&format!(
+        "  unique traders 24h: {}\n",
+        opt(&s.unique_traders_24h)
+    ));
+    out.push_str(&format!(
+        "  unique traders 7d:  {}\n",
+        opt(&s.unique_traders_7d)
+    ));
+    out.push_str(&format!(
+        "  unique traders 30d: {}",
+        opt(&s.unique_traders_30d)
+    ));
+    out
+}
+
+pub fn stats_json(s: &StatsSnapshot) -> String {
+    pretty(&json!({
+        "health": s.health,
+        "connected": s.connected,
+        "events_received": s.events_received,
+        "events_per_sec": s.events_per_sec,
+        "fills_total": s.fills_total,
+        "liquidations_total": s.liquidations_total,
+        "highest_sequence_seen": s.highest_sequence_seen,
+        "gap_count": s.gap_count,
+        "uptime_seconds": s.uptime_seconds,
+        "last_event_ms": opt_json(&s.last_event_ms),
+        "last_event": opt_ms_iso_json(&s.last_event_ms),
+        "unique_traders_24h": opt_json(&s.unique_traders_24h),
+        "unique_traders_7d": opt_json(&s.unique_traders_7d),
+        "unique_traders_30d": opt_json(&s.unique_traders_30d),
+    }))
+}
+
+pub fn stats_history(samples: &[ThroughputSample]) -> String {
+    if samples.is_empty() {
+        return "No throughput samples.".to_string();
+    }
+    let mut out = format!("{:<26}  {:>12}\n", "TIME", "FILLS");
+    for s in samples {
+        out.push_str(&format!(
+            "{:<26}  {:>12}\n",
+            ms_to_iso8601(s.timestamp),
+            s.fills
+        ));
+    }
+    out.push_str(&format!("\n{} sample(s).", samples.len()));
+    out
+}
+
+pub fn stats_history_json(samples: &[ThroughputSample]) -> String {
+    let value: Value = samples
+        .iter()
+        .map(|s| {
+            json!({
+                "timestamp": s.timestamp,
+                "time": ms_to_iso8601(s.timestamp),
+                "fills": s.fills,
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── market risk parameters ───────────────────────────────────────────────────
+
+pub fn market_risk_params(p: &MarketRiskParams) -> String {
+    // Rates arrive as fractions; show the percentage too, since margin is read
+    // in percent far more often than in basis fractions.
+    let pct = |d: Decimal| d * Decimal::from(100);
+    format!(
+        "Risk parameters for {}\n  max leverage:      {}x\n  initial margin:    {} ({}%)\n  maintenance margin: {} ({}%)",
+        safe(&p.market_id),
+        p.max_leverage,
+        p.initial_margin_rate,
+        pct(p.initial_margin_rate).normalize(),
+        p.maintenance_margin_rate,
+        pct(p.maintenance_margin_rate).normalize(),
+    )
+}
+
+pub fn market_risk_params_json(p: &MarketRiskParams) -> String {
+    pretty(&json!({
+        "market_id": p.market_id,
+        "max_leverage": p.max_leverage,
+        "initial_margin_rate": p.initial_margin_rate.to_string(),
+        "maintenance_margin_rate": p.maintenance_margin_rate.to_string(),
+    }))
+}
+
+// ── funding premium samples ──────────────────────────────────────────────────
+
+pub fn funding_samples(samples: &[FundingPremiumSample]) -> String {
+    if samples.is_empty() {
+        return "No funding premium samples.".to_string();
+    }
+    let mut out = format!("{:<26}  {:>20}\n", "TIME", "PREMIUM INDEX");
+    for s in samples {
+        out.push_str(&format!(
+            "{:<26}  {:>20}\n",
+            ms_to_iso8601(s.timestamp),
+            s.premium_index
+        ));
+    }
+    out.push_str(&format!("\n{} sample(s).", samples.len()));
+    out
+}
+
+pub fn funding_samples_json(samples: &[FundingPremiumSample]) -> String {
+    let value: Value = samples
+        .iter()
+        .map(|s| {
+            json!({
+                "timestamp": s.timestamp,
+                "time": ms_to_iso8601(s.timestamp),
+                "premium_index": s.premium_index.to_string(),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── account equity history ───────────────────────────────────────────────────
+
+pub fn equity_history(points: &[EquityPoint]) -> String {
+    if points.is_empty() {
+        return "No equity history.".to_string();
+    }
+    let mut out = format!("{:<26}  {:>20}\n", "TIME", "EQUITY");
+    for p in points {
+        out.push_str(&format!(
+            "{:<26}  {:>20}\n",
+            opt_ms_iso(&p.timestamp_ms),
+            opt(&p.equity)
+        ));
+    }
+    out.push_str(&format!("\n{} point(s).", points.len()));
+    out
+}
+
+pub fn equity_history_json(points: &[EquityPoint]) -> String {
+    let value: Value = points
+        .iter()
+        .map(|p| {
+            json!({
+                "timestamp_ms": opt_json(&p.timestamp_ms),
+                "time": opt_ms_iso_json(&p.timestamp_ms),
+                "equity": opt_json(&p.equity),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── order history ────────────────────────────────────────────────────────────
+
+pub fn order_history(entries: &[OrderHistoryEntry]) -> String {
+    if entries.is_empty() {
+        return "No order history.".to_string();
+    }
+    let mut out = format!(
+        "{:<24}  {:<16}  {:<5}  {:<10}  {:>14}  {:>14}  {:<12}  {:<20}\n",
+        "ID", "MARKET", "SIDE", "TYPE", "PRICE", "FILLED/SIZE", "STATUS", "CANCEL-REASON"
+    );
+    for e in entries {
+        let filled = format!("{}/{}", opt(&e.filled_qty), opt(&e.size));
+        out.push_str(&format!(
+            "{:<24}  {:<16}  {:<5}  {:<10}  {:>14}  {:>14}  {:<12}  {:<20}\n",
+            opt(&e.id),
+            opt(&e.market_id),
+            e.side.map(side_str).unwrap_or("-"),
+            opt(&e.order_type),
+            opt(&e.price),
+            filled,
+            opt(&e.status),
+            opt(&e.cancellation_reason),
+        ));
+    }
+    out.push_str(&format!("\n{} order(s).", entries.len()));
+    out
+}
+
+pub fn order_history_json(entries: &[OrderHistoryEntry]) -> String {
+    let value: Value = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "id": opt_json(&e.id),
+                "market_id": opt_json(&e.market_id),
+                "side": e.side.map(side_str),
+                "order_type": opt_json(&e.order_type),
+                "price": opt_json(&e.price),
+                "size": opt_json(&e.size),
+                "filled_qty": opt_json(&e.filled_qty),
+                "status": opt_json(&e.status),
+                "cancellation_reason": opt_json(&e.cancellation_reason),
+                "created_at_ms": opt_json(&e.created_at_ms),
+                "completed_at_ms": opt_json(&e.completed_at_ms),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── closed positions ─────────────────────────────────────────────────────────
+
+pub fn closed_positions(ps: &[ClosedPosition]) -> String {
+    if ps.is_empty() {
+        return "No closed positions.".to_string();
+    }
+    let mut out = format!(
+        "{:<16}  {:<5}  {:>14}  {:>14}  {:>14}  {:>16}  {:<26}\n",
+        "MARKET", "SIDE", "SIZE", "ENTRY", "EXIT", "REALIZED PNL", "CLOSED"
+    );
+    for p in ps {
+        out.push_str(&format!(
+            "{:<16}  {:<5}  {:>14}  {:>14}  {:>14}  {:>16}  {:<26}\n",
+            opt(&p.market_id),
+            opt(&p.side),
+            opt(&p.size),
+            opt(&p.entry_price),
+            opt(&p.exit_price),
+            opt(&p.realized_pnl),
+            opt_ms_iso(&p.closed_at_ms),
+        ));
+    }
+    out.push_str(&format!("\n{} closed position(s).", ps.len()));
+    out
+}
+
+pub fn closed_positions_json(ps: &[ClosedPosition]) -> String {
+    let value: Value = ps
+        .iter()
+        .map(|p| {
+            json!({
+                "market_id": opt_json(&p.market_id),
+                "side": opt_json(&p.side),
+                "size": opt_json(&p.size),
+                "entry_price": opt_json(&p.entry_price),
+                "exit_price": opt_json(&p.exit_price),
+                "realized_pnl": opt_json(&p.realized_pnl),
+                "closed_at_ms": opt_json(&p.closed_at_ms),
+                "closed_at": opt_ms_iso_json(&p.closed_at_ms),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── account funding payments ─────────────────────────────────────────────────
+
+/// Render a funding direction for display.
+fn funding_direction_str(d: FundingDirection) -> &'static str {
+    match d {
+        FundingDirection::Paid => "Paid",
+        FundingDirection::Received => "Received",
+    }
+}
+
+pub fn account_funding(entries: &[AccountFunding]) -> String {
+    if entries.is_empty() {
+        return "No funding payments.".to_string();
+    }
+    let mut out = format!(
+        "{:<26}  {:<16}  {:<9}  {:>16}  {:>14}  {:>16}\n",
+        "TIME", "MARKET", "DIRECTION", "AMOUNT", "RATE", "POSITION SIZE"
+    );
+    for e in entries {
+        out.push_str(&format!(
+            "{:<26}  {:<16}  {:<9}  {:>16}  {:>14}  {:>16}\n",
+            ms_to_iso8601(e.timestamp),
+            safe(&e.market_id),
+            funding_direction_str(e.direction),
+            e.amount,
+            e.funding_rate,
+            e.position_size,
+        ));
+    }
+    out.push_str(&format!("\n{} payment(s).", entries.len()));
+    out
+}
+
+pub fn account_funding_json(entries: &[AccountFunding]) -> String {
+    let value: Value = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "timestamp": e.timestamp,
+                "time": ms_to_iso8601(e.timestamp),
+                "market_id": e.market_id,
+                "direction": funding_direction_str(e.direction),
+                "amount": e.amount.to_string(),
+                "funding_rate": e.funding_rate.to_string(),
+                "position_size": e.position_size.to_string(),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── deposits ledger ──────────────────────────────────────────────────────────
+
+/// Render a funds-movement kind for display.
+fn funds_kind_str(k: FundsKind) -> &'static str {
+    match k {
+        FundsKind::Deposit => "Deposit",
+        FundsKind::Withdrawal => "Withdrawal",
+        FundsKind::Faucet => "Faucet",
+    }
+}
+
+/// Render a funds-movement status for display.
+fn funds_status_str(s: FundsStatus) -> &'static str {
+    match s {
+        FundsStatus::Pending => "Pending",
+        FundsStatus::Confirmed => "Confirmed",
+        FundsStatus::Failed => "Failed",
+    }
+}
+
+pub fn funds_entries(entries: &[FundsEntry]) -> String {
+    if entries.is_empty() {
+        return "No deposits.".to_string();
+    }
+    // KIND is shown, not assumed. `GET /deposits` shares one row type across
+    // deposits, withdrawals and faucet grants, so labelling every row a deposit
+    // would misreport the other two (the SDK's own type doc warns about this).
+    let mut out = format!(
+        "{:<26}  {:<10}  {:<10}  {:>18}  {:<8}  {:<12}  {:<20}\n",
+        "TIME", "KIND", "STATUS", "AMOUNT", "ASSET", "ID", "TX"
+    );
+    for e in entries {
+        out.push_str(&format!(
+            "{:<26}  {:<10}  {:<10}  {:>18}  {:<8}  {:<12}  {:<20}\n",
+            ms_to_iso8601(e.timestamp),
+            funds_kind_str(e.kind),
+            funds_status_str(e.status),
+            e.amount,
+            safe(&e.asset),
+            e.id,
+            e.tx_hash
+                .as_deref()
+                .map(safe)
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+    }
+    let deposits = entries
+        .iter()
+        .filter(|e| matches!(e.kind, FundsKind::Deposit))
+        .count();
+    out.push_str(&format!(
+        "\n{} row(s), {} of them deposits.",
+        entries.len(),
+        deposits
+    ));
+    out
+}
+
+pub fn funds_entries_json(entries: &[FundsEntry]) -> String {
+    let value: Value = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e.id,
+                "kind": funds_kind_str(e.kind),
+                "status": funds_status_str(e.status),
+                "account": e.account,
+                "amount": e.amount.to_string(),
+                "asset": e.asset,
+                "timestamp": e.timestamp,
+                "time": ms_to_iso8601(e.timestamp),
+                "tx_hash": opt_json(&e.tx_hash),
+            })
+        })
+        .collect();
+    pretty(&value)
+}
+
+// ── cancel-on-disconnect ─────────────────────────────────────────────────────
+
+pub fn cancel_on_disconnect(s: &CancelOnDisconnectStatus) -> String {
+    let mut out = String::from("Cancel-on-disconnect\n");
+    out.push_str(&format!("  enabled:   {}\n", s.enabled));
+    out.push_str(&format!("  active:    {}\n", s.active));
+    out.push_str(&format!("  grace (s): {}", opt(&s.grace_secs)));
+    // The two flags disagreeing is the interesting case and the reason both are
+    // reported: your setting is on, the venue is not honouring it.
+    if s.enabled && !s.active {
+        out.push_str(
+            "\n\nEnabled but not active: the exchange has cancel-on-disconnect\n\
+             switched off deployment-wide, so orders will NOT be pulled if you\n\
+             disconnect.",
+        );
+    }
+    out
+}
+
+pub fn cancel_on_disconnect_json(s: &CancelOnDisconnectStatus) -> String {
+    pretty(&json!({
+        "enabled": s.enabled,
+        "active": s.active,
+        "grace_secs": opt_json(&s.grace_secs),
+    }))
+}
 
 #[cfg(test)]
 mod tests {
