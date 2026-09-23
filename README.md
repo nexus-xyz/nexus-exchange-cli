@@ -301,11 +301,15 @@ nexus orderbook BTC-USDX-PERP       # bids/asks
 nexus trades BTC-USDX-PERP --limit 50
 nexus candles BTC-USDX-PERP --timeframe 1m --limit 100
 nexus health                        # indexer health snapshot
+nexus stats                         # venue-wide fills, liquidations, unique traders
+nexus stats-history                 # venue-wide fill throughput over time
 
 # Per-market data
 nexus market summary                       # 24h volume + halt state per market
 nexus market status BTC-USDX-PERP          # lifecycle / halt status
 nexus market mark-price BTC-USDX-PERP      # current mark price
+nexus market risk-params BTC-USDX-PERP     # max leverage, initial/maintenance margin rates
+nexus market funding-samples BTC-USDX-PERP --limit 100   # premium-index samples behind the rate
 nexus market adl-events BTC-USDX-PERP --limit 50   # ADL settlements (needs credentials)
 
 # Authenticated account (see Credentials below)
@@ -316,10 +320,16 @@ nexus account fees                  # effective maker/taker bps, tier, 30d volum
 nexus account portfolio-history --window week --limit 100   # equity/PnL/volume series
 nexus account rate-limit            # current rate-limit tier / remaining / reset
 nexus positions                     # open positions, with per-position risk detail
+nexus closed-positions --limit 50   # closed positions with realized PnL (default 100)
 nexus fills --limit 50              # recent executions (server-side page, max 1000)
 nexus withdrawals --limit 50        # withdrawal history
 nexus orders                        # open orders
 nexus withdrawals                   # withdrawal history
+nexus order history --limit 50      # terminal orders; cancels show CANCEL-REASON
+nexus account equity-history --limit 100   # equity alone, finer than portfolio-history
+nexus account funding --limit 50    # funding payments paid or received
+nexus account deposits --limit 50   # deposit ledger; KIND column labels each row
+nexus account cancel-on-disconnect  # `enabled` (your setting) vs `active` (honoured)
 
 # Trading (prompts for confirmation; pass --yes to skip)
 nexus order place --market BTC-USDX-PERP --side buy --type limit \
@@ -918,10 +928,10 @@ scored well under 100% and the number could never read full. That is
 collapsed. At `v0.8.1` the literal count was `45 of 101 (44.6%)` against the same
 command surface.
 
-The remainder are genuinely untargeted operations, not bookkeeping — the admin,
-stats and funding surfaces, the bridge's wallet-linking half (its deposit half is
-covered by `nexus bridge`), `orders/preview`, `orders/history`,
-`positions/closed`, `cancel-on-disconnect`, the auth/token endpoints, and more.
+The remainder are genuinely untargeted operations, not bookkeeping — the
+`/admin/tiers` surface (`adminAuth`, which a user-authenticated CLI cannot
+present), the bridge's wallet-linking half (its deposit half is covered by
+`nexus bridge`), and the `/stream` and `/ws-tokens` endpoints.
 `check_spec_drift.py` prints the full list on every run, under
 `Not covered by the CLI`; that output is the enumeration, deliberately not a copy
 of it here. A hand-maintained list is exactly the kind of claim invariants 7 and 8
@@ -975,12 +985,13 @@ python3 scripts/test_sdk_parity.py         # no network needed
 ```
 
 Coverage is **structurally capped by the SDK**: the CLI is a thin layer over
-`nexus_exchange::Client` and issues no path of its own, so its 38 is a subset of
-what that crate wraps, not an independent number. Two consequences worth knowing
+`nexus_exchange::Client` and issues no path of its own, so its coverage is a subset
+of what that crate wraps, not an independent number. Three consequences worth knowing
 before reading the figure as a CLI decision: the CLI cannot reach an operation the
-crate has no wrapper for (bridge deposits, for instance, are wrapped by the SDK
-but have no CLI command yet — a real gap, and one the drift check cannot see,
-since it can only flag a *mismatched* manifest, never a *missing* one), and a
+crate has no wrapper for, and a wrapper the CLI never grows a command for is a real
+gap the drift check cannot see, since it can only flag a *mismatched* manifest,
+never a *missing* one (bridge deposits sat in that gap until `nexus bridge`, as
+did `order history`, `closed-positions` and the other reads ENG-9198 added); and a
 spec bump that needs new operations can't be satisfied here until
 `nexus-exchange-rs` ships them.
 

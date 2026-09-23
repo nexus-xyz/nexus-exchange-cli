@@ -33,8 +33,22 @@ nexus market summary               # GET /markets/summary
 nexus market status "$MARKET"      # GET /markets/{id}/status
 nexus market mark-price "$MARKET"  # GET /markets/{id}/mark-price
 
+# Risk parameters: max leverage and the initial/maintenance margin rates the
+# engine enforces — the inputs behind a liquidation price, so read them before
+# sizing a position.   GET /markets/{id}/risk-params
+nexus market risk-params "$MARKET"
+
+# Funding premium-index samples, oldest first: the per-sample inputs averaged
+# into the rate. `funding-rates` above is the settled rates themselves.
+nexus market funding-samples "$MARKET" --limit 50   # GET /api/v1/markets/{id}/funding-samples
+
 # Service health snapshot. Useful as a connectivity check.   GET /status
 nexus health
+
+# Venue-wide activity (the venue's throughput, not your account's): fills,
+# liquidations, ingest health, unique traders — then the fill series over time.
+nexus stats                        # GET /stats
+nexus stats-history                # GET /stats/history
 
 # ADL settlement events for a market (auto-deleveraging history). The one
 # market-scoped read that needs credentials — the endpoint is HMAC-gated.
