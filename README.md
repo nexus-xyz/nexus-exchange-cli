@@ -767,6 +767,27 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
 override any with `--expires-at` / `--nonce` / `--chain-id`.
 
+### Examples
+
+`nexus examples` finds and downloads runnable apps from the
+[examples catalog](https://github.com/nexus-xyz/nexus-exchange-examples), so you
+don't have to know that repository exists to start from one:
+
+```sh
+nexus examples list                       # everything, with credentials and write flags
+nexus examples list --lang python         # or --track sdk-rust, cli, analytics, ...
+nexus examples show agent-enrollment      # what it does, what it needs, how to run it
+nexus examples get agent-enrollment       # download into ./agent-enrollment, ready to run
+nexus examples get risk-guard --lang ts   # an id that exists in several languages
+```
+
+The list is read from the catalog's `catalog.json` each time, so new examples
+appear without a CLI release. These commands need `git` on your PATH (they fetch
+only the catalog, or only the one example directory, with a sparse shallow
+clone) and need no credentials. `get` never writes keys; it prints the example's
+setup and run commands. `--ref <branch-or-tag>` reads another version of the
+catalog.
+
 ### Shell completions
 
 Generate a completion script for your shell and source it:

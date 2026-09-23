@@ -7,6 +7,7 @@
 
 mod cli;
 mod credentials;
+mod examples;
 mod guardrails;
 mod output;
 mod wsclient;
@@ -22,8 +23,8 @@ use nexus_exchange::{Client, EthSigner, ExposeSecret};
 
 use cli::{
     AccountCommand, AgentsCommand, AuthCommand, BridgeCommand, CancelOnDisconnectCommand, Cli,
-    Command, DepositsCommand, KeysCommand, MarginCommand, MarketCommand, OrderCommand,
-    OutputFormat, Target,
+    Command, DepositsCommand, ExamplesCommand, KeysCommand, MarginCommand, MarketCommand,
+    OrderCommand, OutputFormat, Target,
 };
 use credentials::FileConfig;
 use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
@@ -37,6 +38,12 @@ async fn main() -> Result<()> {
     if let Command::Completions { shell } = cli.command {
         clap_complete::generate(shell, &mut Cli::command(), "nexus", &mut io::stdout());
         return Ok(());
+    }
+
+    // `examples` reads the public examples repository over git and needs neither
+    // a network selection nor credentials.
+    if let Command::Examples { command } = cli.command {
+        return run_examples(command, cli.output);
     }
 
     // `setup` is purely local and manages its own file I/O.
@@ -314,7 +321,9 @@ async fn main() -> Result<()> {
             wsclient::stream(&client, &config, authenticated, &subs, format).await?;
         }
 
-        Command::Completions { .. } | Command::Setup => unreachable!("handled above"),
+        Command::Completions { .. } | Command::Setup | Command::Examples { .. } => {
+            unreachable!("handled above")
+        }
     }
 
     Ok(())
@@ -1266,6 +1275,53 @@ fn build_subscriptions(
 
 /// Print human or JSON output. The JSON renderer is a closure so it is only run
 /// for the format actually selected.
+/// `nexus examples list/show/get` (ENG-17337). Local-only: git reads the public
+/// examples repository; no network selection, no credentials, no SDK call.
+fn run_examples(command: ExamplesCommand, format: OutputFormat) -> Result<()> {
+    let pretty = |v: serde_json::Value| serde_json::to_string_pretty(&v).unwrap_or_default();
+    match command {
+        ExamplesCommand::List {
+            track,
+            lang,
+            git_ref,
+        } => {
+            let catalog = examples::fetch_catalog(&git_ref)?;
+            let found = examples::filter(&catalog, track.as_deref(), lang.as_deref())?;
+            emit(format, examples::render_list(&found), || {
+                pretty(serde_json::json!(found))
+            });
+        }
+        ExamplesCommand::Show { id, lang, git_ref } => {
+            let catalog = examples::fetch_catalog(&git_ref)?;
+            let example = examples::resolve(&catalog, &id, lang.as_deref())?;
+            let unique = catalog
+                .examples
+                .iter()
+                .filter(|e| e.id == example.id)
+                .count()
+                == 1;
+            emit(format, examples::render_show(example, unique), || {
+                pretty(serde_json::json!(example))
+            });
+        }
+        ExamplesCommand::Get {
+            id,
+            lang,
+            dir,
+            git_ref,
+        } => {
+            let catalog = examples::fetch_catalog(&git_ref)?;
+            let example = examples::resolve(&catalog, &id, lang.as_deref())?;
+            let dest = dir.unwrap_or_else(|| std::path::PathBuf::from(&example.id));
+            examples::get(example, &git_ref, &dest)?;
+            emit(format, examples::render_get(example, &dest), || {
+                pretty(serde_json::json!({ "example": example, "dir": dest }))
+            });
+        }
+    }
+    Ok(())
+}
+
 fn emit(format: OutputFormat, human: String, json: impl FnOnce() -> String) {
     match format {
         OutputFormat::Human => println!("{human}"),
