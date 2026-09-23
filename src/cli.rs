@@ -465,9 +465,11 @@ pub struct CustomNetworkConfig {
     /// [`parse_funds`] for why neither boolean answer is safe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub funds: Option<String>,
-    /// WebSocket origin (`ws://` or `wss://`). Absent until declared: it is a
-    /// separate host from the REST base and is never derived from it, so `nexus
-    /// ws` refuses rather than guessing.
+    /// WebSocket URL (`ws://` or `wss://`), used as given. Absent until
+    /// declared: the CLI never derives it from `base_url`, so `nexus ws` refuses
+    /// rather than guessing. Deployed sockets sit on the REST base's host with
+    /// the scheme swapped, under the same `/v1` prefix, but the exact path is
+    /// the deployment's, so declare the full URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ws_url: Option<String>,
     /// Whether the synthetic faucet exists here. Assumed **absent** until
@@ -3963,9 +3965,9 @@ mod tests {
         assert_eq!(target(&cli).signing_chain_id().unwrap(), DEFAULT_CHAIN_ID);
     }
 
-    /// An undeclared WS origin stays `None` rather than being derived from the
-    /// REST base: it is a separate host, so `nexus ws` must refuse instead of
-    /// connecting to a guessed one.
+    /// An undeclared WS URL stays `None` rather than being derived from the
+    /// REST base: the path is the deployment's to declare, so `nexus ws` must
+    /// refuse instead of connecting to a guessed one.
     #[test]
     fn an_undeclared_ws_origin_is_not_derived() {
         let file = file_declaring("dev", declared_stage("play"));
