@@ -533,9 +533,10 @@ and nothing about it is transmitted.
   one that could address another network's credentials is refused outright. A
   label is matched **exactly**, case included, and an entry the file declares but
   cannot select says so rather than reporting the network as unknown.
-- **Nothing is inferred from the URL.** The WebSocket origin is a separate host
-  and is never derived from the REST base, so `nexus ws` refuses rather than
-  connecting to a guess. The EIP-712 signing domain is likewise absent until
+- **Nothing is inferred from the URL.** A custom network's `ws_url` is never
+  derived from its `base_url`, so `nexus ws` refuses rather than connecting to a
+  guess. (Deployed sockets share the REST base's host, scheme swapped, under the
+  same `/v1` prefix; declare the full URL.) The EIP-712 signing domain is likewise absent until
   declared: a signature made under the wrong domain may be *valid on a different
   network*, so `agents register` against a stage that declares no `chain_id` is
   **refused** rather than signed under the exchange's own chain — pass
