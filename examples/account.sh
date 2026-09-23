@@ -33,13 +33,39 @@ nexus account portfolio-history --window week --limit 100   # GET /account/portf
 nexus positions             # GET /positions
 nexus fills --limit 50      # GET /fills
 
+# Positions already closed, most recent first, with the realized PnL of each.
+# A position leaves `positions` and joins this list when it closes.
+nexus closed-positions --limit 50   # GET /api/v1/positions/closed
+
 # Open orders and withdrawal history.
 nexus orders                # GET /orders
 nexus withdrawals           # GET /withdrawals
 
+# Orders that reached a terminal state, most recent first. A cancelled order
+# reports why under CANCEL-REASON.
+nexus order history --limit 50      # GET /api/v1/orders/history
+
+# Equity alone over time, oldest first — narrower than portfolio-history, at a
+# finer granularity.
+nexus account equity-history --limit 100   # GET /api/v1/account/equity-history
+
+# Funding payments paid or received, most recent first.   GET /funding
+nexus account funding --limit 50
+
+# Deposit ledger, most recent first. GET /deposits shares one row type across
+# deposits, withdrawals and faucet grants, so read the KIND column rather than
+# assuming every row is a deposit.
+nexus account deposits --limit 50   # GET /deposits
+
+# Cancel-on-disconnect, read-only: `enabled` is your setting, `active` is whether
+# the venue is honouring it (false when the feature is off deployment-wide). A
+# disagreement means an account that believes it is armed is not.
+nexus account cancel-on-disconnect  # GET /api/v1/account/cancel-on-disconnect
+
 # There is no funding-payments, transfers or sub-accounts command. All three
 # were withdrawn in ENG-12369 (closing ENG-8123): GET /funding-payments is in no
-# spec version (ENG-3817), and /transfers and /sub-accounts have neither a
+# spec version (ENG-3817) — `account funding` above is the spec'd GET /funding
+# route — and /transfers and /sub-accounts have neither a
 # contract nor a served route — probed live, they 404 where documented routes
 # return 401 (ENG-7800). This file is meant to be pasted against a funded
 # account, so a line that cannot work does not belong in it.
