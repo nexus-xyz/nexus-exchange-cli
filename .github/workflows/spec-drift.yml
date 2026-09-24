@@ -86,6 +86,7 @@ jobs:
         run: |
           python3 scripts/test_check_spec_drift.py
           python3 scripts/test_sdk_parity.py
+          python3 scripts/test_render_catalog_pin_body.py
 
       - name: Check drift
         run: python3 scripts/check_spec_drift.py openapi.pinned.json

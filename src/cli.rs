@@ -1409,6 +1409,14 @@ pub enum Command {
         since: Option<i64>,
     },
 
+    /// Find and download runnable apps from the examples catalog
+    /// (github.com/nexus-xyz/nexus-exchange-examples). Needs `git` on PATH;
+    /// no credentials and no network selection.
+    Examples {
+        #[command(subcommand)]
+        command: ExamplesCommand,
+    },
+
     /// Interactively configure network and credentials.
     Setup,
 
@@ -1416,6 +1424,57 @@ pub enum Command {
     Completions {
         /// Target shell.
         shell: Shell,
+    },
+}
+
+/// `nexus examples` subcommands (ENG-17337).
+#[derive(Debug, Subcommand)]
+pub enum ExamplesCommand {
+    /// List the examples in the catalog.
+    List {
+        /// Only this track: cli, exchange-api, sdk-rust, sdk-ts, sdk-python,
+        /// sdk-mcp or analytics.
+        #[arg(long)]
+        track: Option<String>,
+        /// Only this language: rust, ts, python or shell.
+        #[arg(long)]
+        lang: Option<String>,
+        /// Branch or tag of the examples repository to read.
+        #[arg(long = "ref", default_value = "main")]
+        git_ref: String,
+        /// Don't contact the repository: use the cached catalog, or the one
+        /// built into this binary.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Show one example: what it does, what it needs, and how to run it.
+    Show {
+        /// Example id (e.g. `agent-enrollment`) or full path (`sdk-rust/risk-guard`).
+        id: String,
+        /// Language, when the id exists in more than one.
+        #[arg(long)]
+        lang: Option<String>,
+        /// Branch or tag of the examples repository to read.
+        #[arg(long = "ref", default_value = "main")]
+        git_ref: String,
+        /// Don't contact the repository: use the cached catalog, or the one
+        /// built into this binary.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Download one example into a new directory, ready to run.
+    Get {
+        /// Example id (e.g. `agent-enrollment`) or full path (`sdk-rust/risk-guard`).
+        id: String,
+        /// Language, when the id exists in more than one.
+        #[arg(long)]
+        lang: Option<String>,
+        /// Where to put it (default: `./<id>`). Must not exist, or be empty.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Branch or tag of the examples repository to read.
+        #[arg(long = "ref", default_value = "main")]
+        git_ref: String,
     },
 }
 

@@ -130,6 +130,11 @@ You do **not** bump the version or tag by hand.
 
 1. Land changes on `main` using [Conventional Commits](https://www.conventionalcommits.org/)
    (`feat:`, `fix:`, `feat!:` / `BREAKING CHANGE:`).
+   The built-in examples catalog stays pinned to the newest examples-repo
+   `catalog-YYYY.MM.DD` tag on its own: `catalog-autobump.yml` polls daily and
+   opens a `chore(examples):` PR when a newer tag exists. Merge any open one
+   before the release PR. To pin a specific tag by hand, run
+   `scripts/sync_examples_catalog.sh <tag>`; `src/examples_catalog.ref` records it.
 2. The [`release-please`](./.github/workflows/release-please.yml) workflow keeps a
    standing **release PR** that bumps `version` in `Cargo.toml` + `Cargo.lock` and
    writes `CHANGELOG.md`. The CLI is **pre-1.0** and stays on `0.X.Y`: `feat!:` /
@@ -766,6 +771,35 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 `agents register` defaults the expiry to 30 days out, the nonce to the current
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
 override any with `--expires-at` / `--nonce` / `--chain-id`.
+
+### Examples
+
+`nexus examples` finds and downloads runnable apps from the
+[examples catalog](https://github.com/nexus-xyz/nexus-exchange-examples), so you
+don't have to know that repository exists to start from one:
+
+```sh
+nexus examples list                       # everything, with credentials and write flags
+nexus examples list --lang python         # or --track sdk-rust, cli, analytics, ...
+nexus examples show agent-enrollment      # what it does, what it needs, how to run it
+nexus examples get agent-enrollment       # download into ./agent-enrollment, ready to run
+nexus examples get risk-guard --lang ts   # an id that exists in several languages
+```
+
+The list is read from the catalog's `catalog.json` each time, so new examples
+appear without a CLI release. These commands need `git` on your PATH (they fetch
+only the catalog, or only the one example directory, with a sparse shallow
+clone) and need no credentials. `get` never writes keys; it prints the example's
+setup and run commands. `--ref <branch-or-tag>` reads another version of the
+catalog.
+
+`list` and `show` still work without the network. Each successful read caches
+the catalog in `$XDG_CACHE_HOME/nexus/` (or `~/.cache/nexus/`), and the binary
+carries a copy of the catalog as it was at release, pinned to an examples-repo
+`catalog-YYYY.MM.DD` tag. When the repository can't be
+reached they fall back to the cache, then to that copy, and say which one they
+used. `--offline` skips the network. `get` always needs the network, since it
+downloads the example itself.
 
 ### Shell completions
 
