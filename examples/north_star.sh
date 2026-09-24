@@ -9,7 +9,7 @@
 #   export NEXUS_API_SECRET=...       # mint one with `nexus keys create`
 #                                     # (see keys_and_agents.sh)
 #
-# Network: defaults to the beta (testnet) channel, where `account credit` is a
+# Network: defaults to testnet, where `account credit` is a
 # synthetic-USDX faucet and no real funds ever move. NEVER point this script at
 # production: it places (and then cancels) a real resting order.
 #
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 MARKET="${MARKET:-BTC-USDX-PERP}"
-NETWORK="${NETWORK:-beta}"
+NETWORK="${NETWORK:-testnet}"
 
 command -v nexus >/dev/null || { echo "error: nexus not on PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
