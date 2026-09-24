@@ -130,10 +130,11 @@ You do **not** bump the version or tag by hand.
 
 1. Land changes on `main` using [Conventional Commits](https://www.conventionalcommits.org/)
    (`feat:`, `fix:`, `feat!:` / `BREAKING CHANGE:`).
-   Before merging a release PR, pin the built-in examples catalog to the newest
-   examples-repo tag with `scripts/sync_examples_catalog.sh` (land it as its own
-   `chore:` PR). The examples repo tags every green `main` commit
-   `catalog-YYYY.MM.DD`, and `src/examples_catalog.ref` records the pin.
+   The built-in examples catalog stays pinned to the newest examples-repo
+   `catalog-YYYY.MM.DD` tag on its own: `catalog-autobump.yml` polls daily and
+   opens a `chore(examples):` PR when a newer tag exists. Merge any open one
+   before the release PR. To pin a specific tag by hand, run
+   `scripts/sync_examples_catalog.sh <tag>`; `src/examples_catalog.ref` records it.
 2. The [`release-please`](./.github/workflows/release-please.yml) workflow keeps a
    standing **release PR** that bumps `version` in `Cargo.toml` + `Cargo.lock` and
    writes `CHANGELOG.md`. The CLI is **pre-1.0** and stays on `0.X.Y`: `feat!:` /
