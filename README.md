@@ -788,6 +788,13 @@ clone) and need no credentials. `get` never writes keys; it prints the example's
 setup and run commands. `--ref <branch-or-tag>` reads another version of the
 catalog.
 
+`list` and `show` still work without the network. Each successful read caches
+the catalog in `$XDG_CACHE_HOME/nexus/` (or `~/.cache/nexus/`), and the binary
+carries a copy of the catalog as it was at release. When the repository can't be
+reached they fall back to the cache, then to that copy, and say which one they
+used. `--offline` skips the network. `get` always needs the network, since it
+downloads the example itself.
+
 ### Shell completions
 
 Generate a completion script for your shell and source it:

@@ -66,12 +66,22 @@ fn catalog_repo(name: &str) -> PathBuf {
     repo
 }
 
+/// Each test gets its own cache directory (`cwd/.cache`) so they never share one.
 fn nexus(repo: &Path, cwd: &Path) -> Command {
     let mut cmd = Command::cargo_bin("nexus").unwrap();
     cmd.env("NEXUS_EXAMPLES_REPO", format!("file://{}", repo.display()))
+        .env("XDG_CACHE_HOME", cwd.join(".cache"))
         .env_remove("NEXUS_OUTPUT")
         .current_dir(cwd);
     cmd
+}
+
+fn stdout_of(cmd: &mut Command) -> (String, String) {
+    let out = cmd.assert().success().get_output().clone();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -135,4 +145,44 @@ fn get_refuses_an_ambiguous_id_and_accepts_lang() {
         .assert()
         .success();
     assert!(cwd.join("g/README.md").is_file());
+}
+
+#[test]
+fn an_unreachable_repo_falls_back_to_the_cache_then_the_built_in_copy() {
+    let repo = catalog_repo("fallback");
+    let cwd = scratch("fallback-cwd");
+    let gone = cwd.join("no-such-repo");
+
+    // Nothing cached yet: the built-in copy answers, and says so.
+    let (out, err) = stdout_of(nexus(&gone, &cwd).args(["examples", "list"]));
+    assert!(err.contains("built into nexus"), "{err}");
+    assert!(
+        out.contains("agent-enrollment"),
+        "the real catalog is built in: {out}"
+    );
+
+    // A live list caches the catalog...
+    let (_, err) = stdout_of(nexus(&repo, &cwd).args(["examples", "list"]));
+    assert!(err.is_empty(), "a live read prints no note: {err}");
+    assert!(cwd.join(".cache/nexus/examples-catalog.json").is_file());
+
+    // ...which then answers when the repository can't be reached, and for --offline.
+    let (out, err) = stdout_of(nexus(&gone, &cwd).args(["examples", "list"]));
+    assert!(err.contains("cached"), "{err}");
+    assert!(
+        out.contains("hello"),
+        "the cached (test) catalog, not the built-in one: {out}"
+    );
+    let (_, err) = stdout_of(nexus(&repo, &cwd).args(["examples", "show", "hello", "--offline"]));
+    assert!(err.contains("offline") && err.contains("cached"), "{err}");
+}
+
+#[test]
+fn a_non_default_ref_never_falls_back_to_mains_catalog() {
+    let repo = catalog_repo("ref");
+    let cwd = scratch("ref-cwd");
+    nexus(&repo, &cwd)
+        .args(["examples", "list", "--ref", "no-such-branch"])
+        .assert()
+        .failure();
 }

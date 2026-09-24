@@ -1279,20 +1279,33 @@ fn build_subscriptions(
 /// examples repository; no network selection, no credentials, no SDK call.
 fn run_examples(command: ExamplesCommand, format: OutputFormat) -> Result<()> {
     let pretty = |v: serde_json::Value| serde_json::to_string_pretty(&v).unwrap_or_default();
+    let load = |git_ref: &str, offline: bool| -> Result<examples::Catalog> {
+        let (catalog, source) = examples::load_catalog(git_ref, offline)?;
+        if let Some(note) = examples::source_note(&source, offline) {
+            eprintln!("{note}");
+        }
+        Ok(catalog)
+    };
     match command {
         ExamplesCommand::List {
             track,
             lang,
             git_ref,
+            offline,
         } => {
-            let catalog = examples::fetch_catalog(&git_ref)?;
+            let catalog = load(&git_ref, offline)?;
             let found = examples::filter(&catalog, track.as_deref(), lang.as_deref())?;
             emit(format, examples::render_list(&found), || {
                 pretty(serde_json::json!(found))
             });
         }
-        ExamplesCommand::Show { id, lang, git_ref } => {
-            let catalog = examples::fetch_catalog(&git_ref)?;
+        ExamplesCommand::Show {
+            id,
+            lang,
+            git_ref,
+            offline,
+        } => {
+            let catalog = load(&git_ref, offline)?;
             let example = examples::resolve(&catalog, &id, lang.as_deref())?;
             let unique = catalog
                 .examples
@@ -1310,11 +1323,8 @@ fn run_examples(command: ExamplesCommand, format: OutputFormat) -> Result<()> {
             dir,
             git_ref,
         } => {
-            let catalog = examples::fetch_catalog(&git_ref)?;
-            let example = examples::resolve(&catalog, &id, lang.as_deref())?;
-            let dest = dir.unwrap_or_else(|| std::path::PathBuf::from(&example.id));
-            examples::get(example, &git_ref, &dest)?;
-            emit(format, examples::render_get(example, &dest), || {
+            let (example, dest) = examples::get(&id, lang.as_deref(), &git_ref, dir)?;
+            emit(format, examples::render_get(&example, &dest), || {
                 pretty(serde_json::json!({ "example": example, "dir": dest }))
             });
         }

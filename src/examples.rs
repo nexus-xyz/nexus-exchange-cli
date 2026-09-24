@@ -18,7 +18,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -137,13 +137,132 @@ pub fn parse_catalog(text: &str) -> Result<Catalog> {
     Ok(catalog)
 }
 
-/// Fetch and parse the catalog at `git_ref`.
-pub fn fetch_catalog(git_ref: &str) -> Result<Catalog> {
-    let scratch = Scratch::new()?;
-    let checkout = sparse_clone(&repo(), git_ref, &scratch.0)?;
-    let text = fs::read_to_string(checkout.join("catalog.json"))
-        .context("the examples repository has no catalog.json at that ref")?;
-    parse_catalog(&text)
+/// The catalog as it was when this binary was built: the last-resort fallback
+/// when the repository can't be reached and nothing is cached. Refresh it with
+/// `scripts/sync_examples_catalog.sh`.
+const SNAPSHOT: &str = include_str!("examples_catalog.json");
+
+/// The ref whose catalog is cached. Only the default branch is: a cached copy of
+/// some other ref standing in for `main` would be wrong in a way nobody sees.
+pub const DEFAULT_REF: &str = "main";
+
+/// Where the catalog came from, so the caller can say so when it isn't live.
+#[derive(Debug)]
+pub enum Source {
+    Live,
+    /// The last catalog fetched from `main`, and how long ago it was saved.
+    Cache(Option<Duration>),
+    /// The copy built into this binary.
+    Snapshot,
+}
+
+/// `$XDG_CACHE_HOME/nexus/examples-catalog.json`, falling back to
+/// `$HOME/.cache/nexus/examples-catalog.json` (the config file's convention).
+pub fn cache_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })?;
+    Some(base.join("nexus").join("examples-catalog.json"))
+}
+
+/// Best-effort: a cache that can't be written costs a fallback later, never the
+/// command that is running now.
+fn save_cache(git_ref: &str, text: &str) {
+    if git_ref != DEFAULT_REF {
+        return;
+    }
+    if let Some(path) = cache_path() {
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+}
+
+fn read_catalog_file(checkout: &Path) -> Result<String> {
+    fs::read_to_string(checkout.join("catalog.json"))
+        .context("the examples repository has no catalog.json at that ref")
+}
+
+/// The catalog for `list` and `show`: live from the repository, else (for the
+/// default ref only) the cached copy, else the copy built into this binary.
+/// `offline` skips the network. A non-default `--ref` that can't be fetched is
+/// an error: falling back to `main`'s catalog would answer a different question.
+pub fn load_catalog(git_ref: &str, offline: bool) -> Result<(Catalog, Source)> {
+    let live_err = if offline {
+        None
+    } else {
+        let fetched = (|| -> Result<Catalog> {
+            let scratch = Scratch::new()?;
+            let checkout = sparse_clone(&repo(), git_ref, &scratch.0)?;
+            let text = read_catalog_file(&checkout)?;
+            let catalog = parse_catalog(&text)?;
+            save_cache(git_ref, &text);
+            Ok(catalog)
+        })();
+        match fetched {
+            Ok(catalog) => return Ok((catalog, Source::Live)),
+            Err(e) if git_ref != DEFAULT_REF => return Err(e),
+            Err(e) => Some(e),
+        }
+    };
+    if git_ref != DEFAULT_REF {
+        bail!("--offline only has the default catalog (`{DEFAULT_REF}`); drop --ref or go online");
+    }
+    if let Some(path) = cache_path() {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(catalog) = parse_catalog(&text) {
+                let age = fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| SystemTime::now().duration_since(t).ok());
+                return Ok((catalog, Source::Cache(age)));
+            }
+        }
+    }
+    match parse_catalog(SNAPSHOT) {
+        Ok(catalog) => Ok((catalog, Source::Snapshot)),
+        Err(snapshot_err) => Err(live_err.unwrap_or(snapshot_err)),
+    }
+}
+
+/// The stderr note for a catalog that isn't live, or `None` when it is.
+pub fn source_note(source: &Source, offline: bool) -> Option<String> {
+    let why = if offline {
+        "offline"
+    } else {
+        "could not reach the examples repository"
+    };
+    match source {
+        Source::Live => None,
+        Source::Cache(age) => Some(format!(
+            "note: {why}; showing the catalog cached {}.",
+            age.map(ago).unwrap_or_else(|| "earlier".to_string())
+        )),
+        Source::Snapshot => Some(format!(
+            "note: {why} and nothing is cached; showing the catalog built into nexus {}. \
+             It may be missing newer examples.",
+            env!("CARGO_PKG_VERSION")
+        )),
+    }
+}
+
+fn ago(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=119 => "just now".to_string(),
+        120..=7199 => format!("{} minutes ago", s / 60),
+        7200..=172_799 => format!("{} hours ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
 }
 
 /// Normalise a `--lang` value to the catalog's `language` spelling.
@@ -219,8 +338,7 @@ pub fn resolve<'a>(catalog: &'a Catalog, id: &str, lang: Option<&str>) -> Result
     }
 }
 
-/// Copy one example directory out of a sparse checkout into `dest`.
-pub fn get(example: &Example, git_ref: &str, dest: &Path) -> Result<()> {
+fn ensure_empty(dest: &Path) -> Result<()> {
     if dest.exists()
         && fs::read_dir(dest)
             .map(|mut d| d.next().is_some())
@@ -231,8 +349,30 @@ pub fn get(example: &Example, git_ref: &str, dest: &Path) -> Result<()> {
             dest.display()
         );
     }
+    Ok(())
+}
+
+/// Download one example into `dir` (default `./<id>`), from a single sparse
+/// clone: read the catalog, resolve the id against it, then check out and copy
+/// only that example's directory. Needs the network; there is nothing to copy
+/// from a cache.
+pub fn get(
+    id: &str,
+    lang: Option<&str>,
+    git_ref: &str,
+    dir: Option<PathBuf>,
+) -> Result<(Example, PathBuf)> {
+    if let Some(dest) = &dir {
+        ensure_empty(dest)?;
+    }
     let scratch = Scratch::new()?;
     let checkout = sparse_clone(&repo(), git_ref, &scratch.0)?;
+    let text = read_catalog_file(&checkout)?;
+    let catalog = parse_catalog(&text)?;
+    save_cache(git_ref, &text);
+    let example = resolve(&catalog, id, lang)?.clone();
+    let dest = dir.unwrap_or_else(|| PathBuf::from(&example.id));
+    ensure_empty(&dest)?;
     git(&["sparse-checkout", "set", &example.path], Some(&checkout))
         .with_context(|| format!("checking out {}", example.path))?;
     let src = checkout.join(&example.path);
@@ -242,7 +382,8 @@ pub fn get(example: &Example, git_ref: &str, dest: &Path) -> Result<()> {
             example.path
         );
     }
-    copy_dir(&src, dest)
+    copy_dir(&src, &dest)?;
+    Ok((example, dest))
 }
 
 fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
@@ -445,12 +586,18 @@ mod tests {
     }
 
     #[test]
-    fn get_refuses_a_non_empty_destination() {
+    fn get_refuses_a_non_empty_destination_before_fetching() {
         let scratch = Scratch::new().unwrap();
         fs::write(scratch.0.join("x"), "x").unwrap();
-        let err = get(&entry("a", "b", "rust"), "main", &scratch.0)
+        let err = get("a", None, "main", Some(scratch.0.clone()))
             .unwrap_err()
             .to_string();
         assert!(err.contains("not empty"), "{err}");
+    }
+
+    #[test]
+    fn the_built_in_snapshot_parses() {
+        let catalog = parse_catalog(SNAPSHOT).expect("snapshot is a valid schema-1 catalog");
+        assert!(!catalog.examples.is_empty());
     }
 }

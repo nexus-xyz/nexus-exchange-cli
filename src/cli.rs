@@ -1442,6 +1442,10 @@ pub enum ExamplesCommand {
         /// Branch or tag of the examples repository to read.
         #[arg(long = "ref", default_value = "main")]
         git_ref: String,
+        /// Don't contact the repository: use the cached catalog, or the one
+        /// built into this binary.
+        #[arg(long)]
+        offline: bool,
     },
     /// Show one example: what it does, what it needs, and how to run it.
     Show {
@@ -1453,6 +1457,10 @@ pub enum ExamplesCommand {
         /// Branch or tag of the examples repository to read.
         #[arg(long = "ref", default_value = "main")]
         git_ref: String,
+        /// Don't contact the repository: use the cached catalog, or the one
+        /// built into this binary.
+        #[arg(long)]
+        offline: bool,
     },
     /// Download one example into a new directory, ready to run.
     Get {
