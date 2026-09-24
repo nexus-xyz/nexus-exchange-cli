@@ -130,6 +130,10 @@ You do **not** bump the version or tag by hand.
 
 1. Land changes on `main` using [Conventional Commits](https://www.conventionalcommits.org/)
    (`feat:`, `fix:`, `feat!:` / `BREAKING CHANGE:`).
+   Before merging a release PR, pin the built-in examples catalog to the newest
+   examples-repo tag with `scripts/sync_examples_catalog.sh` (land it as its own
+   `chore:` PR). The examples repo tags every green `main` commit
+   `catalog-YYYY.MM.DD`, and `src/examples_catalog.ref` records the pin.
 2. The [`release-please`](./.github/workflows/release-please.yml) workflow keeps a
    standing **release PR** that bumps `version` in `Cargo.toml` + `Cargo.lock` and
    writes `CHANGELOG.md`. The CLI is **pre-1.0** and stays on `0.X.Y`: `feat!:` /
@@ -790,7 +794,8 @@ catalog.
 
 `list` and `show` still work without the network. Each successful read caches
 the catalog in `$XDG_CACHE_HOME/nexus/` (or `~/.cache/nexus/`), and the binary
-carries a copy of the catalog as it was at release. When the repository can't be
+carries a copy of the catalog as it was at release, pinned to an examples-repo
+`catalog-YYYY.MM.DD` tag. When the repository can't be
 reached they fall back to the cache, then to that copy, and say which one they
 used. `--offline` skips the network. `get` always needs the network, since it
 downloads the example itself.

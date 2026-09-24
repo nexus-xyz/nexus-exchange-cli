@@ -142,6 +142,16 @@ pub fn parse_catalog(text: &str) -> Result<Catalog> {
 /// `scripts/sync_examples_catalog.sh`.
 const SNAPSHOT: &str = include_str!("examples_catalog.json");
 
+/// The examples-repo tag `SNAPSHOT` was taken from (`catalog-YYYY.MM.DD`), or
+/// `untagged` before the first pin.
+const SNAPSHOT_REF: &str = include_str!("examples_catalog.ref");
+
+/// `SNAPSHOT_REF`, or `None` when the snapshot was never pinned to a tag.
+pub fn snapshot_ref() -> Option<&'static str> {
+    let r = SNAPSHOT_REF.trim();
+    r.starts_with("catalog-").then_some(r)
+}
+
 /// The ref whose catalog is cached. Only the default branch is: a cached copy of
 /// some other ref standing in for `main` would be wrong in a way nobody sees.
 pub const DEFAULT_REF: &str = "main";
@@ -248,9 +258,12 @@ pub fn source_note(source: &Source, offline: bool) -> Option<String> {
             age.map(ago).unwrap_or_else(|| "earlier".to_string())
         )),
         Source::Snapshot => Some(format!(
-            "note: {why} and nothing is cached; showing the catalog built into nexus {}. \
+            "note: {why} and nothing is cached; showing the catalog built into nexus {}{}. \
              It may be missing newer examples.",
-            env!("CARGO_PKG_VERSION")
+            env!("CARGO_PKG_VERSION"),
+            snapshot_ref()
+                .map(|t| format!(" (examples {t})"))
+                .unwrap_or_default()
         )),
     }
 }
@@ -593,6 +606,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not empty"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_ref_is_a_catalog_tag_or_untagged() {
+        let r = SNAPSHOT_REF.trim();
+        assert!(r == "untagged" || r.starts_with("catalog-"), "{r}");
+        assert_eq!(snapshot_ref().is_some(), r.starts_with("catalog-"));
     }
 
     #[test]
