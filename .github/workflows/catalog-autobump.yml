@@ -12,10 +12,10 @@ name: Examples catalog autobump
 # `src/examples_catalog.ref`, this runs `scripts/sync_examples_catalog.sh` (the
 # same script a human would) and opens a PR. Reading tags needs no secret.
 #
-# CHECKS. Same caveat as sdk-autobump: a PR opened with the default GITHUB_TOKEN
-# triggers no workflows, so CI won't run on it unless `SDK_DISPATCH_TOKEN` is
-# set. The sync script validates the catalog before it writes anything, and the
-# PR body says whether checks will run.
+# CHECKS. Same token as sdk-autobump: the PR is opened with a token minted from
+# the release GitHub App, so its CI runs without a human approving it
+# (ENG-17793). The sync script also validates the catalog before it writes
+# anything.
 #
 # SCHEMA. A catalog on a schema this CLI doesn't understand fails the sync
 # script, so no PR is opened and the run goes red. That one needs a code change
@@ -48,9 +48,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Mint a token from the org release GitHub App (nexus-release-bot2), the same
+      # one release-please.yml uses. A PR pushed and opened with the default
+      # GITHUB_TOKEN leaves its CI / spec-drift runs at `action_required` until a
+      # human approves them; one opened with an App-installation token runs them
+      # (ENG-17793).
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Is there a newer catalog tag?
         id: gate
@@ -97,10 +108,10 @@ jobs:
       - name: Open the pin PR
         if: steps.gate.outputs.proceed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OLD: ${{ steps.gate.outputs.old }}
           NEW: ${{ steps.gate.outputs.new }}
-          CHECKS: ${{ secrets.SDK_DISPATCH_TOKEN != '' && 'will-run' || 'will-not-run' }}
+          CHECKS: will-run
         run: |
           set -euo pipefail
           if git diff --quiet; then

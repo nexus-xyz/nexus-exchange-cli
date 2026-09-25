@@ -1071,9 +1071,9 @@ python3 scripts/check_sdk_parity.py           # pin + manifest vs the crate
 
 Three things gate such a PR landing unattended, none in this repo's gift:
 `allow_auto_merge` is disabled here (the workflow probes it and says so in the PR
-body rather than silently no-opping); a PR opened with the default `GITHUB_TOKEN`
-does not trigger `spec-drift`/CI, so a `SDK_DISPATCH_TOKEN` secret is needed for the
-checks to run at all; and
+body rather than silently no-opping); the PR is opened with a token from the
+release GitHub App so `spec-drift`/CI run on it (ENG-17793), but a green run still
+needs a review; and
 [ENG-4149](https://linear.app/nexus-labs/issue/ENG-4149) provisions the ruleset
 bypass. Until those are resolved a human merges the PR — which the body says
 plainly rather than implying otherwise.

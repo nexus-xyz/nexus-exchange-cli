@@ -28,12 +28,12 @@ name: SDK autobump
 # from a day to a minute, which is worth nothing here and would add a token
 # dependency on ENG-4149.
 #
-# ONE THING WORTH CONFIGURING. A PR opened with the default GITHUB_TOKEN does not
-# trigger other workflows, so `spec-drift` and CI would not run on it. Set
-# `SDK_DISPATCH_TOKEN` (any PAT/app token with repo scope) and they do. Without it
-# this workflow still opens the PR, runs `cargo check` itself so the "does it even
-# compile" question is answered either way, and says plainly in the PR body that
-# the checks did not run.
+# THE TOKEN. The branch is pushed and the PR opened with a token minted from the
+# release GitHub App, not the default GITHUB_TOKEN. With the default token GitHub
+# holds the PR's `spec-drift` and CI runs at `action_required` until a human
+# approves them, which is how the 0.11.1 bump sat unchecked for a day (ENG-17793).
+# The job still runs `cargo check` itself, so the "does it even compile" answer is
+# in the PR body before any check finishes.
 #
 # WHEN THE BUMP DOES NOT COMPILE (ENG-9373). Three things happen, because the PR
 # body alone was not enough — the 0.8.0 bump sat for a day looking unreviewed while
@@ -80,22 +80,20 @@ jobs:
   autobump:
     runs-on: ubuntu-latest
     steps:
+      # Mint a token from the org release GitHub App (nexus-release-bot2), the same
+      # one release-please.yml uses. A PR pushed and opened with the default
+      # GITHUB_TOKEN leaves its CI / spec-drift runs at `action_required` until a
+      # human approves them; one opened with an App-installation token runs them
+      # (ENG-17793).
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
-          # The bump token, when present, is what makes the opened PR trigger
-          # spec-drift and CI. Falls back to the default token, which cannot.
-          token: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
-
-      - name: Note whether PR checks will be able to run
-        id: token
-        run: |
-          set -euo pipefail
-          if [ -n "${{ secrets.SDK_DISPATCH_TOKEN }}" ]; then
-            echo "checks=will-run" >> "$GITHUB_OUTPUT"
-          else
-            echo "checks=will-not-run" >> "$GITHUB_OUTPUT"
-            echo "::warning::SDK_DISPATCH_TOKEN is unset, so the PR is opened with the default GITHUB_TOKEN and spec-drift/CI will NOT trigger on it. This job runs cargo check itself; a human must still kick the full checks."
-          fi
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Is a newer crate published?
         id: gate
@@ -260,7 +258,7 @@ jobs:
       - name: Ensure the autobump labels exist
         if: steps.gate.outputs.proceed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           gh label create "spec-autobump" \
@@ -275,13 +273,13 @@ jobs:
       - name: Open the bump PR
         if: steps.gate.outputs.proceed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.SDK_DISPATCH_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
           OLD_TAG: ${{ steps.gate.outputs.old_tag }}
           NEW_TAG: ${{ steps.bump.outputs.new_tag }}
           VERDICT: ${{ steps.oasdiff.outputs.verdict }}
           COMPILES: ${{ steps.compile.outputs.result }}
-          CHECKS: ${{ steps.token.outputs.checks }}
+          CHECKS: will-run
         run: |
           set -euo pipefail
           if git diff --quiet; then
