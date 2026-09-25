@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.0...v0.5.1) (2026-09-25)
+
+
+### Features
+
+* **cli:** add nexus bridge deposit commands (ENG-5852) ([#75](https://github.com/nexus-xyz/nexus-exchange-cli/issues/75)) ([d247385](https://github.com/nexus-xyz/nexus-exchange-cli/commit/d247385a5dcd9caf1c589828143c463442c41f45))
+* **cli:** add the five remaining SDK-wrapped mutations (ENG-9198) ([#80](https://github.com/nexus-xyz/nexus-exchange-cli/issues/80)) ([5927feb](https://github.com/nexus-xyz/nexus-exchange-cli/commit/5927feb0dc8878f9fb2fe72f9db1dad11b92b2fb))
+* **cli:** add the ten read-only spec operations the CLI was missing (ENG-9198) ([#79](https://github.com/nexus-xyz/nexus-exchange-cli/issues/79)) ([6aeeb2e](https://github.com/nexus-xyz/nexus-exchange-cli/commit/6aeeb2e3d1b9d210b0a8f41d45009463f3757442))
+* **cli:** nexus examples list/show/get (ENG-17337) ([#83](https://github.com/nexus-xyz/nexus-exchange-cli/issues/83)) ([1170384](https://github.com/nexus-xyz/nexus-exchange-cli/commit/1170384ecf9973d09f5d793fe97e3e5b36f34136))
+
+
+### Bug Fixes
+
+* **examples:** default north_star.sh to testnet, not retired beta (ENG-17413) ([#87](https://github.com/nexus-xyz/nexus-exchange-cli/issues/87)) ([556d1e2](https://github.com/nexus-xyz/nexus-exchange-cli/commit/556d1e24f7e4e528ca10428330d4911735f86284))
+* **ws:** remint the single-use token on reconnect (ENG-5291) ([#76](https://github.com/nexus-xyz/nexus-exchange-cli/issues/76)) ([9820540](https://github.com/nexus-xyz/nexus-exchange-cli/commit/982054016890762f2a665695aa0d70e0051dfe76))
+
 ## [0.5.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.4.0...v0.5.0) (2026-09-01)
 
 
