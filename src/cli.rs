@@ -1966,7 +1966,8 @@ pub enum AgentsCommand {
 }
 
 /// Bridge subcommands (`GET /api/v1/bridge/*`). Phase A of the bridge covers
-/// deposits only: assets, per-account deposit addresses, and tracked deposits.
+/// deposits only: assets and tracked deposits. The per-account deposit
+/// addresses are deprecated and hidden, because nothing serves them.
 ///
 /// Two of these take an optional narrowing argument rather than splitting into a
 /// separate command, because each pair is one concept at two granularities and
@@ -1979,8 +1980,14 @@ pub enum BridgeCommand {
     /// credentials needed.
     Assets,
 
-    /// Show your deposit addresses. With `--chain`, get (or create) the address
-    /// for that chain; without it, list the ones that already exist.
+    /// [deprecated] Show your deposit addresses. With `--chain`, get (or
+    /// create) the address for that chain; without it, list the ones that
+    /// already exist.
+    ///
+    /// Hidden: no server implements `/api/v1/bridge/deposit-addresses` (its
+    /// design was cancelled with ENG-11460), so every call fails. It stays
+    /// parseable so existing scripts get the warning rather than a usage error.
+    #[command(hide = true)]
     DepositAddress {
         /// Chain to get-or-create the deposit address on, e.g. `ethereum` or
         /// `base`. Take the value from `nexus bridge assets` rather than

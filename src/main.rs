@@ -1367,6 +1367,12 @@ fn margin_read_error(err: nexus_exchange::Error, context: &'static str) -> anyho
     }
 }
 
+/// Printed by the hidden `bridge deposit-address`, whose route nothing serves.
+const DEPOSIT_ADDRESS_DEPRECATED: &str = "warning: `nexus bridge deposit-address` is \
+     deprecated (ENG-18024). No server implements /api/v1/bridge/deposit-addresses (its \
+     design was cancelled with ENG-11460), so this command fails. It will be removed in a \
+     later release.";
+
 /// Handle the `nexus bridge` subcommands (Phase A: deposits).
 ///
 /// `assets` is public; everything else is account-scoped and gated on
@@ -1389,10 +1395,13 @@ async fn handle_bridge(
             });
         }
         BridgeCommand::DepositAddress { chain: Some(chain) } => {
+            eprintln!("{}", DEPOSIT_ADDRESS_DEPRECATED);
             require_authenticated(authenticated, "bridge deposit-address")?;
             // Get-or-create, idempotent per (account, chain) — no confirmation
             // prompt, because a repeat call returns the same address and nothing
             // is spent, revoked or overwritten.
+            // Deprecated in `nexus-exchange` 0.12 along with this command.
+            #[allow(deprecated)]
             let address = client
                 .create_bridge_deposit_address(&chain)
                 .await
@@ -1402,7 +1411,9 @@ async fn handle_bridge(
             });
         }
         BridgeCommand::DepositAddress { chain: None } => {
+            eprintln!("{}", DEPOSIT_ADDRESS_DEPRECATED);
             require_authenticated(authenticated, "bridge deposit-address")?;
+            #[allow(deprecated)]
             let addresses = client
                 .fetch_bridge_deposit_addresses()
                 .await
