@@ -1372,14 +1372,14 @@ fn bridge_exposes_no_withdraw_or_wallet_command() {
 
     let help = run(&["bridge", "--help"]);
     assert_eq!(help.code, Some(0));
-    for absent in ["withdraw", "wallets"] {
+    for absent in ["withdraw", "wallets", "deposit-address"] {
         assert!(
             !help.stdout.contains(absent),
             "`bridge --help` should not mention {absent:?}: {}",
             help.stdout
         );
     }
-    for present in ["assets", "deposit-address", "deposits"] {
+    for present in ["assets", "deposits"] {
         assert!(
             help.stdout.contains(present),
             "`bridge --help` should list {present:?}: {}",

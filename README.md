@@ -392,10 +392,10 @@ nexus agents revoke <AGENT_ADDRESS>
 
 # Cross-chain deposits (bridge Phase A; see Credentials below)
 nexus bridge assets                          # chains and their bridgeable assets
-nexus bridge deposit-address                 # your existing deposit addresses
-nexus bridge deposit-address --chain base    # get-or-create the one for a chain
 nexus bridge deposits                        # tracked deposits and their status
 nexus bridge deposits --id <DEPOSIT_ID>      # one deposit, with its tx hash
+# `nexus bridge deposit-address` is deprecated and hidden: no server implements
+# /api/v1/bridge/deposit-addresses (its design was cancelled, ENG-11460).
 # Deposit-only by design: the bridge serves no withdrawal endpoint yet, so there
 # is no `nexus bridge withdraw`. The spec's wallet-linking operations
 # (`/api/v1/bridge/wallets`) have no SDK wrapper, so no command can reach them.

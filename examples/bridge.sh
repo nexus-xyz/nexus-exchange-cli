@@ -18,27 +18,18 @@ nexus bridge assets
 # `withdraw` rows describe the eventual capability. The bridge serves deposits
 # only today, so there is no `nexus bridge withdraw` to pair with them.
 
-# 2. Where to send the funds. Get-or-create is idempotent per (account, chain):
-#    running this twice returns the same address, so there is no confirmation
-#    prompt and re-running is safe.
-#    POST /api/v1/bridge/deposit-addresses
-nexus bridge deposit-address --chain base
+# There is no step for getting a deposit address: `nexus bridge deposit-address`
+# is deprecated, because no server implements /api/v1/bridge/deposit-addresses
+# (ENG-11460).
 
-# Take the chain name from step 1 rather than guessing — the server rejects a
-# chain it does not bridge, and only the listed assets are credited.
-
-# 3. The addresses you already hold, one per chain.
-#    GET /api/v1/bridge/deposit-addresses
-nexus bridge deposit-address
-
-# 4. Track what has arrived. `CONF` is `seen/required`, and `-` on either half
+# 2. Track what has arrived. `CONF` is `seen/required`, and `-` on either half
 #    means the server has not reported it — a deposit not yet seen on chain has
 #    neither, which is not the same as zero.
 #    Lifecycle: detected -> confirming -> credited | failed.
 #    GET /api/v1/bridge/deposits
 nexus bridge deposits
 
-# 5. One deposit in full, including the source-chain tx hash (kept out of the
+# 3. One deposit in full, including the source-chain tx hash (kept out of the
 #    table above, where 66 characters would push every other column off screen).
 #    Take the id from the list rather than typing one, so this runs unedited.
 #    GET /api/v1/bridge/deposits/{id}
