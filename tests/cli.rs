@@ -702,6 +702,29 @@ fn cancel_variants_route_to_the_sdk_when_credentialed() {
 /// Without credentials, the new authenticated commands are refused at the auth
 /// gate — before any confirmation prompt or network attempt.
 #[test]
+fn hidden_deposit_address_still_parses_and_warns() {
+    // Hidden, not removed (ENG-18024): existing scripts get the deprecation
+    // warning on stderr rather than a clap usage error.
+    for args in [
+        ["bridge", "deposit-address"].as_slice(),
+        ["bridge", "deposit-address", "--chain", "base"].as_slice(),
+    ] {
+        let out = run(args);
+        assert!(
+            out.stderr
+                .contains("`nexus bridge deposit-address` is deprecated (ENG-18024)"),
+            "`{args:?}` stderr: {}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("unrecognized subcommand"),
+            "{}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
 fn new_authenticated_commands_are_gated_without_credentials() {
     for args in [
         ["market", "adl-events", "BTC-USDX-PERP"].as_slice(),
