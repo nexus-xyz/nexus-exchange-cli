@@ -70,8 +70,8 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `signal` powers the Ctrl-C shutdown of `nexus ws`.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+# `signal` powers the Ctrl-C shutdown of `nexus ws`; `time` its reconnect backoff.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 rpassword = "7"
 
 # Dev-only: the `tests/smoke.rs` integration test runs the built `nexus` binary
@@ -82,6 +82,11 @@ rpassword = "7"
 [dev-dependencies]
 assert_cmd = "2"
 wiremock = "0.6"
+# `src/wsclient.rs` tests run `nexus ws`'s reconnect loop against a local
+# WebSocket server. Both are already in the tree through the SDK.
+futures-util = "0.3"
+tokio-tungstenite = "0.30"
+tokio = { version = "1", features = ["net"] }
 
 # Release-build profile used by `dist`. Inherits the standard release profile and
 # enables thin LTO for smaller, faster shipped binaries without the long compile

@@ -1180,11 +1180,13 @@ dependencies = [
  "assert_cmd",
  "clap",
  "clap_complete",
+ "futures-util",
  "nexus-exchange",
  "rpassword",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "wiremock",
 ]
 
