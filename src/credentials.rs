@@ -308,7 +308,32 @@ fn legacy_credential_owner(cfg: &FileConfig) -> NetworkArg {
     crate::cli::declared_network(cfg).unwrap_or(crate::cli::DEFAULT_NETWORK)
 }
 
-/// Write the config file with owner-only permissions.
+/// Load the config, apply `change`, and save it, holding an exclusive lock on a
+/// sibling lock file for the whole read-modify-write. Every writer that changes
+/// part of the file goes through here, so two `nexus` processes saving different
+/// fields both survive instead of the last whole-file write dropping the other.
+///
+/// The lock is advisory (`flock` on Unix, `LockFileEx` on Windows) and only
+/// binds `nexus` itself; it is released when the handle drops.
+pub fn update(change: impl FnOnce(&mut FileConfig)) -> Result<PathBuf> {
+    let path = config_path()?;
+    let dir = path.parent().expect("config path always has a parent");
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    harden_dir(dir)?;
+    let lock_path = dir.join(".config.json.lock");
+    let lock = open_private(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+
+    let mut cfg = load()?.unwrap_or_default();
+    change(&mut cfg);
+    save(&cfg)
+}
+
+/// Write the whole config file with owner-only permissions. Takes no lock: a
+/// caller changing part of the file wants [`update`], which re-reads under the
+/// lock first.
 pub fn save(cfg: &FileConfig) -> Result<PathBuf> {
     let path = config_path()?;
     let dir = path.parent().expect("config path always has a parent");
@@ -333,22 +358,21 @@ pub fn save(cfg: &FileConfig) -> Result<PathBuf> {
 /// key, so storing it flat would leave `--network mainnet` presenting a testnet
 /// token.
 pub fn save_session_token(namespace: &str, token: &str) -> Result<PathBuf> {
-    let mut cfg = load()?.unwrap_or_default();
-    cfg.section_mut(namespace).session_token = Some(token.to_string());
-    save(&cfg)
+    update(|cfg| cfg.section_mut(namespace).session_token = Some(token.to_string()))
 }
 
 /// Record that the user has acknowledged `namespace`'s real-funds warning, so
 /// the one-time prompt does not reappear on every trade *there*. Preserves every
 /// other field. Returns the path it was written to.
 ///
-/// Re-reads the file rather than writing back the caller's copy: another process
-/// may have added a network or a credential since this one loaded, and a
-/// whole-file overwrite from stale state would drop it.
+/// Goes through [`update`] rather than writing back the caller's copy: another
+/// process may have added a network or a credential since this one loaded.
+/// Re-reading alone is not enough, since another process can still write between
+/// the read and the rename; the lock closes that window.
 pub fn save_acknowledged(namespace: &str) -> Result<PathBuf> {
-    let mut cfg = load()?.unwrap_or_default();
-    cfg.acknowledged_networks.insert(namespace.to_string());
-    save(&cfg)
+    update(|cfg| {
+        cfg.acknowledged_networks.insert(namespace.to_string());
+    })
 }
 
 /// Atomically write `bytes` to `path` with owner-only permissions (`0600`).
@@ -415,6 +439,19 @@ fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> 
     Ok(())
 }
 
+/// Open (creating if needed) the lock file for [`update`], owner-only (`0600`).
+/// Never truncated or written: only its lock matters.
+fn open_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
 /// Write `bytes` to `path`, ensuring the file is owner-read/write only (`0600`).
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     use std::fs::OpenOptions;
@@ -450,6 +487,23 @@ fn harden_dir(_dir: &std::path::Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Write `setup`'s answers into `cfg`, touching only what `setup` asks about:
+/// the selected network and that network's API key and secret. A blank secret
+/// keeps the current one; the session token and every other network are left
+/// as they are. (An all-blank network is already `None`: `non_empty` trims.)
+fn apply_setup_answers(
+    cfg: &mut FileConfig,
+    network: Option<String>,
+    namespace: &str,
+    api_key: Option<String>,
+    api_secret: Option<String>,
+) {
+    cfg.network = network;
+    let section = cfg.section_mut(namespace);
+    section.api_key = api_key;
+    section.api_secret = api_secret.or(section.api_secret.take());
 }
 
 /// Interactive `nexus setup`: prompt for network and credentials, then persist
@@ -521,24 +575,22 @@ pub fn setup() -> Result<()> {
     let api_secret = rpassword::prompt_password("API secret (input hidden, blank keeps current): ")
         .context("failed to read API secret")?;
 
-    let mut cfg = FileConfig {
-        network,
-        base_url: existing.base_url,
-        networks: existing.networks,
-        custom_networks: existing.custom_networks,
-        acknowledged_networks: existing.acknowledged_networks,
-        ..Default::default()
-    };
-    // (An all-blank network is already `None` — `non_empty` trims first.)
-    let section = cfg.section_mut(target.name());
-    section.api_key = non_empty(api_key);
-    // Keep an existing secret if the user left the prompt blank.
-    section.api_secret = non_empty(api_secret).or(stored.api_secret);
-    // `setup` doesn't touch the wallet session token; preserve it.
-    section.session_token = stored.session_token;
-    let secret_missing = section.api_secret.is_none();
-
-    let path = save(&cfg)?;
+    // Apply the answers to a fresh read under the lock, not to `existing`: the
+    // prompts can sit open for minutes, and a token saved by `nexus auth login`
+    // in another terminal meanwhile must survive this save.
+    let mut secret_missing = false;
+    let path = update(|cfg| {
+        apply_setup_answers(
+            cfg,
+            network,
+            target.name(),
+            non_empty(api_key),
+            non_empty(api_secret),
+        );
+        secret_missing = cfg
+            .credentials_for(target.name())
+            .is_none_or(|c| c.api_secret.is_none());
+    })?;
     println!("\nSaved to {} (permissions 0600).", path.display());
     if secret_missing {
         println!(
@@ -1126,6 +1178,78 @@ mod tests {
             leftovers, 0,
             "temp files left behind after concurrent saves"
         );
+    }
+
+    /// Concurrent writers of *different* fields must all survive (ENG-18686).
+    /// Without the lock around load-modify-save, a writer that loaded before
+    /// another's rename writes back a copy without that field.
+    #[test]
+    fn concurrent_updates_of_different_fields_all_survive() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("concurrent-fields");
+
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    for n in 0..20 {
+                        save_session_token(&format!("net{i}"), &format!("tok-{n}")).unwrap();
+                    }
+                    save_acknowledged(&format!("net{i}")).unwrap();
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+
+        let cfg = load().unwrap().expect("config should be present");
+        for i in 0..8 {
+            let ns = format!("net{i}");
+            assert_eq!(
+                cfg.credentials_for(&ns)
+                    .and_then(|c| c.session_token.as_deref()),
+                Some("tok-19"),
+                "{ns}'s token was lost"
+            );
+            assert!(cfg.acknowledged(&ns), "{ns}'s acknowledgement was lost");
+        }
+    }
+
+    /// `setup` holds its copy across interactive prompts. A token `auth login`
+    /// saves from another terminal meanwhile must survive setup's save, and a
+    /// blank secret keeps the current one (ENG-18686).
+    #[test]
+    fn setup_answers_keep_a_token_saved_during_the_prompts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("setup-concurrent");
+        update(|cfg| {
+            let s = cfg.section_mut("testnet");
+            s.api_key = Some("nx_old".into());
+            s.api_secret = Some("secret".into());
+        })
+        .unwrap();
+
+        // `setup` loads here, then waits on prompts while another process logs in.
+        let _stale = load().unwrap();
+        save_session_token("testnet", "from-login").unwrap();
+
+        update(|cfg| {
+            apply_setup_answers(
+                cfg,
+                Some("testnet".into()),
+                "testnet",
+                Some("nx_new".into()),
+                None,
+            )
+        })
+        .unwrap();
+
+        let cfg = load().unwrap().expect("config should be present");
+        let creds = cfg.credentials_for("testnet").unwrap();
+        assert_eq!(creds.session_token.as_deref(), Some("from-login"));
+        assert_eq!(creds.api_key.as_deref(), Some("nx_new"));
+        assert_eq!(creds.api_secret.as_deref(), Some("secret"));
+        assert_eq!(cfg.network.as_deref(), Some("testnet"));
     }
 
     // ──────────── pre-namespacing config migration (ENG-6462) ────────────

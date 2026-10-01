@@ -2,7 +2,7 @@
 name = "nexus-exchange-cli"
 version = "0.5.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.89"
 description = "Command-line interface for the Nexus Exchange API"
 # Required by the WiX/MSI installer (dist refuses to generate main.wxs without it).
 authors = ["Nexus <oss@nexus.xyz>"]
