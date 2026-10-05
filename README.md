@@ -174,7 +174,9 @@ own, with no **Approve and run workflows** click to wait for.
 - `prepublish-verdict`: the proposed version fits the spec change since the last
   published GitHub Release, graded by the monorepo's classifier
   (`scripts/release_gate/VENDORED.md`). Below 1.0 a breaking change needs a minor
-  bump. *Could not classify* fails and needs a person.
+  bump. *Could not classify* fails and needs a person. It also grades the
+  commands and flags: a line of the published tag's `public-api.txt` that is gone
+  needs the same bump (below).
 - `drift`, as on every PR.
 
 They gate the release PR, not the tag: `release.yml` publishes on any pushed
