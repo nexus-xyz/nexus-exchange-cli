@@ -34,6 +34,13 @@ change fail the check. The `help` subcommands, which clap generates from the tre
 not advertised, so they are not public surface. The value of an `[env: NAME=value]`, which is
 whatever the caller's environment holds; the binary runs with an empty one anyway.
 
+WHAT `-h` CANNOT SHOW, SO THIS CHECK CANNOT SEE IT. The values a flag accepts beyond its
+placeholder: its type and range. Narrowing `nexus fills --limit` to `range(1..=10)` still prints
+`--limit <LIMIT> [default: 100]`, so the check passes while the binary now rejects its own default
+(ENG-18798 review). Also `requires` / `conflicts_with` between flags, hidden aliases, and the
+shape of the `--output json` document. A change to any of these can break a caller, and only the
+reviewer and a `!` PR title stand in front of it.
+
 Anything in the help it cannot place fails loudly instead of being skipped. Stdlib only.
 """
 

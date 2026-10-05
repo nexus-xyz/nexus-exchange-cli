@@ -180,6 +180,22 @@ own, with no **Approve and run workflows** click to wait for.
 They gate the release PR, not the tag: `release.yml` publishes on any pushed
 version tag, and a tag pushed by hand has been through none of them.
 
+A `-` line in `public-api.txt` is a command, argument or flag removed or
+changed, which is breaking. Until the first release that carries
+`public-api.txt`, the verdict grades only the spec pin (`.api-version`), so a `-`
+line needs a `!` title (`feat!:`, `fix!:`) to make the release a minor bump.
+After that, the verdict also fails a patch bump when `public-api.txt` lost lines
+since the published tag. `prepublish-surface` cannot see everything either;
+`scripts/release_gate/cli_surface.py` lists what `-h` does not show.
+
+**A red verdict on the release PR after a breaking spec bump** ("needs at least
+0.6.0") is expected: `sdk-autobump.yml` titles its PRs `deps: ...`, with no
+`!`, so release-please proposes a patch. Land a commit on `main` whose body says
+`Release-As: 0.6.0` (release-please: "When a commit to the main branch has
+`Release-As: x.x.x` (case insensitive) in the **commit body**, Release Please will
+open a new pull request for the specified version"), for example an empty
+`chore: release 0.6.0` PR. Squash merges keep the commit messages as the body.
+
 **Aborting or re-running a release.** Deleting the `v<version>` tag is how you
 stop or retry a build — but that tag is also the changelog boundary, and the
 workflow re-creates it from the draft Release on the next push to `main`,

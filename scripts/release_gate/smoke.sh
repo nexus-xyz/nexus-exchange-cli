@@ -21,7 +21,8 @@
 #
 # The binary exits 1 on every error, so the split comes from the error it prints: the SDK's
 # transient errors ("network error", "request timed out", "service unavailable", "rate limited")
-# are the unreachable ones. `NEXUS_SMOKE_BASE_URL` points the read elsewhere, through the binary's
+# are the unreachable ones. Only the first cause is read; the lines under it can quote the
+# server's own message, which may say anything. `NEXUS_SMOKE_BASE_URL` points the read elsewhere, through the binary's
 # own `--base-url`, for testing the outcomes themselves.
 set -euo pipefail
 
@@ -71,9 +72,13 @@ fi
 
 args=(--network testnet)
 target="testnet"
+# The testnet host is not a flag here: it is built into the SDK crate the binary names, so an
+# unreachable testnet can also be a stale crate pin.
+host_note="; its testnet host is the one built into the nexus-exchange crate in ${installed}"
 if [ -n "${NEXUS_SMOKE_BASE_URL:-}" ]; then
   args+=(--base-url "$NEXUS_SMOKE_BASE_URL")
   target="$NEXUS_SMOKE_BASE_URL"
+  host_note=""
 fi
 
 set +e
@@ -108,9 +113,13 @@ else
   error="$(sed -n '/^Error: /,$p' "$work/err.txt")"
   [ -n "$error" ] || error="$(cat "$work/err.txt")"
   error="$(printf '%s' "$error" | tr -s '[:space:]' ' ' | cut -c1-400)"
-  if grep -qE '^ +([0-9]+: )?(network error|request timed out|service unavailable|rate limited)' "$work/err.txt"; then
+  # The first line under `Caused by:` (the `Error:` line when there is none). A 404 whose message
+  # has a line reading "network error" is still a 404 (ENG-18798 review).
+  cause="$(sed -n '/^Caused by:$/{n;p;q}' "$work/err.txt")"
+  [ -n "$cause" ] || cause="$(sed -n '/^Error: /{s/^Error: //;p;q}' "$work/err.txt")"
+  if grep -qE '^ *([0-9]+: )?(network error|request timed out|service unavailable|rate limited)' <<< "$cause"; then
     code=2
-    line="${target} gave no usable answer (exit ${status}): ${error}"
+    line="${target} gave no usable answer (exit ${status}${host_note}): ${error}"
   else
     code=1
     line="nexus market summary against ${target} failed (exit ${status}): ${error}"
