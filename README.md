@@ -730,6 +730,11 @@ default (`testnet`). Some consequences worth knowing:
 - **`nexus auth login` stores its session token in the active network's
   section**, for the same reason: the token is minted against one network's
   indexer and authenticates nowhere else.
+- **A section may also hold a `private_key`**, the wallet the
+  [MCP server](https://github.com/nexus-xyz/nexus-exchange-mcp)'s
+  `create_wallet` saves on a play-funds network. The CLI does not use it, and
+  carries it through every write untouched so that sharing the file never
+  deletes that key.
 
 **Upgrading:** a config written by an earlier version keeps its credentials at
 the top level. Those are read as belonging to the network that file names (or
