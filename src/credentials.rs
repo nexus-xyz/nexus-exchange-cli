@@ -504,9 +504,18 @@ fn harden_dir(_dir: &std::path::Path) -> Result<()> {
 }
 
 /// Write `setup`'s answers into `cfg`, touching only what `setup` asks about:
-/// the selected network and that network's API key and secret. A blank secret
-/// keeps the current one; the session token and every other network are left
-/// as they are. (An all-blank network is already `None`: `non_empty` trims.)
+/// the selected network and that network's API key and secret. The session
+/// token and every other network are left as they are. (An all-blank network
+/// is already `None`: `non_empty` trims.)
+///
+/// A key id and its secret are one credential, so they move as a pair: the
+/// answered key is written only with a typed secret, or where the section
+/// holds no secret it could be mismatched with. Otherwise a blank secret keeps
+/// the section's current pair, key included (ENG-20053). The key answer can be
+/// stale: its prompt default was read before the prompts opened, and MCP's
+/// `create_api_key` may have saved a new pair since. Writing that default back
+/// beside the new secret would leave a pair the server refuses, and the new
+/// secret has no other copy.
 fn apply_setup_answers(
     cfg: &mut FileConfig,
     network: Option<String>,
@@ -516,8 +525,10 @@ fn apply_setup_answers(
 ) {
     cfg.network = network;
     let section = cfg.section_mut(namespace);
-    section.api_key = api_key;
-    section.api_secret = api_secret.or(section.api_secret.take());
+    if api_secret.is_some() || section.api_secret.is_none() {
+        section.api_key = api_key;
+        section.api_secret = api_secret;
+    }
 }
 
 /// Interactive `nexus setup`: prompt for network and credentials, then persist
@@ -592,20 +603,32 @@ pub fn setup() -> Result<()> {
     // Apply the answers to a fresh read under the lock, not to `existing`: the
     // prompts can sit open for minutes, and a token saved by `nexus auth login`
     // in another terminal meanwhile must survive this save.
+    let api_key = non_empty(api_key);
     let mut secret_missing = false;
+    let mut key_not_saved = false;
     let path = update(|cfg| {
         apply_setup_answers(
             cfg,
             network,
             target.name(),
-            non_empty(api_key),
+            api_key.clone(),
             non_empty(api_secret),
         );
-        secret_missing = cfg
-            .credentials_for(target.name())
-            .is_none_or(|c| c.api_secret.is_none());
+        let creds = cfg.credentials_for(target.name());
+        secret_missing = creds.is_none_or(|c| c.api_secret.is_none());
+        // The stored key differs from the answer only when the pair was kept.
+        key_not_saved =
+            api_key.is_some() && creds.and_then(|c| c.api_key.as_ref()) != api_key.as_ref();
     })?;
     println!("\nSaved to {} (permissions 0600).", path.display());
+    if key_not_saved {
+        println!(
+            "note: API key {} was not saved for {}: a key id is saved only with its secret, so \
+             the stored pair was kept. Run `nexus setup` again and enter both to replace it.",
+            api_key.as_deref().unwrap_or_default(),
+            target.name()
+        );
+    }
     if secret_missing {
         println!(
             "note: no API secret stored for {} — authenticated commands will be refused.",
@@ -1253,7 +1276,7 @@ mod tests {
                 cfg,
                 Some("testnet".into()),
                 "testnet",
-                Some("nx_new".into()),
+                Some("nx_old".into()),
                 None,
             )
         })
@@ -1262,9 +1285,68 @@ mod tests {
         let cfg = load().unwrap().expect("config should be present");
         let creds = cfg.credentials_for("testnet").unwrap();
         assert_eq!(creds.session_token.as_deref(), Some("from-login"));
-        assert_eq!(creds.api_key.as_deref(), Some("nx_new"));
+        assert_eq!(creds.api_key.as_deref(), Some("nx_old"));
         assert_eq!(creds.api_secret.as_deref(), Some("secret"));
         assert_eq!(cfg.network.as_deref(), Some("testnet"));
+    }
+
+    /// The key prompt's default is read before the prompts open; MCP's
+    /// `create_api_key` can save a new pair (K1/S1) while they are open. The
+    /// stored key and secret must still belong together (ENG-20053).
+    #[test]
+    fn setup_answers_keep_the_key_and_secret_as_a_pair() {
+        let pair = |key: Option<&str>, secret: Option<&str>| NetworkCredentials {
+            api_key: key.map(Into::into),
+            api_secret: secret.map(Into::into),
+            ..Default::default()
+        };
+        let moved_on = pair(Some("K1"), Some("S1"));
+        // (case, key answer, secret answer, section at save time, section after)
+        let cases = [
+            // Enter on the stale default K0, secret blank: keep MCP's pair.
+            (
+                "stale default",
+                Some("K0"),
+                None,
+                &moved_on,
+                pair(Some("K1"), Some("S1")),
+            ),
+            // A new key typed without its secret is not paired with S1.
+            (
+                "typed key",
+                Some("K2"),
+                None,
+                &moved_on,
+                pair(Some("K1"), Some("S1")),
+            ),
+            (
+                "typed pair",
+                Some("K2"),
+                Some("S2"),
+                &moved_on,
+                pair(Some("K2"), Some("S2")),
+            ),
+            // Nothing to mismatch: a key with no secret anywhere is stored alone.
+            (
+                "first key",
+                Some("K2"),
+                None,
+                &pair(None, None),
+                pair(Some("K2"), None),
+            ),
+        ];
+        for (name, key, secret, before, want) in cases {
+            let mut cfg = FileConfig::default();
+            *cfg.section_mut("testnet") = before.clone();
+            apply_setup_answers(
+                &mut cfg,
+                Some("testnet".into()),
+                "testnet",
+                key.map(Into::into),
+                secret.map(Into::into),
+            );
+            assert_eq!(cfg.credentials_for("testnet"), Some(&want), "{name}");
+        }
     }
 
     // ──────────── pre-namespacing config migration (ENG-6462) ────────────
