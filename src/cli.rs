@@ -2690,6 +2690,7 @@ mod tests {
             api_key: Some("k".into()),
             api_secret: Some("s".into()),
             session_token: None,
+            private_key: None,
         };
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
         let target = cli.target(&file).unwrap();
@@ -2706,6 +2707,7 @@ mod tests {
             api_key: Some("file-key".into()),
             api_secret: Some("file-secret".into()),
             session_token: None,
+            private_key: None,
         };
         // Flag key layers over the file secret, per-field.
         let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
@@ -3550,6 +3552,7 @@ mod tests {
             api_key: Some("nx_one".into()),
             api_secret: Some("one-secret".into()),
             session_token: Some("one-token".into()),
+            private_key: None,
         };
 
         let on_one = Cli::try_parse_from(["nexus", "--network", "one", "balance"]).unwrap();
@@ -4247,6 +4250,7 @@ mod tests {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("testnet-secret".into()),
             session_token: Some("testnet-token".into()),
+            private_key: None,
         };
 
         let on_testnet = Cli::try_parse_from(["nexus", "--network", "testnet", "balance"]).unwrap();
@@ -4284,6 +4288,7 @@ mod tests {
             api_key: Some("stored".into()),
             api_secret: Some("stored-secret".into()),
             session_token: None,
+            private_key: None,
         };
         let cli = Cli::try_parse_from([
             "nexus",
@@ -4312,11 +4317,13 @@ mod tests {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("s1".into()),
             session_token: None,
+            private_key: None,
         };
         *file.section_mut("mainnet") = NetworkCredentials {
             api_key: Some("nx_mainnet".into()),
             api_secret: Some("s2".into()),
             session_token: None,
+            private_key: None,
         };
         for (flag, expected) in [("testnet", "nx_testnet"), ("mainnet", "nx_mainnet")] {
             let cli = Cli::try_parse_from(["nexus", "--network", flag, "balance"]).unwrap();

@@ -54,6 +54,12 @@ pub struct NetworkCredentials {
     /// Used to authenticate session-scoped routes; never echoed or printed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
+    /// Wallet private key the MCP server's `create_wallet` saves on a
+    /// play-funds network (ENG-19785). The CLI never reads it; it is declared
+    /// so that a CLI write carries it through instead of dropping the only copy
+    /// of that key. Never echoed or printed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
 }
 
 impl NetworkCredentials {
@@ -61,7 +67,10 @@ impl NetworkCredentials {
     /// rather than written, so the file never grows a `"mainnet": {}` stub from
     /// a `setup` run the user abandoned.
     fn is_empty(&self) -> bool {
-        self.api_key.is_none() && self.api_secret.is_none() && self.session_token.is_none()
+        self.api_key.is_none()
+            && self.api_secret.is_none()
+            && self.session_token.is_none()
+            && self.private_key.is_none()
     }
 }
 
@@ -76,6 +85,10 @@ impl std::fmt::Debug for NetworkCredentials {
             .field(
                 "session_token",
                 &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -223,6 +236,7 @@ impl FileConfig {
             api_key: self.api_key.take(),
             api_secret: self.api_secret.take(),
             session_token: self.session_token.take(),
+            private_key: None,
         };
         if legacy.is_empty() {
             return;
@@ -818,6 +832,7 @@ mod tests {
             api_key: Some("nx_abc".into()),
             api_secret: Some("shh".into()),
             session_token: None,
+            private_key: None,
         };
         let path = save(&cfg).unwrap();
         assert!(path.exists());
@@ -1387,6 +1402,26 @@ mod tests {
         assert_eq!(parsed["networks"]["devnet"]["api_key"], "nx_devnet");
     }
 
+    /// The MCP server's `create_wallet` saves a wallet key as `private_key` in a
+    /// network's section of this same file (ENG-19785). Any CLI write must carry
+    /// it through, or the next `nexus auth login` deletes the only copy of that
+    /// key, and a section holding nothing else must not be pruned as empty.
+    #[test]
+    fn a_private_key_in_a_section_survives_a_rewrite() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("private-key");
+        write_raw_config(
+            r#"{"networks":{"testnet":{"private_key":"0xkey"},"local":{"private_key":"0xlocal"}}}"#,
+        );
+
+        let path = save_session_token("testnet", "tok").unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["networks"]["testnet"]["private_key"], "0xkey");
+        assert_eq!(parsed["networks"]["testnet"]["session_token"], "tok");
+        assert_eq!(parsed["networks"]["local"]["private_key"], "0xlocal");
+    }
+
     /// An abandoned `setup` must not leave a `"mainnet": {}` stub, which would
     /// read as "mainnet is configured" to anyone looking at the file.
     #[test]
@@ -1490,10 +1525,12 @@ mod tests {
             api_key: Some("nx_visible".into()),
             api_secret: Some("topsecret".into()),
             session_token: Some("supersecrettoken".into()),
+            private_key: Some("walletkey".into()),
         };
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("topsecret"), "secret leaked: {dbg}");
         assert!(!dbg.contains("supersecrettoken"), "token leaked: {dbg}");
+        assert!(!dbg.contains("walletkey"), "wallet key leaked: {dbg}");
         assert!(dbg.contains("nx_visible"));
         assert!(dbg.contains("<redacted>"));
     }
