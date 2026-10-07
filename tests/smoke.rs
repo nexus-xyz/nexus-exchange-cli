@@ -70,17 +70,14 @@ async fn mock_server() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_json(markets_body()))
         .mount(&server)
         .await;
-    // The per-market ticker migrated to the direct-indexer `/api/v1` surface
-    // (ENG-5190): the SDK now routes it to the host root under `/api/v1`, so the
-    // mock must serve the prefixed path. `markets` (list-all) and the `/status`
-    // health snapshot have no `/api/v1` variant and stay on the bare gateway
-    // paths below.
+    // Since nexus-exchange 0.12.0 every operation goes out on the spec's bare
+    // path under the one REST base (ENG-18324), so the ticker is served bare too.
     Mock::given(method("GET"))
-        .and(path("/api/v1/markets/BTC-USDX-PERP/ticker"))
+        .and(path("/markets/BTC-USDX-PERP/ticker"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ticker_body()))
         .mount(&server)
         .await;
-    // v0.7.1 removed the old `/health` probe; `health_check` now reads `/status`.
+    // v0.7.1 removed the old `/health` probe; `fetch_status` reads `/status`.
     Mock::given(method("GET"))
         .and(path("/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(health_body()))
@@ -90,11 +87,9 @@ async fn mock_server() -> MockServer {
 }
 
 /// Build a `nexus` command pointed at the mock server. `--base-url` sets the
-/// SDK's base host; the SDK then routes each request per its path — migrated
-/// endpoints under `/api/v1/...` and the rest on the bare gateway path — all
-/// against this same host, so the mock above serves both shapes. `NEXUS_OUTPUT`
-/// is cleared so a value in the test runner's environment can't change what we
-/// assert.
+/// SDK's REST base, and every request goes to its bare spec path under it.
+/// `NEXUS_OUTPUT` is cleared so a value in the test runner's environment can't
+/// change what we assert.
 fn nexus(base_url: &str, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("nexus").expect("`nexus` binary builds");
     cmd.env_remove("NEXUS_OUTPUT")
