@@ -650,10 +650,12 @@ nexus --output json ws trades --market BTC-USDX-PERP | jq .payload
 ### Credentials
 
 Authenticated commands (`balance`, `account …`, `positions`, `fills`,
-`withdrawals`, `orders`, `order …`, and account WebSocket channels) HMAC-sign
-each request. Public market-data commands don't need credentials.
+`withdrawals`, `orders`, `order …`, and account WebSocket channels) sign each
+request, with an [agent key](#agent-keys-recommended-for-bots-and-ai-agents)
+when one is set and with an HMAC key pair otherwise. Public market-data
+commands don't need credentials.
 
-Credentials resolve in this order, highest priority first:
+HMAC credentials resolve in this order, highest priority first:
 
 1. `--api-key` / `--api-secret` flags
 2. `NEXUS_API_KEY` / `NEXUS_API_SECRET` environment variables
@@ -775,6 +777,36 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 `agents register` defaults the expiry to 30 days out, the nonce to the current
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
 override any with `--expires-at` / `--nonce` / `--chain-id`.
+
+#### Agent keys (recommended for bots and AI agents)
+
+An agent key is a secp256k1 key your wallet authorizes to trade for it. It can
+place, amend and cancel orders and read the account, but it **cannot withdraw**,
+transfer, or manage agents, so a leaked agent key cannot move funds out. Use one
+for any bot, script or AI agent instead of an HMAC pair.
+
+Set the key with `NEXUS_AGENT_PRIVATE_KEY` (or `--agent-private-key`). Every
+authenticated request is then signed with the agent-key scheme (`x-agent`,
+`x-timestamp`, `x-nonce`, `x-signature`), and the agent key wins over an HMAC
+pair when both are set. It is never written to disk or echoed.
+
+```sh
+# 1. Make an agent key (any 32 random bytes) and register it with your wallet.
+#    `agents register` defaults --agent to this key's address.
+export NEXUS_AGENT_PRIVATE_KEY=0x$(openssl rand -hex 32)
+NEXUS_PRIVATE_KEY=0x<your-evm-key> nexus agents register --label my-bot
+
+# 2. Trade with it. No wallet key or HMAC secret needed from here on.
+nexus balance
+nexus order place --market BTC-USDX-PERP --side buy --type limit --quantity 0.01 --price 50000
+```
+
+| Flag | Env |
+|---|---|
+| `--agent-private-key <KEY>` | `NEXUS_AGENT_PRIVATE_KEY` |
+
+The server requires each agent's nonce to increase on every write, so run one
+process per agent key; register another agent for a second bot.
 
 ### Examples
 

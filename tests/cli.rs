@@ -19,6 +19,7 @@ fn bin() -> Command {
     );
     cmd.env_remove("NEXUS_API_KEY");
     cmd.env_remove("NEXUS_API_SECRET");
+    cmd.env_remove("NEXUS_AGENT_PRIVATE_KEY");
     cmd.env_remove("NEXUS_NETWORK");
     cmd.env_remove("NEXUS_BASE_URL");
     cmd.env_remove("NEXUS_OUTPUT");

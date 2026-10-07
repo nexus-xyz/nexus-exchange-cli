@@ -118,6 +118,19 @@ pub struct Credentials {
         hide_env_values = true
     )]
     pub session_token: Option<String>,
+
+    /// Private key (32-byte hex) of an agent registered with `nexus agents
+    /// register`. Signs every authenticated request with the agent-key scheme
+    /// and wins over an API key/secret pair. The recommended credential for
+    /// bots and AI agents: it can trade but cannot move funds out. Prefer the env var
+    /// over the flag (flags are visible in your shell history and process list).
+    #[arg(
+        long,
+        global = true,
+        env = "NEXUS_AGENT_PRIVATE_KEY",
+        hide_env_values = true
+    )]
+    pub agent_private_key: Option<String>,
 }
 
 impl std::fmt::Debug for Credentials {
@@ -131,6 +144,10 @@ impl std::fmt::Debug for Credentials {
             .field(
                 "session_token",
                 &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "agent_private_key",
+                &self.agent_private_key.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -1910,9 +1927,10 @@ pub enum AgentsCommand {
     /// (the signature is the authorization), so no API key or session token is
     /// required.
     Register {
-        /// Agent address to authorize (`0x`-prefixed, 20 bytes).
+        /// Agent address to authorize (`0x`-prefixed, 20 bytes). Defaults to
+        /// the address of `--agent-private-key`/`NEXUS_AGENT_PRIVATE_KEY`.
         #[arg(long)]
-        agent: String,
+        agent: Option<String>,
         /// Owning wallet's raw EVM private key (`0x`-prefix optional). Prefer the
         /// env var or the hidden prompt over the flag, which is visible in your
         /// shell history and process list.
@@ -2664,11 +2682,17 @@ mod tests {
             "nx_visible",
             "--api-secret",
             "topsecret",
+            "--agent-private-key",
+            "0xagentsecret",
             "markets",
         ])
         .unwrap();
         let dbg = format!("{cli:?}");
         assert!(!dbg.contains("topsecret"), "secret leaked via Debug: {dbg}");
+        assert!(
+            !dbg.contains("agentsecret"),
+            "agent key leaked via Debug: {dbg}"
+        );
         assert!(dbg.contains("nx_visible"));
         assert!(dbg.contains("<redacted>"));
     }
@@ -3353,7 +3377,10 @@ mod tests {
                         ..
                     },
             } => {
-                assert_eq!(agent, "0x1234567890abcdef1234567890abcdef12345678");
+                assert_eq!(
+                    agent.as_deref(),
+                    Some("0x1234567890abcdef1234567890abcdef12345678")
+                );
                 assert_eq!(
                     chain_id, None,
                     "the chain id defaults from the target at call time, not at parse time"
