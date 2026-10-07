@@ -629,6 +629,29 @@ terminal and without `--yes`, the trade is refused rather than assumed.
 > request is refused by the SDK regardless. They are tested locally, not against
 > a live real-funds host.
 
+### Agent safety modes
+
+Two global flags limit what an invocation can do, for handing the CLI to an
+agent (ENG-20366).
+
+| Flag | Env var | Behavior |
+|---|---|---|
+| `--read-only` | `NEXUS_READ_ONLY` | Refuses every command that writes (order place/amend/cancel/batch, deposits, faucet claims, margin, cancel-on-disconnect, `auth login`, key and agent changes, `setup`) before any request is sent. Reads, `ws`, `examples` and `order preview` still run. |
+| `--paper` | `NEXUS_PAPER` | Read-only, except that `order place` is simulated against the live public order book and reports simulated fills. Nothing is sent to the matching engine. |
+
+```sh
+nexus --paper order place --market BTC-USDX-PERP --side buy --type market --quantity 0.1
+```
+
+Paper mode fetches the market's public book (no credentials needed) and walks
+it: a market order takes levels until it fills or the book runs out, a limit
+order fills only the levels its price crosses. `IOC` drops the rest, `FOK`
+fills all or nothing, `PostOnly` is rejected if it would cross, and a `GTC`
+remainder is reported as resting. The JSON output carries `"simulated": true`.
+It is deliberately simple: it does **not** simulate margin or balance checks,
+fees, funding, liquidation or positions, and nothing is kept between
+invocations, so a resting remainder is a report, not a tracked order.
+
 ### Output format
 
 By default commands print human-readable tables. Pass `--output json` (or set

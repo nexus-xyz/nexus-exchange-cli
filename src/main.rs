@@ -10,6 +10,7 @@ mod credentials;
 mod examples;
 mod guardrails;
 mod output;
+mod paper;
 mod wsclient;
 
 use std::io::{self, IsTerminal, Write};
@@ -32,6 +33,27 @@ use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Agent safety modes (ENG-20366), ahead of everything else so a refused
+    // command touches neither the config file nor the network.
+    let paper_place = cli.paper
+        && matches!(
+            cli.command,
+            Command::Order {
+                action: OrderCommand::Place { .. }
+            }
+        );
+    if (cli.read_only || cli.paper) && cli.command.writes() && !paper_place {
+        anyhow::bail!(
+            "refused: this command writes, and {} is set. {}",
+            if cli.paper { "--paper" } else { "--read-only" },
+            if cli.paper {
+                "Paper mode simulates `order place` only."
+            } else {
+                "Drop --read-only (or unset NEXUS_READ_ONLY) to run it."
+            }
+        );
+    }
 
     // Shell completions need neither network nor credentials — generate and exit
     // before touching config or the network.
@@ -293,6 +315,39 @@ async fn main() -> Result<()> {
         }
 
         // ── trading ──
+        Command::Order {
+            action:
+                OrderCommand::Place {
+                    market,
+                    side,
+                    order_type,
+                    price,
+                    quantity,
+                    tif,
+                    reduce_only,
+                    ..
+                },
+        } if cli.paper => {
+            let request = build_order_request(
+                market.clone(),
+                side,
+                order_type,
+                price.as_deref(),
+                &quantity,
+                tif,
+                reduce_only,
+            )?;
+            // Public, so it needs no credentials, and it is the only request
+            // paper mode makes.
+            let book = client
+                .fetch_order_book(&market)
+                .await
+                .with_context(|| format!("failed to fetch order book for {market}"))?;
+            let result = paper::simulate(&book, &request);
+            emit(format, paper::to_human(&request, &result), || {
+                paper::to_json(&request, &result)
+            });
+        }
         Command::Order { action } => {
             handle_order(&client, authenticated, action, format, &target, &file).await?
         }
