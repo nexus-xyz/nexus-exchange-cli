@@ -27,19 +27,12 @@
 # new `client.<method>()` call mapped in METHOD_OP), or the drift check fails.
 # Format:  METHOD /path   (placeholders match the spec, e.g. {market_id})
 #
-# ── /api/v1 migration (ENG-4949, parent ENG-4740) ──────────────────────────────
-# The gateway REST proxy is being eliminated: each backend service now exposes
-# its own REST API under the host-root `/api/v1` prefix. This move is DUAL-STACK
-# (ENG-4751) — the legacy `/api/exchange` gateway paths stay live, so operations
-# that do NOT yet have an `/api/v1` variant remain on the bare gateway path.
-#
-# Which op lands where is decided in the SDK, not here: the CLI is a thin layer
-# over `nexus-exchange`, and the regenerated SDK (ENG-4947, nexus-exchange-rs
-# PR #85) selects the base per request off the `/api/v1/` path prefix. The lines
-# below mirror that SDK routing exactly — `/api/v1/...` for the migrated ops, the
-# bare gateway path for the rest. Runtime routing flips only when this crate bumps
-# its `nexus-exchange` dependency to the regenerated SDK release (ENG-4947); this
-# file and the drift check are the spec-coverage bookkeeping that goes with it.
+# ── one REST base, bare paths (ENG-18324) ──────────────────────────────────────
+# Which path an op goes out on is decided in the SDK, not here: the CLI is a thin
+# layer over `nexus-exchange`. Since 0.12.0 it sends every op to one REST base
+# (`https://api.testnet.nexus.xyz/v1` on testnet) under the spec's bare path, so
+# the lines below are bare. The five bridge ops are the exception: the SDK keeps
+# `/api/v1/...` for them because the pinned spec declares no bare twin yet.
 #
 # Commands that DON'T appear here, by design: `setup` and `completions` are
 # local-only (no API call).
@@ -52,68 +45,60 @@
 # call the mapping does not carry (ENG-12786).
 
 # ── public market data ──
-# Migrated to the /api/v1 direct-indexer surface:
-GET /api/v1/markets/summary
-GET /api/v1/tickers
-GET /api/v1/markets/{market_id}/ticker
-GET /api/v1/markets/{market_id}/orderbook
-GET /api/v1/markets/{market_id}/trades
-GET /api/v1/markets/{market_id}/candles
-GET /api/v1/markets/{market_id}/funding
-GET /api/v1/markets/{market_id}/mark-price
-GET /api/v1/markets/{market_id}/status
-GET /api/v1/markets/{market_id}/funding-samples
+GET /markets/summary
+GET /tickers
+GET /markets/{market_id}/ticker
+GET /markets/{market_id}/orderbook
+GET /markets/{market_id}/trades
+GET /markets/{market_id}/candles
+GET /markets/{market_id}/funding
+GET /markets/{market_id}/mark-price
+GET /markets/{market_id}/status
+GET /markets/{market_id}/funding-samples
 GET /markets/{market_id}/risk-params
-# No /api/v1 variant yet — stay on the /api/exchange gateway (dual-stack):
 GET /markets
 GET /status
 GET /stats
 GET /stats/history
 
 # ── authenticated account (read) ──
-# Migrated to /api/v1:
-GET /api/v1/account
-GET /api/v1/account/summary
-GET /api/v1/account/state
-GET /api/v1/account/fees
-GET /api/v1/account/portfolio-history
-GET /api/v1/account/equity-history
-GET /api/v1/account/cancel-on-disconnect
-GET /api/v1/positions
-GET /api/v1/positions/closed
-GET /api/v1/fills
-GET /api/v1/orders
-GET /api/v1/orders/history
-GET /api/v1/account/rate-limit
-# No /api/v1 variant — stay on the gateway (v1 exposes no GET /orders/{id}):
+GET /account
+GET /account/summary
+GET /account/state
+GET /account/fees
+GET /account/portfolio-history
+GET /account/equity-history
+GET /account/cancel-on-disconnect
+GET /positions
+GET /positions/closed
+GET /fills
+GET /orders
+GET /orders/history
+GET /account/rate-limit
 GET /orders/{order_id}
 GET /withdrawals
 GET /deposits
 GET /funding
 GET /keys
 GET /agents
-# ADL reads (HMAC-gated server-side despite the market scope); no /api/v1
-# variant — stay on the gateway:
+# ADL reads (HMAC-gated server-side despite the market scope):
 GET /markets/{market_id}/adl-events
 GET /account/{address}/adl-history
 
 # ── wallet-signed auth (unauthenticated; signature in the body) ──
-# No /api/v1 variant — stay on the gateway:
 POST /auth/login
 POST /agents/register
 
 # ── trading & account mutations ──
-# Migrated to /api/v1:
-POST /api/v1/orders
-POST /api/v1/orders/batch
-DELETE /api/v1/orders/{order_id}
-DELETE /api/v1/orders
-POST /api/v1/account/credit
-POST /api/v1/orders/preview
-PUT /api/v1/account/cancel-on-disconnect
-# No /api/v1 variant — stay on the gateway:
-# `order amend` — the SDK issues PATCH on the gateway path (v1 exposes no amend),
-# via `signed_patch_with_query("/orders/{id}")`. Was mis-mapped as PUT and parked
+POST /orders
+POST /orders/batch
+DELETE /orders/{order_id}
+DELETE /orders
+POST /account/credit
+POST /orders/preview
+PUT /account/cancel-on-disconnect
+# `order amend`: the SDK issues PATCH via
+# `signed_patch_with_query("/orders/{id}")`. Was mis-mapped as PUT and parked
 # in CODE_ONLY_OPS as "ahead of spec"; the spec has had this operation since
 # v0.7.1, so it was covered but uncounted. Found independently by ENG-7962 and
 # ENG-7927, which is why the merge briefly carried this line twice.
@@ -139,6 +124,5 @@ GET /api/v1/bridge/deposits
 GET /api/v1/bridge/deposits/{id}
 
 # ── websocket ──
-# No /api/v1 variant — the token mint and upgrade stay on the gateway:
 POST /ws/token
 GET /ws

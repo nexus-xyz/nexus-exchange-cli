@@ -416,7 +416,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.11.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.12.0";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
@@ -456,11 +456,6 @@ pub struct CustomNetworkConfig {
     /// userinfo/query/fragment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Base for the direct `/api/v1` surface, when the deployment splits it from
-    /// the REST base. Defaults to `base_url`, which is where every deployment
-    /// that exists today mounts it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_base_url: Option<String>,
     /// `"real"`, `"play"` or `"unknown"`. Required, with no default: see
     /// [`parse_funds`] for why neither boolean answer is safe.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -564,11 +559,6 @@ impl CustomNetworkConfig {
         let (funds, warning) = parse_funds(label, self.funds.as_deref());
         let mut custom = CustomNetwork::new(label, base_url, funds)
             .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
-        if let Some(direct) = self.direct_base_url.as_deref() {
-            custom = custom
-                .with_direct_base_url(direct)
-                .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
-        }
         if let Some(ws) = self.ws_url.as_deref() {
             custom = custom
                 .with_ws_url(ws)
@@ -3922,16 +3912,15 @@ mod tests {
         }
     }
 
-    /// The rest of the bundle reaches the SDK: the WS origin, the split direct
-    /// base, and the signing domain. Each is absent until declared — the CLI
-    /// never derives one — so this pins that a declared one is not dropped.
+    /// The rest of the bundle reaches the SDK: the WS origin and the signing
+    /// domain. Each is absent until declared — the CLI never derives one — so
+    /// this pins that a declared one is not dropped.
     #[test]
     fn the_declared_bundle_reaches_the_sdk() {
         let file = file_declaring(
             "dev",
             CustomNetworkConfig {
                 base_url: Some("https://exchange.example.com/api/exchange".into()),
-                direct_base_url: Some("https://direct.example.com".into()),
                 ws_url: Some("wss://stream.example.com/ws".into()),
                 funds: Some("play".into()),
                 faucet: Some(true),
@@ -3946,7 +3935,6 @@ mod tests {
             network.base_url(),
             "https://exchange.example.com/api/exchange"
         );
-        assert_eq!(network.direct_base_url(), "https://direct.example.com");
         assert_eq!(network.ws_base(), Some("wss://stream.example.com/ws"));
         assert_eq!(network.signing_domain().and_then(|d| d.chain_id), Some(393));
         // ...and the resolved `Config` carries them too, since that is what the

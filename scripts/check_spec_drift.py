@@ -138,91 +138,87 @@ SRC_DIR = os.path.join(REPO, "src")
 # a new SDK method, together with the matching endpoints.txt line. There is no
 # longer an "ahead of the pinned spec" bucket to put it in: if the pinned spec
 # does not define the operation, the command does not ship (ENG-8616).
-# /api/v1 migration (ENG-4949): the gateway REST proxy is being replaced by the
-# per-service host-root `/api/v1` surface (parent ENG-4740). The move is dual-stack
-# (ENG-4751): ops with an `/api/v1` variant point there; the rest keep the bare
-# gateway path until they gain one. The path each row carries MUST mirror what the
-# regenerated SDK actually calls (nexus-exchange-rs PR #85 / ENG-4947), which picks
-# the base per request off the `/api/v1/` prefix — the CLI issues no path of its own.
+# The path each row carries MUST mirror what the SDK actually calls. Since
+# nexus-exchange 0.12.0 (ENG-18324) that is the spec's bare path under one REST
+# base, except the five bridge reads, which keep `/api/v1/...` until a published
+# spec declares their bare twins. The CLI issues no path of its own.
 METHOD_OP = {
     # public market data
-    "fetch_markets": ("GET", "/markets"),  # list-all: no /api/v1 variant yet
-    "fetch_market_summaries": ("GET", "/api/v1/markets/summary"),
-    "fetch_tickers": ("GET", "/api/v1/tickers"),
-    "fetch_ticker": ("GET", "/api/v1/markets/{market_id}/ticker"),
-    "fetch_order_book": ("GET", "/api/v1/markets/{market_id}/orderbook"),
-    "fetch_trades": ("GET", "/api/v1/markets/{market_id}/trades"),
-    "fetch_ohlcv": ("GET", "/api/v1/markets/{market_id}/candles"),
-    "fetch_funding_rate_history": ("GET", "/api/v1/markets/{market_id}/funding"),
-    "fetch_mark_price": ("GET", "/api/v1/markets/{market_id}/mark-price"),
-    "fetch_market_status": ("GET", "/api/v1/markets/{market_id}/status"),
-    "health_check": ("GET", "/status"),  # v0.7.1 replaced /health with /status
-    # Venue-wide activity counters. Public like the market reads above, and
-    # on the bare gateway path — neither has an /api/v1 variant yet.
+    "fetch_markets": ("GET", "/markets"),
+    "fetch_markets_summary": ("GET", "/markets/summary"),
+    "fetch_tickers": ("GET", "/tickers"),
+    "fetch_ticker": ("GET", "/markets/{market_id}/ticker"),
+    "fetch_order_book": ("GET", "/markets/{market_id}/orderbook"),
+    "fetch_trades": ("GET", "/markets/{market_id}/trades"),
+    "fetch_ohlcv": ("GET", "/markets/{market_id}/candles"),
+    "fetch_funding_rate_history": ("GET", "/markets/{market_id}/funding"),
+    "fetch_mark_price": ("GET", "/markets/{market_id}/mark-price"),
+    "fetch_market_status": ("GET", "/markets/{market_id}/status"),
+    "fetch_status": ("GET", "/status"),  # v0.7.1 replaced /health with /status
+    # Venue-wide activity counters. Public like the market reads above.
     "fetch_stats": ("GET", "/stats"),
     "fetch_stats_history": ("GET", "/stats/history"),
-    "fetch_market_risk_params": ("GET", "/markets/{market_id}/risk-params"),  # no /api/v1 variant yet
-    "fetch_funding_premium_samples": ("GET", "/api/v1/markets/{market_id}/funding-samples"),
+    "fetch_market_risk_params": ("GET", "/markets/{market_id}/risk-params"),
+    "fetch_funding_samples": ("GET", "/markets/{market_id}/funding-samples"),
     # ADL reads (HMAC-gated server-side despite the market scope)
-    "fetch_market_adl_events": ("GET", "/markets/{market_id}/adl-events"),  # no /api/v1 variant yet
-    "fetch_account_adl_history": ("GET", "/account/{address}/adl-history"),  # no /api/v1 variant yet
+    "fetch_adl_events": ("GET", "/markets/{market_id}/adl-events"),
+    "fetch_adl_history": ("GET", "/account/{address}/adl-history"),
     # authenticated account (read)
-    "fetch_balance": ("GET", "/api/v1/account"),
+    "fetch_balance": ("GET", "/account"),
     # portfolio-parity reads (ENG-6460), added to the spec in v0.7.2
-    "fetch_account_summary": ("GET", "/api/v1/account/summary"),
-    "fetch_account_state": ("GET", "/api/v1/account/state"),
-    "fetch_account_fees": ("GET", "/api/v1/account/fees"),
-    "fetch_portfolio_history": ("GET", "/api/v1/account/portfolio-history"),
-    "fetch_positions": ("GET", "/api/v1/positions"),
-    "fetch_my_trades": ("GET", "/api/v1/fills"),
-    "fetch_open_orders": ("GET", "/api/v1/orders"),
-    "fetch_order": ("GET", "/orders/{order_id}"),  # v1 exposes no GET-by-id
-    "fetch_withdrawals": ("GET", "/withdrawals"),  # no /api/v1 variant yet
-    "fetch_rate_limit_status": ("GET", "/api/v1/account/rate-limit"),
-    "fetch_equity_history": ("GET", "/api/v1/account/equity-history"),
-    "fetch_cancel_on_disconnect": ("GET", "/api/v1/account/cancel-on-disconnect"),
-    "fetch_order_history": ("GET", "/api/v1/orders/history"),
-    "fetch_closed_positions": ("GET", "/api/v1/positions/closed"),
-    "fetch_deposits": ("GET", "/deposits"),  # no /api/v1 variant yet
-    "fetch_account_funding": ("GET", "/funding"),  # no /api/v1 variant yet
-    "fetch_api_keys": ("GET", "/keys"),  # no /api/v1 variant yet
-    "fetch_agents": ("GET", "/agents"),  # no /api/v1 variant yet
+    "fetch_account_summary": ("GET", "/account/summary"),
+    "fetch_account_state": ("GET", "/account/state"),
+    "fetch_trading_fees": ("GET", "/account/fees"),
+    "fetch_portfolio_history": ("GET", "/account/portfolio-history"),
+    "fetch_positions": ("GET", "/positions"),
+    "fetch_my_trades": ("GET", "/fills"),
+    "fetch_open_orders": ("GET", "/orders"),
+    "fetch_order": ("GET", "/orders/{order_id}"),
+    "fetch_withdrawals": ("GET", "/withdrawals"),
+    "fetch_rate_limit_status": ("GET", "/account/rate-limit"),
+    "fetch_equity_history": ("GET", "/account/equity-history"),
+    "fetch_cancel_on_disconnect": ("GET", "/account/cancel-on-disconnect"),
+    "fetch_orders": ("GET", "/orders/history"),
+    "fetch_positions_history": ("GET", "/positions/closed"),
+    "fetch_deposits": ("GET", "/deposits"),
+    "fetch_funding_history": ("GET", "/funding"),
+    "fetch_api_keys": ("GET", "/keys"),
+    "fetch_agents": ("GET", "/agents"),
     # trading & account mutations
-    "create_order": ("POST", "/api/v1/orders"),
-    "create_orders": ("POST", "/api/v1/orders/batch"),
-    "cancel_order": ("DELETE", "/api/v1/orders/{order_id}"),
-    "cancel_all_orders": ("DELETE", "/api/v1/orders"),
+    "create_order": ("POST", "/orders"),
+    "create_orders": ("POST", "/orders/batch"),
+    "cancel_order": ("DELETE", "/orders/{order_id}"),
+    "cancel_all_orders": ("DELETE", "/orders"),
     # Per-market flatten: the same DELETE-orders op as cancel_all_orders, scoped
     # by a `market_id` query parameter (queries don't change the spec op).
-    "cancel_orders_for_market": ("DELETE", "/api/v1/orders"),
-    "deposit": ("POST", "/account/deposit"),  # no /api/v1 variant yet
-    "claim_credit": ("POST", "/api/v1/account/credit"),
-    # ENG-9198 mutations (ported from #74). Paths are where nexus-exchange 0.11.0
+    "cancel_orders_for_market": ("DELETE", "/orders"),
+    "deposit": ("POST", "/account/deposit"),
+    "claim_credit": ("POST", "/account/credit"),
+    # ENG-9198 mutations (ported from #74). Paths are where nexus-exchange 0.12.0
     # sends them (src/rest.rs), not guessed from sibling rows.
-    "preview_order": ("POST", "/api/v1/orders/preview"),
-    "set_cancel_on_disconnect": ("PUT", "/api/v1/account/cancel-on-disconnect"),
-    "create_deposit": ("POST", "/deposits"),  # no /api/v1 variant yet
-    "claim_faucet": ("POST", "/faucet"),  # no /api/v1 variant yet
-    # `account margin add|remove` both call `adjust_margin` and differ only in the
-    # `direction` they pass, so there is one row here. The SDK's `add_margin` /
-    # `remove_margin` wrappers are deliberately NOT listed: no command calls
-    # them, and a row nothing calls is exactly what invariant 9's self-test
-    # rejects.
-    "adjust_margin": ("POST", "/account/margin"),  # no /api/v1 variant yet
-    "create_api_key": ("POST", "/keys"),  # no /api/v1 variant yet
-    "delete_api_key": ("DELETE", "/keys/{key_id}"),  # no /api/v1 variant yet
-    "revoke_agent": ("DELETE", "/agents/{address}"),  # no /api/v1 variant yet
-    # v1 exposes no amend; the SDK issues signed_patch_with_query on the gateway
-    # path (nexus-exchange 0.6.0 src/rest.rs::amend_order). It was mapped to PUT
+    "preview_order": ("POST", "/orders/preview"),
+    "set_cancel_on_disconnect": ("PUT", "/account/cancel-on-disconnect"),
+    "create_deposit": ("POST", "/deposits"),
+    "claim_faucet": ("POST", "/faucet"),
+    # `account margin add|remove`: one operation, two methods that fix the
+    # direction. nexus-exchange 0.12.0 deprecated `adjust_margin`, which took it
+    # as an argument, so it is no longer called and has no row.
+    "add_margin": ("POST", "/account/margin"),
+    "remove_margin": ("POST", "/account/margin"),
+    "create_api_key": ("POST", "/keys"),
+    "delete_api_key": ("DELETE", "/keys/{key_id}"),
+    "revoke_agent": ("DELETE", "/agents/{address}"),
+    # The SDK issues signed_patch_with_query (nexus-exchange 0.12.0
+    # src/rest.rs::edit_order, `amend_order` before it). It was mapped to PUT
     # here, which hid a covered operation behind CODE_ONLY_OPS — see ENG-7962 and
     # invariant 3.
-    "amend_order": ("PATCH", "/orders/{order_id}"),
+    "edit_order": ("PATCH", "/orders/{order_id}"),
     # wallet-signed auth. Unauthenticated signed requests rather than HMAC ones,
     # which is why they were once described as outside this table's scope — but
     # they are ordinary spec operations the CLI calls, and leaving them unmapped
     # made them invisible to every invariant here (ENG-12786, invariant 9).
-    "sign_in": ("POST", "/auth/login"),  # no /api/v1 variant yet
-    "register_agent": ("POST", "/agents/register"),  # no /api/v1 variant yet
+    "login": ("POST", "/auth/login"),
+    "register_agent": ("POST", "/agents/register"),
     # bridge (Phase A: deposits) — /api/v1 only; the gateway never proxied it,
     # so no row here has a bare-path variant.
     "fetch_bridge_assets": ("GET", "/api/v1/bridge/assets"),
@@ -231,9 +227,8 @@ METHOD_OP = {
     "fetch_bridge_deposits": ("GET", "/api/v1/bridge/deposits"),
     "fetch_bridge_deposit": ("GET", "/api/v1/bridge/deposits/{id}"),
     # websocket. `connect_ws` is the authenticated stream opener: it issues the
-    # token mint (`POST /ws/token`, no /api/v1 variant yet) and then opens the
-    # upgrade, re-minting a fresh single-use token before every reconnect
-    # (ENG-5291). The mint is the REST half and is mapped here; the upgrade half
+    # token mint (`POST /ws/token`) and then opens the upgrade, re-minting a
+    # fresh single-use token before every reconnect (ENG-5291). The mint is the REST half and is mapped here; the upgrade half
     # is `GET /ws`, which has no named REST method and is covered by
     # NON_REST_TARGETS. The CLI no longer calls `mint_web_socket_token` directly —
     # doing so is what left the spent token baked into the connect URL.
@@ -305,7 +300,7 @@ NON_REST_TARGETS = {
 #
 # Not listed above because they are not a CLI decision (ENG-9198): the three
 # bridge WALLET operations — GET/POST /api/v1/bridge/wallets and
-# POST /api/v1/bridge/wallets/challenge — are spec'd but `nexus-exchange` 0.11.0
+# POST /api/v1/bridge/wallets/challenge — are spec'd but `nexus-exchange` 0.12.0
 # wraps no method for them, and the CLI issues no HTTP of its own. They become
 # reachable when the SDK wraps them, not before.
 

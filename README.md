@@ -466,7 +466,7 @@ nexus --network dev markets                      # a custom network you declared
 | Network | Funds | Notes |
 |---|---|---|
 | `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet. Use a [custom network](#custom-networks) to target a host you control. |
-| `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
+| `testnet` | play | The default and the safe target. Served at `https://api.testnet.nexus.xyz/v1`. |
 | `local` | play | A locally run indexer. A developer convenience, never a fallback. |
 | *`LABEL`* | declared | A [custom network](#custom-networks) you describe in the config file — your own environment, a preview host, a sandbox. |
 
@@ -507,7 +507,6 @@ then select it by that label:
       "funds": "play",          // required: "real" | "play" | "unknown"
       "faucet": true,           // optional, assumed absent
       "ws_url": "wss://stream.example.com/ws",  // optional, never derived
-      "direct_base_url": "...", // optional, defaults to base_url
       "chain_id": 393           // optional EIP-712 domain, never guessed
     }
   },
@@ -837,22 +836,15 @@ cargo test --all-features
 
 CI runs the same three checks on every push and pull request.
 
-### Direct-service base (`/api/v1`)
-
-The gateway REST proxy is being eliminated: each backend service now serves its
-own REST API directly, at the **host-root `/api/v1`** prefix (parent
-[ENG-4740](https://linear.app/nexus-labs/issue/ENG-4740)). The migration is
-**dual-stack** ([ENG-4751](https://linear.app/nexus-labs/issue/ENG-4751)) — the
-legacy `/api/exchange` gateway paths stay live, so endpoints without an `/api/v1`
-variant keep routing through the gateway.
+### REST base
 
 The CLI is a thin layer over the [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs)
-SDK and issues no path of its own: the SDK picks the base per request off the
-`/api/v1/` prefix. Runtime routing therefore flips to `/api/v1` when this crate
-bumps its `nexus-exchange` dependency to the regenerated SDK release
-([ENG-4947](https://linear.app/nexus-labs/issue/ENG-4947), `nexus-exchange-rs`
-PR #85). The `.api-version` / `endpoints.txt` bookkeeping below tracks that
-surface so the two move together.
+SDK and issues no path of its own. Since `nexus-exchange` 0.12.0
+([ENG-18324](https://linear.app/nexus-labs/issue/ENG-18324)) the SDK sends every
+request to one REST base (`https://api.testnet.nexus.xyz/v1` on testnet) under
+the spec's bare path, so `GET /orders` goes out as `/v1/orders`. The five bridge
+operations keep their `/api/v1/...` spelling until a published spec declares
+their bare twins. `endpoints.txt` lists each operation as the SDK sends it.
 
 ### API coverage
 
@@ -863,7 +855,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.11.0`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.12.0`**.
 
 <!-- api-version-sync:end -->
 

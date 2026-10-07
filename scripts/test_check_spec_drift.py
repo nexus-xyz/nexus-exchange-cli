@@ -63,7 +63,7 @@ PINNED_TAG = "v0.8.1"
 # `_CALL_RE` is compiled from METHOD_OP at import time, so a made-up method name
 # would simply not be recognised and the fixture would prove nothing.
 MARKETS = csd.METHOD_OP["fetch_markets"]  # GET /markets
-POSITIONS = csd.METHOD_OP["fetch_positions"]  # GET /api/v1/positions
+POSITIONS = csd.METHOD_OP["fetch_positions"]  # GET /positions
 
 RUST_CALLING_MARKETS = 'let m = client.fetch_markets().await?;\n'
 RUST_CALLING_BOTH = RUST_CALLING_MARKETS + "let p = client.fetch_positions().await?;\n"
@@ -158,7 +158,7 @@ class TestInvariant1TargetsVsSpec(unittest.TestCase):
         self.assertEqual(errs, 1)
 
     def test_renamed_path_fails(self):
-        spec = spec_of(MARKETS, ("GET", "/api/v1/positions/all"))
+        spec = spec_of(MARKETS, ("GET", "/positions/all"))
         errs = _quiet(
             csd.check_targets_vs_spec, [MARKETS, POSITIONS], csd.spec_ops(spec)
         )
@@ -167,7 +167,7 @@ class TestInvariant1TargetsVsSpec(unittest.TestCase):
     def test_method_change_on_the_same_path_fails(self):
         """A verb-only change still has to bite — matching on path alone would let
         it through."""
-        spec = spec_of(MARKETS, ("POST", "/api/v1/positions"))
+        spec = spec_of(MARKETS, ("POST", "/positions"))
         errs = _quiet(
             csd.check_targets_vs_spec, [MARKETS, POSITIONS], csd.spec_ops(spec)
         )
@@ -192,7 +192,7 @@ class TestInvariant2CodeVsTargets(unittest.TestCase):
     def test_exact_match_passes(self):
         repo = self._repo(
             {"main.rs": RUST_CALLING_BOTH},
-            ["GET /markets", "GET /api/v1/positions"],
+            ["GET /markets", "GET /positions"],
         )
         self.assertEqual(repo.check(spec_of(MARKETS, POSITIONS)), 0)
 
@@ -207,7 +207,7 @@ class TestInvariant2CodeVsTargets(unittest.TestCase):
         reality (the py bug in ENG-7958)."""
         repo = self._repo(
             {"main.rs": RUST_CALLING_MARKETS},
-            ["GET /markets", "GET /api/v1/positions"],
+            ["GET /markets", "GET /positions"],
         )
         self.assertGreater(repo.check(spec_of(MARKETS, POSITIONS)), 0)
 
@@ -219,7 +219,7 @@ class TestInvariant2CodeVsTargets(unittest.TestCase):
         )
         superset_manifest = self._repo(
             {"main.rs": RUST_CALLING_MARKETS},
-            ["GET /markets", "GET /api/v1/positions"],
+            ["GET /markets", "GET /positions"],
         )
         spec = spec_of(MARKETS, POSITIONS)
         self.assertGreater(superset_code.check(spec), 0)
@@ -565,7 +565,7 @@ class TestRealRepoState(unittest.TestCase):
         CLI calls; while they were unmapped, `POST /auth/login` was printed in the
         `Not covered by the CLI` list on every run."""
         for method, op in (
-            ("sign_in", ("POST", "/auth/login")),
+            ("login", ("POST", "/auth/login")),
             ("register_agent", ("POST", "/agents/register")),
         ):
             with self.subTest(method=method):
@@ -576,11 +576,11 @@ class TestRealRepoState(unittest.TestCase):
         for path in csd.CLI_SOURCES:
             self.assertTrue(os.path.isfile(path), f"CLI_SOURCES entry missing: {path}")
 
-    def test_amend_order_is_patch_not_put(self):
+    def test_edit_order_is_patch_not_put(self):
         """ENG-7962 regression. The SDK issues `signed_patch_with_query` for
-        `amend_order` (nexus-exchange 0.6.0 src/rest.rs); mapping it to PUT is what
-        let the op hide in CODE_ONLY_OPS."""
-        self.assertEqual(csd.METHOD_OP["amend_order"], ("PATCH", "/orders/{order_id}"))
+        `edit_order` (`amend_order` before nexus-exchange 0.12.0); mapping it to PUT
+        is what let the op hide in CODE_ONLY_OPS."""
+        self.assertEqual(csd.METHOD_OP["edit_order"], ("PATCH", "/orders/{order_id}"))
 
     def test_order_amend_is_counted_not_exempted(self):
         """The other half of the same regression: the op belongs in endpoints.txt,

@@ -1582,7 +1582,6 @@ mod tests {
         let _tmp = TempConfigHome::new("custom-roundtrip");
         let declared = CustomNetworkConfig {
             base_url: Some("https://exchange.example.com/api/exchange".into()),
-            direct_base_url: Some("https://direct.example.com".into()),
             funds: Some("real".into()),
             ws_url: Some("wss://stream.example.com/ws".into()),
             faucet: Some(false),
