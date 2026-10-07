@@ -287,3 +287,61 @@ fn version_reports_spec_tag_and_sdk() {
         "version output missing SDK version:\n{stdout}"
     );
 }
+
+/// `--paper order place` (ENG-20366) reads the public book and nothing else:
+/// the mock serves only `GET .../orderbook`, and every request it saw is
+/// checked, so a real `POST /orders` would fail the test either way.
+#[tokio::test]
+async fn paper_order_place_only_reads_the_book() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/markets/BTC-USDX-PERP/orderbook"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "symbol": "BTC-USDX-PERP", "timestamp": 0, "datetime": "", "nonce": 0,
+            "bids": [[99.0, 1.0]], "asks": [[101.0, 1.0], [102.0, 2.0]],
+        })))
+        .mount(&server)
+        .await;
+    let out = stdout_of(nexus(
+        &server.uri(),
+        &[
+            "--paper",
+            "--output",
+            "json",
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "2",
+        ],
+    ))
+    .await;
+    let v: Value = serde_json::from_str(&out).expect("json output");
+    assert_eq!(v["simulated"], true);
+    assert_eq!(v["status"], "filled");
+    assert_eq!(v["average_price"], "101.5");
+    let seen = server.received_requests().await.expect("recording on");
+    assert!(seen.iter().all(|r| r.method.as_str() == "GET"), "{seen:?}");
+}
+
+/// `--read-only` (and `--paper`) refuse a write before any request is sent.
+#[tokio::test]
+async fn read_only_refuses_writes_before_any_request() {
+    let server = MockServer::start().await;
+    for flag in ["--read-only", "--paper"] {
+        let mut cmd = nexus(&server.uri(), &[flag, "order", "cancel", "--all", "--yes"]);
+        tokio::task::spawn_blocking(move || {
+            let out = cmd.assert().failure();
+            let err = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+            assert!(err.contains("refused: this command writes"), "{err}");
+        })
+        .await
+        .unwrap();
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

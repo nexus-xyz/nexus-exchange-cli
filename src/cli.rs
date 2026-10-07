@@ -87,6 +87,20 @@ pub struct Cli {
     #[command(flatten)]
     pub credentials: Credentials,
 
+    /// Refuse every command that writes: placing, amending or cancelling
+    /// orders, deposits, faucet claims, margin, logins, key and agent changes,
+    /// and `setup`. Reads, `ws`, `examples` and `order preview` still run. For
+    /// handing the CLI to an agent that should look but not trade (ENG-20366).
+    #[arg(long, global = true, env = "NEXUS_READ_ONLY")]
+    pub read_only: bool,
+
+    /// Read-only, except that `order place` is simulated against the live
+    /// public order book instead of being sent. Reports simulated fills; does
+    /// not simulate margin, fees, funding, liquidation or positions, and keeps
+    /// nothing between invocations (ENG-20366).
+    #[arg(long, global = true, env = "NEXUS_PAPER")]
+    pub paper: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -1432,6 +1446,73 @@ pub enum Command {
         /// Target shell.
         shell: Shell,
     },
+}
+
+impl Command {
+    /// Whether the command changes anything: exchange state, funds, or the
+    /// stored credentials. `--read-only` and `--paper` refuse these.
+    ///
+    /// Exhaustive on purpose, with no wildcard arm, so a new command does not
+    /// compile until someone decides which side it is on.
+    pub fn writes(&self) -> bool {
+        match self {
+            Command::Markets
+            | Command::Market { .. }
+            | Command::Ticker { .. }
+            | Command::Tickers
+            | Command::Summaries
+            | Command::MarkPrice { .. }
+            | Command::MarketStatus { .. }
+            | Command::FundingRates { .. }
+            | Command::Orderbook { .. }
+            | Command::Trades { .. }
+            | Command::Candles { .. }
+            | Command::Health
+            | Command::Stats
+            | Command::StatsHistory
+            | Command::Balance
+            | Command::Positions
+            | Command::ClosedPositions { .. }
+            | Command::Fills { .. }
+            | Command::Withdrawals { .. }
+            | Command::Orders
+            | Command::Ws { .. }
+            | Command::Examples { .. }
+            | Command::Completions { .. } => false,
+            Command::Setup | Command::Auth { .. } => true,
+            Command::Order { action } => match action {
+                OrderCommand::History { .. }
+                | OrderCommand::Preview { .. }
+                | OrderCommand::Get { .. } => false,
+                OrderCommand::Place { .. }
+                | OrderCommand::Cancel { .. }
+                | OrderCommand::Amend { .. }
+                | OrderCommand::Batch { .. } => true,
+            },
+            Command::Account { action } => match action {
+                AccountCommand::Summary
+                | AccountCommand::State
+                | AccountCommand::Fees
+                | AccountCommand::PortfolioHistory { .. }
+                | AccountCommand::EquityHistory { .. }
+                | AccountCommand::Funding { .. }
+                | AccountCommand::RateLimit
+                | AccountCommand::AdlHistory { .. } => false,
+                AccountCommand::Deposits { action, .. } => action.is_some(),
+                AccountCommand::CancelOnDisconnect { action } => action.is_some(),
+                AccountCommand::Deposit { .. }
+                | AccountCommand::Credit { .. }
+                | AccountCommand::Faucet
+                | AccountCommand::Margin { .. } => true,
+            },
+            Command::Keys { action } => !matches!(action, KeysCommand::List),
+            Command::Agents { action } => !matches!(action, AgentsCommand::List),
+            Command::Bridge { action } => match action {
+                BridgeCommand::Assets | BridgeCommand::Deposits { .. } => false,
+                BridgeCommand::DepositAddress { .. } => true,
+            },
+        }
+    }
 }
 
 /// `nexus examples` subcommands (ENG-17337).
