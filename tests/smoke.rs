@@ -70,17 +70,14 @@ async fn mock_server() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_json(markets_body()))
         .mount(&server)
         .await;
-    // The per-market ticker migrated to the direct-indexer `/api/v1` surface
-    // (ENG-5190): the SDK now routes it to the host root under `/api/v1`, so the
-    // mock must serve the prefixed path. `markets` (list-all) and the `/status`
-    // health snapshot have no `/api/v1` variant and stay on the bare gateway
-    // paths below.
+    // Since nexus-exchange 0.12.0 every operation goes out on the spec's bare
+    // path under the one REST base (ENG-18324), so the ticker is served bare too.
     Mock::given(method("GET"))
-        .and(path("/api/v1/markets/BTC-USDX-PERP/ticker"))
+        .and(path("/markets/BTC-USDX-PERP/ticker"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ticker_body()))
         .mount(&server)
         .await;
-    // v0.7.1 removed the old `/health` probe; `health_check` now reads `/status`.
+    // v0.7.1 removed the old `/health` probe; `fetch_status` reads `/status`.
     Mock::given(method("GET"))
         .and(path("/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(health_body()))
@@ -90,11 +87,9 @@ async fn mock_server() -> MockServer {
 }
 
 /// Build a `nexus` command pointed at the mock server. `--base-url` sets the
-/// SDK's base host; the SDK then routes each request per its path — migrated
-/// endpoints under `/api/v1/...` and the rest on the bare gateway path — all
-/// against this same host, so the mock above serves both shapes. `NEXUS_OUTPUT`
-/// is cleared so a value in the test runner's environment can't change what we
-/// assert.
+/// SDK's REST base, and every request goes to its bare spec path under it.
+/// `NEXUS_OUTPUT` is cleared so a value in the test runner's environment can't
+/// change what we assert.
 fn nexus(base_url: &str, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("nexus").expect("`nexus` binary builds");
     cmd.env_remove("NEXUS_OUTPUT")
@@ -291,4 +286,62 @@ fn version_reports_spec_tag_and_sdk() {
         stdout.contains("nexus-exchange"),
         "version output missing SDK version:\n{stdout}"
     );
+}
+
+/// `--paper order place` (ENG-20366) reads the public book and nothing else:
+/// the mock serves only `GET .../orderbook`, and every request it saw is
+/// checked, so a real `POST /orders` would fail the test either way.
+#[tokio::test]
+async fn paper_order_place_only_reads_the_book() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/markets/BTC-USDX-PERP/orderbook"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "symbol": "BTC-USDX-PERP", "timestamp": 0, "datetime": "", "nonce": 0,
+            "bids": [[99.0, 1.0]], "asks": [[101.0, 1.0], [102.0, 2.0]],
+        })))
+        .mount(&server)
+        .await;
+    let out = stdout_of(nexus(
+        &server.uri(),
+        &[
+            "--paper",
+            "--output",
+            "json",
+            "order",
+            "place",
+            "--market",
+            "BTC-USDX-PERP",
+            "--side",
+            "buy",
+            "--type",
+            "market",
+            "--quantity",
+            "2",
+        ],
+    ))
+    .await;
+    let v: Value = serde_json::from_str(&out).expect("json output");
+    assert_eq!(v["simulated"], true);
+    assert_eq!(v["status"], "filled");
+    assert_eq!(v["average_price"], "101.5");
+    let seen = server.received_requests().await.expect("recording on");
+    assert!(seen.iter().all(|r| r.method.as_str() == "GET"), "{seen:?}");
+}
+
+/// `--read-only` (and `--paper`) refuse a write before any request is sent.
+#[tokio::test]
+async fn read_only_refuses_writes_before_any_request() {
+    let server = MockServer::start().await;
+    for flag in ["--read-only", "--paper"] {
+        let mut cmd = nexus(&server.uri(), &[flag, "order", "cancel", "--all", "--yes"]);
+        tokio::task::spawn_blocking(move || {
+            let out = cmd.assert().failure();
+            let err = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+            assert!(err.contains("refused: this command writes"), "{err}");
+        })
+        .await
+        .unwrap();
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

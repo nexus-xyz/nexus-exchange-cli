@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.0...v0.5.1) (2026-10-01)
+
+
+### Features
+
+* **cli:** add nexus bridge deposit commands (ENG-5852) ([#75](https://github.com/nexus-xyz/nexus-exchange-cli/issues/75)) ([d247385](https://github.com/nexus-xyz/nexus-exchange-cli/commit/d247385a5dcd9caf1c589828143c463442c41f45))
+* **cli:** add the five remaining SDK-wrapped mutations (ENG-9198) ([#80](https://github.com/nexus-xyz/nexus-exchange-cli/issues/80)) ([5927feb](https://github.com/nexus-xyz/nexus-exchange-cli/commit/5927feb0dc8878f9fb2fe72f9db1dad11b92b2fb))
+* **cli:** add the ten read-only spec operations the CLI was missing (ENG-9198) ([#79](https://github.com/nexus-xyz/nexus-exchange-cli/issues/79)) ([6aeeb2e](https://github.com/nexus-xyz/nexus-exchange-cli/commit/6aeeb2e3d1b9d210b0a8f41d45009463f3757442))
+* **cli:** deprecate and hide `bridge deposit-address`, whose route was cancelled (ENG-18024) ([#90](https://github.com/nexus-xyz/nexus-exchange-cli/issues/90)) ([e5b36da](https://github.com/nexus-xyz/nexus-exchange-cli/commit/e5b36da9cad82c1f0d8bda9c6e7e0acb2e4081bf))
+* **cli:** nexus examples list/show/get (ENG-17337) ([#83](https://github.com/nexus-xyz/nexus-exchange-cli/issues/83)) ([1170384](https://github.com/nexus-xyz/nexus-exchange-cli/commit/1170384ecf9973d09f5d793fe97e3e5b36f34136))
+
+
+### Bug Fixes
+
+* **config:** lock config read-modify-write so parallel invocations can't drop each other's fields (ENG-18686) ([#92](https://github.com/nexus-xyz/nexus-exchange-cli/issues/92)) ([3998f42](https://github.com/nexus-xyz/nexus-exchange-cli/commit/3998f425d79448b87a7531b4dc80d44c7f3a1ccc))
+* **examples:** default north_star.sh to testnet, not retired beta (ENG-17413) ([#87](https://github.com/nexus-xyz/nexus-exchange-cli/issues/87)) ([556d1e2](https://github.com/nexus-xyz/nexus-exchange-cli/commit/556d1e24f7e4e528ca10428330d4911735f86284))
+* **ws:** remint the single-use token on reconnect (ENG-5291) ([#76](https://github.com/nexus-xyz/nexus-exchange-cli/issues/76)) ([9820540](https://github.com/nexus-xyz/nexus-exchange-cli/commit/982054016890762f2a665695aa0d70e0051dfe76))
+* **ws:** resume `nexus ws` from the last seen seq, and resubscribe after out_of_sync (ENG-18687) ([#91](https://github.com/nexus-xyz/nexus-exchange-cli/issues/91)) ([f5d2178](https://github.com/nexus-xyz/nexus-exchange-cli/commit/f5d2178c3f16e1c45ab363bd304deb769b55750c))
+
 ## [0.5.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.4.0...v0.5.0) (2026-09-01)
 
 

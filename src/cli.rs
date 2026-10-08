@@ -87,6 +87,20 @@ pub struct Cli {
     #[command(flatten)]
     pub credentials: Credentials,
 
+    /// Refuse every command that writes: placing, amending or cancelling
+    /// orders, deposits, faucet claims, margin, logins, key and agent changes,
+    /// and `setup`. Reads, `ws`, `examples` and `order preview` still run. For
+    /// handing the CLI to an agent that should look but not trade (ENG-20366).
+    #[arg(long, global = true, env = "NEXUS_READ_ONLY")]
+    pub read_only: bool,
+
+    /// Read-only, except that `order place` is simulated against the live
+    /// public order book instead of being sent. Reports simulated fills; does
+    /// not simulate margin, fees, funding, liquidation or positions, and keeps
+    /// nothing between invocations (ENG-20366).
+    #[arg(long, global = true, env = "NEXUS_PAPER")]
+    pub paper: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -118,6 +132,19 @@ pub struct Credentials {
         hide_env_values = true
     )]
     pub session_token: Option<String>,
+
+    /// Private key (32-byte hex) of an agent registered with `nexus agents
+    /// register`. Signs every authenticated request with the agent-key scheme
+    /// and wins over an API key/secret pair. The recommended credential for
+    /// bots and AI agents: it can trade but cannot move funds out. Prefer the env var
+    /// over the flag (flags are visible in your shell history and process list).
+    #[arg(
+        long,
+        global = true,
+        env = "NEXUS_AGENT_PRIVATE_KEY",
+        hide_env_values = true
+    )]
+    pub agent_private_key: Option<String>,
 }
 
 impl std::fmt::Debug for Credentials {
@@ -131,6 +158,10 @@ impl std::fmt::Debug for Credentials {
             .field(
                 "session_token",
                 &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "agent_private_key",
+                &self.agent_private_key.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -416,7 +447,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.11.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.12.0";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
@@ -456,11 +487,6 @@ pub struct CustomNetworkConfig {
     /// userinfo/query/fragment).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Base for the direct `/api/v1` surface, when the deployment splits it from
-    /// the REST base. Defaults to `base_url`, which is where every deployment
-    /// that exists today mounts it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_base_url: Option<String>,
     /// `"real"`, `"play"` or `"unknown"`. Required, with no default: see
     /// [`parse_funds`] for why neither boolean answer is safe.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -564,11 +590,6 @@ impl CustomNetworkConfig {
         let (funds, warning) = parse_funds(label, self.funds.as_deref());
         let mut custom = CustomNetwork::new(label, base_url, funds)
             .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
-        if let Some(direct) = self.direct_base_url.as_deref() {
-            custom = custom
-                .with_direct_base_url(direct)
-                .map_err(|e| anyhow::anyhow!("custom network {label:?}: {e}"))?;
-        }
         if let Some(ws) = self.ws_url.as_deref() {
             custom = custom
                 .with_ws_url(ws)
@@ -1427,6 +1448,73 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// Whether the command changes anything: exchange state, funds, or the
+    /// stored credentials. `--read-only` and `--paper` refuse these.
+    ///
+    /// Exhaustive on purpose, with no wildcard arm, so a new command does not
+    /// compile until someone decides which side it is on.
+    pub fn writes(&self) -> bool {
+        match self {
+            Command::Markets
+            | Command::Market { .. }
+            | Command::Ticker { .. }
+            | Command::Tickers
+            | Command::Summaries
+            | Command::MarkPrice { .. }
+            | Command::MarketStatus { .. }
+            | Command::FundingRates { .. }
+            | Command::Orderbook { .. }
+            | Command::Trades { .. }
+            | Command::Candles { .. }
+            | Command::Health
+            | Command::Stats
+            | Command::StatsHistory
+            | Command::Balance
+            | Command::Positions
+            | Command::ClosedPositions { .. }
+            | Command::Fills { .. }
+            | Command::Withdrawals { .. }
+            | Command::Orders
+            | Command::Ws { .. }
+            | Command::Examples { .. }
+            | Command::Completions { .. } => false,
+            Command::Setup | Command::Auth { .. } => true,
+            Command::Order { action } => match action {
+                OrderCommand::History { .. }
+                | OrderCommand::Preview { .. }
+                | OrderCommand::Get { .. } => false,
+                OrderCommand::Place { .. }
+                | OrderCommand::Cancel { .. }
+                | OrderCommand::Amend { .. }
+                | OrderCommand::Batch { .. } => true,
+            },
+            Command::Account { action } => match action {
+                AccountCommand::Summary
+                | AccountCommand::State
+                | AccountCommand::Fees
+                | AccountCommand::PortfolioHistory { .. }
+                | AccountCommand::EquityHistory { .. }
+                | AccountCommand::Funding { .. }
+                | AccountCommand::RateLimit
+                | AccountCommand::AdlHistory { .. } => false,
+                AccountCommand::Deposits { action, .. } => action.is_some(),
+                AccountCommand::CancelOnDisconnect { action } => action.is_some(),
+                AccountCommand::Deposit { .. }
+                | AccountCommand::Credit { .. }
+                | AccountCommand::Faucet
+                | AccountCommand::Margin { .. } => true,
+            },
+            Command::Keys { action } => !matches!(action, KeysCommand::List),
+            Command::Agents { action } => !matches!(action, AgentsCommand::List),
+            Command::Bridge { action } => match action {
+                BridgeCommand::Assets | BridgeCommand::Deposits { .. } => false,
+                BridgeCommand::DepositAddress { .. } => true,
+            },
+        }
+    }
+}
+
 /// `nexus examples` subcommands (ENG-17337).
 #[derive(Debug, Subcommand)]
 pub enum ExamplesCommand {
@@ -1920,9 +2008,10 @@ pub enum AgentsCommand {
     /// (the signature is the authorization), so no API key or session token is
     /// required.
     Register {
-        /// Agent address to authorize (`0x`-prefixed, 20 bytes).
+        /// Agent address to authorize (`0x`-prefixed, 20 bytes). Defaults to
+        /// the address of `--agent-private-key`/`NEXUS_AGENT_PRIVATE_KEY`.
         #[arg(long)]
-        agent: String,
+        agent: Option<String>,
         /// Owning wallet's raw EVM private key (`0x`-prefix optional). Prefer the
         /// env var or the hidden prompt over the flag, which is visible in your
         /// shell history and process list.
@@ -2674,11 +2763,17 @@ mod tests {
             "nx_visible",
             "--api-secret",
             "topsecret",
+            "--agent-private-key",
+            "0xagentsecret",
             "markets",
         ])
         .unwrap();
         let dbg = format!("{cli:?}");
         assert!(!dbg.contains("topsecret"), "secret leaked via Debug: {dbg}");
+        assert!(
+            !dbg.contains("agentsecret"),
+            "agent key leaked via Debug: {dbg}"
+        );
         assert!(dbg.contains("nx_visible"));
         assert!(dbg.contains("<redacted>"));
     }
@@ -2690,6 +2785,7 @@ mod tests {
             api_key: Some("k".into()),
             api_secret: Some("s".into()),
             session_token: None,
+            private_key: None,
         };
         let cli = Cli::try_parse_from(["nexus", "balance"]).unwrap();
         let target = cli.target(&file).unwrap();
@@ -2706,6 +2802,7 @@ mod tests {
             api_key: Some("file-key".into()),
             api_secret: Some("file-secret".into()),
             session_token: None,
+            private_key: None,
         };
         // Flag key layers over the file secret, per-field.
         let cli = Cli::try_parse_from(["nexus", "--api-key", "flag-key", "balance"]).unwrap();
@@ -3361,7 +3458,10 @@ mod tests {
                         ..
                     },
             } => {
-                assert_eq!(agent, "0x1234567890abcdef1234567890abcdef12345678");
+                assert_eq!(
+                    agent.as_deref(),
+                    Some("0x1234567890abcdef1234567890abcdef12345678")
+                );
                 assert_eq!(
                     chain_id, None,
                     "the chain id defaults from the target at call time, not at parse time"
@@ -3550,6 +3650,7 @@ mod tests {
             api_key: Some("nx_one".into()),
             api_secret: Some("one-secret".into()),
             session_token: Some("one-token".into()),
+            private_key: None,
         };
 
         let on_one = Cli::try_parse_from(["nexus", "--network", "one", "balance"]).unwrap();
@@ -3919,16 +4020,15 @@ mod tests {
         }
     }
 
-    /// The rest of the bundle reaches the SDK: the WS origin, the split direct
-    /// base, and the signing domain. Each is absent until declared — the CLI
-    /// never derives one — so this pins that a declared one is not dropped.
+    /// The rest of the bundle reaches the SDK: the WS origin and the signing
+    /// domain. Each is absent until declared — the CLI never derives one — so
+    /// this pins that a declared one is not dropped.
     #[test]
     fn the_declared_bundle_reaches_the_sdk() {
         let file = file_declaring(
             "dev",
             CustomNetworkConfig {
                 base_url: Some("https://exchange.example.com/api/exchange".into()),
-                direct_base_url: Some("https://direct.example.com".into()),
                 ws_url: Some("wss://stream.example.com/ws".into()),
                 funds: Some("play".into()),
                 faucet: Some(true),
@@ -3943,7 +4043,6 @@ mod tests {
             network.base_url(),
             "https://exchange.example.com/api/exchange"
         );
-        assert_eq!(network.direct_base_url(), "https://direct.example.com");
         assert_eq!(network.ws_base(), Some("wss://stream.example.com/ws"));
         assert_eq!(network.signing_domain().and_then(|d| d.chain_id), Some(393));
         // ...and the resolved `Config` carries them too, since that is what the
@@ -4247,6 +4346,7 @@ mod tests {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("testnet-secret".into()),
             session_token: Some("testnet-token".into()),
+            private_key: None,
         };
 
         let on_testnet = Cli::try_parse_from(["nexus", "--network", "testnet", "balance"]).unwrap();
@@ -4284,6 +4384,7 @@ mod tests {
             api_key: Some("stored".into()),
             api_secret: Some("stored-secret".into()),
             session_token: None,
+            private_key: None,
         };
         let cli = Cli::try_parse_from([
             "nexus",
@@ -4312,11 +4413,13 @@ mod tests {
             api_key: Some("nx_testnet".into()),
             api_secret: Some("s1".into()),
             session_token: None,
+            private_key: None,
         };
         *file.section_mut("mainnet") = NetworkCredentials {
             api_key: Some("nx_mainnet".into()),
             api_secret: Some("s2".into()),
             session_token: None,
+            private_key: None,
         };
         for (flag, expected) in [("testnet", "nx_testnet"), ("mainnet", "nx_mainnet")] {
             let cli = Cli::try_parse_from(["nexus", "--network", flag, "balance"]).unwrap();

@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Spec-shaped `GET /api/v1/account/summary` body. Money rides the exact `str`
+/// Spec-shaped `GET /account/summary` body. Money rides the exact `str`
 /// decimal adapter; the counts are JSON numbers.
 fn summary_body() -> Value {
     json!({
@@ -77,14 +77,14 @@ fn history_body() -> Value {
 async fn mock_server() -> MockServer {
     let server = MockServer::start().await;
     for (p, body) in [
-        ("/api/v1/account/summary", summary_body()),
+        ("/account/summary", summary_body()),
         (
-            "/api/v1/account/state",
+            "/account/state",
             json!({"summary": summary_body(), "positions": [position_body()]}),
         ),
-        ("/api/v1/account/fees", fees_body()),
-        ("/api/v1/account/portfolio-history", history_body()),
-        ("/api/v1/positions", json!([position_body()])),
+        ("/account/fees", fees_body()),
+        ("/account/portfolio-history", history_body()),
+        ("/positions", json!([position_body()])),
     ] {
         Mock::given(method("GET"))
             .and(path(p))
@@ -107,6 +107,7 @@ fn nexus(base_url: &str, args: &[&str]) -> Command {
     .env_remove("NEXUS_NETWORK")
     .env_remove("NEXUS_BASE_URL")
     .env_remove("NEXUS_SESSION_TOKEN")
+    .env_remove("NEXUS_AGENT_PRIVATE_KEY")
     // The SDK requires a hex secret (it is the raw HMAC key). The value is
     // arbitrary — the mock does not verify signatures — but it must decode.
     .env("NEXUS_API_KEY", "nx_test")
@@ -171,7 +172,7 @@ async fn account_state_is_one_read_of_summary_and_positions() {
         "account state must be a single request, got {}",
         requests.len()
     );
-    assert_eq!(requests[0].url.path(), "/api/v1/account/state");
+    assert_eq!(requests[0].url.path(), "/account/state");
 }
 
 #[tokio::test]
@@ -226,7 +227,7 @@ async fn portfolio_history_forwards_window_and_limit() {
     // Matching on the query pins that the CLI forwards both parameters as the
     // API expects them — the request 404s (and the assertion fails) otherwise.
     Mock::given(method("GET"))
-        .and(path("/api/v1/account/portfolio-history"))
+        .and(path("/account/portfolio-history"))
         .and(query_param("window", "week"))
         .and(query_param("limit", "2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(history_body()))
@@ -280,7 +281,7 @@ async fn portfolio_history_forwards_window_and_limit() {
 #[tokio::test]
 async fn authoritative_margin_unavailable_is_not_an_empty_account() {
     let server = MockServer::start().await;
-    for p in ["/api/v1/account/summary", "/api/v1/account/state"] {
+    for p in ["/account/summary", "/account/state"] {
         Mock::given(method("GET"))
             .and(path(p))
             .respond_with(ResponseTemplate::new(502).set_body_json(json!({
@@ -322,4 +323,34 @@ async fn authoritative_margin_unavailable_is_not_an_empty_account() {
             String::from_utf8_lossy(&out.stdout)
         );
     }
+}
+
+/// ENG-20358: an agent key signs every authenticated request with the agent-key
+/// scheme, and wins over the HMAC pair `nexus()` also sets. Capture the request
+/// off the wire: the four agent headers are there, the HMAC key id is not.
+#[tokio::test]
+async fn agent_key_signs_instead_of_hmac() {
+    let server = mock_server().await;
+    let mut cmd = nexus(&server.uri(), &["account", "summary"]);
+    cmd.env(
+        "NEXUS_AGENT_PRIVATE_KEY",
+        "0x0101010101010101010101010101010101010101010101010101010101010101",
+    );
+    stdout_of(cmd).await;
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    let req = &requests[0];
+    let header = |name: &str| {
+        req.headers
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_owned())
+    };
+    assert_eq!(
+        header("x-agent").as_deref(),
+        Some("0x1a642f0e3c3af545e7acbd38b07251b3990914f1")
+    );
+    for name in ["x-timestamp", "x-nonce", "x-signature"] {
+        assert!(header(name).is_some(), "missing {name}");
+    }
+    assert!(header("x-api-key").is_none(), "HMAC must not ride along");
 }

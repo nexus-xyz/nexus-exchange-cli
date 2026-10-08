@@ -113,6 +113,11 @@ jobs:
       # is not a sha, fail loudly instead.
       - name: Ensure the release tag exists (draft Releases don't create it)
         id: boundary
+        # A step with no `shell:` runs as `bash -e {0}`, and `shell: bash` adds
+        # `-eo pipefail`. Either one killed this script at the first expected
+        # non-zero (the 404 for a missing tag) before `finish()` or the recovery
+        # ran, which is how v0.5.1 was left a draft with no tag (ENG-19698).
+        shell: bash {0}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.release.outputs.tag_name }}
@@ -123,8 +128,9 @@ jobs:
           # before writing it leaves that gate reading empty, which is
           # indistinguishable from "the boundary is confirmed missing" and would
           # silently stop the standing release PR being maintained. Failures are
-          # handled and reported explicitly instead.
-          set -uo pipefail
+          # handled and reported explicitly instead. `set +e` as well as the
+          # `shell:` above, so the script keeps that contract wherever it runs.
+          set +e -uo pipefail
 
           repo="$GITHUB_REPOSITORY"
 

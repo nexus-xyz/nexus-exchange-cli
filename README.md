@@ -503,7 +503,7 @@ nexus --network dev markets                      # a custom network you declared
 | Network | Funds | Notes |
 |---|---|---|
 | `mainnet` | **real** | **Not reachable in this release.** The SDK refuses every request locally rather than guess a host — `api.nexus.xyz` does not resolve yet. Use a [custom network](#custom-networks) to target a host you control. |
-| `testnet` | play | The default and the safe target. Served by the legacy `exchange.nexus.xyz` gateway. |
+| `testnet` | play | The default and the safe target. Served at `https://api.testnet.nexus.xyz/v1`. |
 | `local` | play | A locally run indexer. A developer convenience, never a fallback. |
 | *`LABEL`* | declared | A [custom network](#custom-networks) you describe in the config file — your own environment, a preview host, a sandbox. |
 
@@ -544,7 +544,6 @@ then select it by that label:
       "funds": "play",          // required: "real" | "play" | "unknown"
       "faucet": true,           // optional, assumed absent
       "ws_url": "wss://stream.example.com/ws",  // optional, never derived
-      "direct_base_url": "...", // optional, defaults to base_url
       "chain_id": 393           // optional EIP-712 domain, never guessed
     }
   },
@@ -667,6 +666,29 @@ terminal and without `--yes`, the trade is refused rather than assumed.
 > request is refused by the SDK regardless. They are tested locally, not against
 > a live real-funds host.
 
+### Agent safety modes
+
+Two global flags limit what an invocation can do, for handing the CLI to an
+agent (ENG-20366).
+
+| Flag | Env var | Behavior |
+|---|---|---|
+| `--read-only` | `NEXUS_READ_ONLY` | Refuses every command that writes (order place/amend/cancel/batch, deposits, faucet claims, margin, cancel-on-disconnect, `auth login`, key and agent changes, `setup`) before any request is sent. Reads, `ws`, `examples` and `order preview` still run. |
+| `--paper` | `NEXUS_PAPER` | Read-only, except that `order place` is simulated against the live public order book and reports simulated fills. Nothing is sent to the matching engine. |
+
+```sh
+nexus --paper order place --market BTC-USDX-PERP --side buy --type market --quantity 0.1
+```
+
+Paper mode fetches the market's public book (no credentials needed) and walks
+it: a market order takes levels until it fills or the book runs out, a limit
+order fills only the levels its price crosses. `IOC` drops the rest, `FOK`
+fills all or nothing, `PostOnly` is rejected if it would cross, and a `GTC`
+remainder is reported as resting. The JSON output carries `"simulated": true`.
+It is deliberately simple: it does **not** simulate margin or balance checks,
+fees, funding, liquidation or positions, and nothing is kept between
+invocations, so a resting remainder is a report, not a tracked order.
+
 ### Output format
 
 By default commands print human-readable tables. Pass `--output json` (or set
@@ -688,10 +710,12 @@ nexus --output json ws trades --market BTC-USDX-PERP | jq .payload
 ### Credentials
 
 Authenticated commands (`balance`, `account …`, `positions`, `fills`,
-`withdrawals`, `orders`, `order …`, and account WebSocket channels) HMAC-sign
-each request. Public market-data commands don't need credentials.
+`withdrawals`, `orders`, `order …`, and account WebSocket channels) sign each
+request, with an [agent key](#agent-keys-recommended-for-bots-and-ai-agents)
+when one is set and with an HMAC key pair otherwise. Public market-data
+commands don't need credentials.
 
-Credentials resolve in this order, highest priority first:
+HMAC credentials resolve in this order, highest priority first:
 
 1. `--api-key` / `--api-secret` flags
 2. `NEXUS_API_KEY` / `NEXUS_API_SECRET` environment variables
@@ -767,6 +791,11 @@ default (`testnet`). Some consequences worth knowing:
 - **`nexus auth login` stores its session token in the active network's
   section**, for the same reason: the token is minted against one network's
   indexer and authenticates nowhere else.
+- **A section may also hold a `private_key`**, the wallet the
+  [MCP server](https://github.com/nexus-xyz/nexus-exchange-mcp)'s
+  `create_wallet` saves on a play-funds network. The CLI does not use it, and
+  carries it through every write untouched so that sharing the file never
+  deletes that key.
 
 **Upgrading:** a config written by an earlier version keeps its credentials at
 the top level. Those are read as belonging to the network that file names (or
@@ -808,6 +837,36 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 `agents register` defaults the expiry to 30 days out, the nonce to the current
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
 override any with `--expires-at` / `--nonce` / `--chain-id`.
+
+#### Agent keys (recommended for bots and AI agents)
+
+An agent key is a secp256k1 key your wallet authorizes to trade for it. It can
+place, amend and cancel orders and read the account, but it **cannot withdraw**,
+transfer, or manage agents, so a leaked agent key cannot move funds out. Use one
+for any bot, script or AI agent instead of an HMAC pair.
+
+Set the key with `NEXUS_AGENT_PRIVATE_KEY` (or `--agent-private-key`). Every
+authenticated request is then signed with the agent-key scheme (`x-agent`,
+`x-timestamp`, `x-nonce`, `x-signature`), and the agent key wins over an HMAC
+pair when both are set. It is never written to disk or echoed.
+
+```sh
+# 1. Make an agent key (any 32 random bytes) and register it with your wallet.
+#    `agents register` defaults --agent to this key's address.
+export NEXUS_AGENT_PRIVATE_KEY=0x$(openssl rand -hex 32)
+NEXUS_PRIVATE_KEY=0x<your-evm-key> nexus agents register --label my-bot
+
+# 2. Trade with it. No wallet key or HMAC secret needed from here on.
+nexus balance
+nexus order place --market BTC-USDX-PERP --side buy --type limit --quantity 0.01 --price 50000
+```
+
+| Flag | Env |
+|---|---|
+| `--agent-private-key <KEY>` | `NEXUS_AGENT_PRIVATE_KEY` |
+
+The server requires each agent's nonce to increase on every write, so run one
+process per agent key; register another agent for a second bot.
 
 ### Examples
 
@@ -869,22 +928,15 @@ cargo test --all-features
 
 CI runs the same three checks on every push and pull request.
 
-### Direct-service base (`/api/v1`)
-
-The gateway REST proxy is being eliminated: each backend service now serves its
-own REST API directly, at the **host-root `/api/v1`** prefix (parent
-[ENG-4740](https://linear.app/nexus-labs/issue/ENG-4740)). The migration is
-**dual-stack** ([ENG-4751](https://linear.app/nexus-labs/issue/ENG-4751)) — the
-legacy `/api/exchange` gateway paths stay live, so endpoints without an `/api/v1`
-variant keep routing through the gateway.
+### REST base
 
 The CLI is a thin layer over the [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs)
-SDK and issues no path of its own: the SDK picks the base per request off the
-`/api/v1/` prefix. Runtime routing therefore flips to `/api/v1` when this crate
-bumps its `nexus-exchange` dependency to the regenerated SDK release
-([ENG-4947](https://linear.app/nexus-labs/issue/ENG-4947), `nexus-exchange-rs`
-PR #85). The `.api-version` / `endpoints.txt` bookkeeping below tracks that
-surface so the two move together.
+SDK and issues no path of its own. Since `nexus-exchange` 0.12.0
+([ENG-18324](https://linear.app/nexus-labs/issue/ENG-18324)) the SDK sends every
+request to one REST base (`https://api.testnet.nexus.xyz/v1` on testnet) under
+the spec's bare path, so `GET /orders` goes out as `/v1/orders`. The five bridge
+operations keep their `/api/v1/...` spelling until a published spec declares
+their bare twins. `endpoints.txt` lists each operation as the SDK sends it.
 
 ### API coverage
 
@@ -895,7 +947,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.11.0`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.12.0`**.
 
 <!-- api-version-sync:end -->
 

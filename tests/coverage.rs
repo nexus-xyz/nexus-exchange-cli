@@ -143,15 +143,12 @@ fn endpoints_txt_is_well_formed_and_non_empty() {
         ops.len()
     );
     // A representative sampling across the surface must be present, so a future
-    // edit can't silently gut the file and keep the check green. The mix spans
-    // both stacks of the /api/v1 migration (ENG-4949): ops that moved to the
-    // host-root `/api/v1` surface and ops that (for now) stay on the gateway.
+    // edit can't silently gut the file and keep the check green. Bare spec paths,
+    // as nexus-exchange 0.12.0 sends them (ENG-18324).
     for want in [
-        // Migrated to /api/v1:
-        ("GET", "/api/v1/account"),
-        ("POST", "/api/v1/orders"),
-        ("DELETE", "/api/v1/orders/{order_id}"),
-        // No /api/v1 variant yet — still on the gateway root:
+        ("GET", "/account"),
+        ("POST", "/orders"),
+        ("DELETE", "/orders/{order_id}"),
         ("GET", "/markets"),
         ("GET", "/status"),
         ("GET", "/keys"),
@@ -360,8 +357,8 @@ fn the_operations_outside_cli_coverage_stay_out_of_endpoints_txt() {
 fn eng_9198_mutations_are_listed_in_endpoints_txt() {
     let ops = endpoints();
     for (method, path) in [
-        ("POST", "/api/v1/orders/preview"),
-        ("PUT", "/api/v1/account/cancel-on-disconnect"),
+        ("POST", "/orders/preview"),
+        ("PUT", "/account/cancel-on-disconnect"),
         ("POST", "/deposits"),
         ("POST", "/faucet"),
         ("POST", "/account/margin"),

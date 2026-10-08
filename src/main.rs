@@ -10,6 +10,7 @@ mod credentials;
 mod examples;
 mod guardrails;
 mod output;
+mod paper;
 mod wsclient;
 
 use std::io::{self, IsTerminal, Write};
@@ -18,8 +19,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use nexus_exchange::auth::AgentRegistration;
-use nexus_exchange::types::{AmendOrder, Decimal, MarginDirection, OrderRequest};
-use nexus_exchange::{Client, EthSigner, ExposeSecret};
+use nexus_exchange::types::{AmendOrder, Decimal, OrderRequest};
+use nexus_exchange::{AgentSigner, Client, EthSigner, ExposeSecret};
 
 use cli::{
     AccountCommand, AgentsCommand, AuthCommand, BridgeCommand, CancelOnDisconnectCommand, Cli,
@@ -32,6 +33,27 @@ use wsclient::{Subscription, ACCOUNT_CHANNELS, PUBLIC_CHANNELS};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Agent safety modes (ENG-20366), ahead of everything else so a refused
+    // command touches neither the config file nor the network.
+    let paper_place = cli.paper
+        && matches!(
+            cli.command,
+            Command::Order {
+                action: OrderCommand::Place { .. }
+            }
+        );
+    if (cli.read_only || cli.paper) && cli.command.writes() && !paper_place {
+        anyhow::bail!(
+            "refused: this command writes, and {} is set. {}",
+            if cli.paper { "--paper" } else { "--read-only" },
+            if cli.paper {
+                "Paper mode simulates `order place` only."
+            } else {
+                "Drop --read-only (or unset NEXUS_READ_ONLY) to run it."
+            }
+        );
+    }
 
     // Shell completions need neither network nor credentials — generate and exit
     // before touching config or the network.
@@ -66,15 +88,24 @@ async fn main() -> Result<()> {
     // its single "half a pair" warning isn't emitted twice.
     let credentials = cli.credentials(&file, &target);
     let session_token = cli.session_token(&file, &target);
-    // Either credential path authenticates account-scoped commands. The HMAC
-    // pair is the request signer; the session token is a fallback used only
-    // when no pair is configured (both set `Config::credentials`, last wins).
-    let authenticated = credentials.is_some() || session_token.is_some();
+    let agent = cli
+        .credentials
+        .agent_private_key
+        .clone()
+        .map(agent_signer)
+        .transpose()?;
+    let agent_address = agent.as_ref().map(AgentSigner::address);
+    // Any credential path authenticates account-scoped commands. An agent key
+    // is the request signer when set, then the HMAC pair; the session token is
+    // a fallback used only when neither is configured (each sets
+    // `Config::credentials`, last wins).
+    let authenticated = agent.is_some() || credentials.is_some() || session_token.is_some();
     let mut config = cli.config(&target);
-    match (credentials, session_token) {
-        (Some((key, secret)), _) => config = config.api_key(key, secret),
-        (None, Some(token)) => config = config.session_token(token),
-        (None, None) => {}
+    match (agent, credentials, session_token) {
+        (Some(agent), _, _) => config = config.agent_key(agent),
+        (None, Some((key, secret)), _) => config = config.api_key(key, secret),
+        (None, None, Some(token)) => config = config.session_token(token),
+        (None, None, None) => {}
     }
     let client = Client::new(config.clone());
     let format = cli.output;
@@ -123,7 +154,7 @@ async fn main() -> Result<()> {
         }
         Command::Summaries => {
             let summaries = client
-                .fetch_market_summaries()
+                .fetch_markets_summary()
                 .await
                 .context("failed to fetch market summaries")?;
             emit(format, output::summaries(&summaries), || {
@@ -177,7 +208,7 @@ async fn main() -> Result<()> {
         }
         Command::Health => {
             let health = client
-                .health_check()
+                .fetch_status()
                 .await
                 .context("failed to fetch health status")?;
             emit(format, output::health(&health), || {
@@ -240,7 +271,7 @@ async fn main() -> Result<()> {
         Command::ClosedPositions { limit } => {
             require_authenticated(authenticated, "closed-positions")?;
             let closed = client
-                .fetch_closed_positions(Some(limit))
+                .fetch_positions_history(Some(limit))
                 .await
                 .context("failed to fetch closed positions")?;
             emit(format, output::closed_positions(&closed), || {
@@ -284,6 +315,39 @@ async fn main() -> Result<()> {
         }
 
         // ── trading ──
+        Command::Order {
+            action:
+                OrderCommand::Place {
+                    market,
+                    side,
+                    order_type,
+                    price,
+                    quantity,
+                    tif,
+                    reduce_only,
+                    ..
+                },
+        } if cli.paper => {
+            let request = build_order_request(
+                market.clone(),
+                side,
+                order_type,
+                price.as_deref(),
+                &quantity,
+                tif,
+                reduce_only,
+            )?;
+            // Public, so it needs no credentials, and it is the only request
+            // paper mode makes.
+            let book = client
+                .fetch_order_book(&market)
+                .await
+                .with_context(|| format!("failed to fetch order book for {market}"))?;
+            let result = paper::simulate(&book, &request);
+            emit(format, paper::to_human(&request, &result), || {
+                paper::to_json(&request, &result)
+            });
+        }
         Command::Order { action } => {
             handle_order(&client, authenticated, action, format, &target, &file).await?
         }
@@ -295,7 +359,15 @@ async fn main() -> Result<()> {
         Command::Auth { action } => handle_auth(&client, action, format, &target).await?,
         Command::Keys { action } => handle_keys(&client, authenticated, action, format).await?,
         Command::Agents { action } => {
-            handle_agents(&client, authenticated, action, format, &target).await?
+            handle_agents(
+                &client,
+                authenticated,
+                action,
+                format,
+                &target,
+                agent_address,
+            )
+            .await?
         }
 
         // ── bridge ──
@@ -341,7 +413,7 @@ async fn handle_market(
     match action {
         MarketCommand::Summary => {
             let summaries = client
-                .fetch_market_summaries()
+                .fetch_markets_summary()
                 .await
                 .context("failed to fetch market summaries")?;
             emit(format, output::market_summaries(&summaries), || {
@@ -377,7 +449,7 @@ async fn handle_market(
         }
         MarketCommand::FundingSamples { market_id, limit } => {
             let samples = client
-                .fetch_funding_premium_samples(&market_id, limit)
+                .fetch_funding_samples(&market_id, limit)
                 .await
                 .with_context(|| format!("failed to fetch funding samples for {market_id}"))?;
             emit(format, output::funding_samples(&samples), || {
@@ -387,7 +459,7 @@ async fn handle_market(
         MarketCommand::AdlEvents { market_id, limit } => {
             require_authenticated(authenticated, "market adl-events")?;
             let events = client
-                .fetch_market_adl_events(&market_id, limit)
+                .fetch_adl_events(&market_id, limit)
                 .await
                 .with_context(|| format!("failed to fetch ADL events for {market_id}"))?;
             emit(format, output::adl_events(&events), || {
@@ -412,7 +484,7 @@ async fn handle_order(
         OrderCommand::History { limit } => {
             require_authenticated(authenticated, "order history")?;
             let entries = client
-                .fetch_order_history(limit)
+                .fetch_orders(limit)
                 .await
                 .context("failed to fetch order history")?;
             emit(format, output::order_history(&entries), || {
@@ -618,7 +690,7 @@ async fn handle_order(
             // order state), not an `OrderResponse` with fills (ENG-5947), so we
             // render it with the single-order view rather than `order_result`.
             let result = client
-                .amend_order(&order_id, &market, &amend)
+                .edit_order(&order_id, &market, &amend)
                 .await
                 .with_context(|| format!("failed to amend order {order_id}"))?;
             emit(format, output::order_detail(&result), || {
@@ -699,7 +771,7 @@ async fn handle_account(
         AccountCommand::Fees => {
             require_authenticated(authenticated, "account fees")?;
             let fees = client
-                .fetch_account_fees()
+                .fetch_trading_fees()
                 .await
                 .context("failed to fetch account fees")?;
             emit(format, output::account_fees(&fees), || {
@@ -778,7 +850,7 @@ async fn handle_account(
         AccountCommand::Funding { limit } => {
             require_authenticated(authenticated, "account funding")?;
             let entries = client
-                .fetch_account_funding(limit)
+                .fetch_funding_history(limit)
                 .await
                 .context("failed to fetch funding payments")?;
             emit(format, output::account_funding(&entries), || {
@@ -877,7 +949,7 @@ async fn handle_account(
         AccountCommand::AdlHistory { address, limit } => {
             require_authenticated(authenticated, "account adl-history")?;
             let events = client
-                .fetch_account_adl_history(&address, limit)
+                .fetch_adl_history(&address, limit)
                 .await
                 .with_context(|| format!("failed to fetch ADL history for {address}"))?;
             emit(format, output::adl_events(&events), || {
@@ -927,7 +999,11 @@ async fn handle_auth(
             // CLI drops the `EthSigner` as soon as the request is sent.
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;
-            let login = client.sign_in(&signer).await.context("failed to sign in")?;
+            let signature = signer.sign_in().context("failed to sign in")?.signature;
+            let login = client
+                .login(&signature)
+                .await
+                .context("failed to sign in")?;
 
             // Persist the token via the session-token credential path (0600),
             // under the network it was minted against — it authenticates there
@@ -1009,6 +1085,7 @@ async fn handle_agents(
     action: AgentsCommand,
     format: OutputFormat,
     target: &Target,
+    agent_address: Option<String>,
 ) -> Result<()> {
     match action {
         AgentsCommand::List => {
@@ -1046,11 +1123,14 @@ async fn handle_agents(
                 Some(chain_id) => chain_id,
                 None => target.signing_chain_id()?,
             };
+            let agent = agent
+                .or(agent_address)
+                .context("no agent to register: pass --agent or set NEXUS_AGENT_PRIVATE_KEY")?;
 
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;
             let registration: AgentRegistration = signer
-                .register_agent(&agent, expires_at, nonce, chain_id, label)
+                .register_agent(&agent, expires_at, nonce, chain_id, target.network(), label)
                 .context("failed to sign agent registration")?;
 
             if !confirm(
@@ -1139,19 +1219,18 @@ async fn handle_margin(
     action: MarginCommand,
     format: OutputFormat,
 ) -> Result<()> {
-    let (market_id, amount, yes, direction) = match action {
+    let (market_id, amount, yes, adding) = match action {
         MarginCommand::Add {
             market_id,
             amount,
             yes,
-        } => (market_id, amount, yes, MarginDirection::Add),
+        } => (market_id, amount, yes, true),
         MarginCommand::Remove {
             market_id,
             amount,
             yes,
-        } => (market_id, amount, yes, MarginDirection::Remove),
+        } => (market_id, amount, yes, false),
     };
-    let adding = matches!(direction, MarginDirection::Add);
     require_authenticated(
         authenticated,
         if adding {
@@ -1170,14 +1249,14 @@ async fn handle_margin(
         eprintln!("aborted.");
         return Ok(());
     }
-    // `adjust_margin` directly rather than the `add_margin` / `remove_margin`
-    // wrappers: the wrappers only fix `direction`, which the subcommand already
-    // decided, and routing both directions through one call keeps METHOD_OP at
-    // one row per operation instead of three rows two of which nothing calls.
-    let result = client
-        .adjust_margin(&market_id, direction, amount)
-        .await
-        .with_context(|| format!("failed to adjust margin on {market_id}"))?;
+    // `add_margin` / `remove_margin`, which fix the direction: nexus-exchange
+    // 0.12.0 deprecates `adjust_margin` in their favour.
+    let result = if adding {
+        client.add_margin(&market_id, amount).await
+    } else {
+        client.remove_margin(&market_id, amount).await
+    }
+    .with_context(|| format!("failed to adjust margin on {market_id}"))?;
     emit(format, output::margin_adjustment(&result), || {
         output::margin_adjustment_json(&result)
     });
@@ -1454,10 +1533,17 @@ fn require_authenticated(authenticated: bool, what: &str) -> Result<()> {
     if !authenticated {
         anyhow::bail!(
             "'{what}' is an authenticated command but no credentials are configured \
-             (run `nexus setup` or set NEXUS_API_KEY/NEXUS_API_SECRET)"
+             (set NEXUS_AGENT_PRIVATE_KEY, run `nexus setup`, or set NEXUS_API_KEY/NEXUS_API_SECRET)"
         );
     }
     Ok(())
+}
+
+/// Build the agent signer from `--agent-private-key`/`NEXUS_AGENT_PRIVATE_KEY`.
+/// The SDK's error names what is wrong with the key, never the key itself.
+fn agent_signer(key: String) -> Result<AgentSigner> {
+    AgentSigner::from_hex(key.trim())
+        .context("invalid agent private key (--agent-private-key / NEXUS_AGENT_PRIVATE_KEY)")
 }
 
 /// Thirty days in milliseconds — the default agent-registration expiry window
@@ -1533,20 +1619,62 @@ mod tests {
     }
 
     /// The register-agent path produces the exact, deterministic EIP-712
-    /// signature for a known key, chain id, expiry, and nonce.
+    /// signature for a known key, chain id, expiry, nonce, and network (whose
+    /// name salts the domain since nexus-exchange 0.12.0).
     #[test]
     fn register_agent_is_deterministic_for_a_known_key() {
         let signer = EthSigner::from_hex(TEST_KEY).unwrap();
         let agent = "0x1234567890abcdef1234567890abcdef12345678";
         let reg: AgentRegistration = signer
-            .register_agent(agent, 1_782_000_000_000, 1, 393, None)
+            .register_agent(
+                agent,
+                1_782_000_000_000,
+                1,
+                393,
+                &nexus_exchange::Network::Testnet,
+                None,
+            )
             .unwrap();
         assert_eq!(reg.wallet, TEST_ADDR);
         assert_eq!(reg.agent, agent);
         assert_eq!(
             reg.signature,
-            "0x5df263ed6d1b619a72d436a01104f9036af6258cacf56dea973321cbe722a99550644eea6bf75656d48e982d2ce5db9ef13c4aced4539cf3c2ff87802b0197cc1b"
+            "0x39f688ba7e880e5f02e402f28e4d9c52ba52ef208c29d3800bfee7f5622ad6da5769a746e2b628f5d94c193dbaf0bcf5ef34ccd38f0522458b04f6a4ba6f00741c"
         );
+    }
+
+    /// The agent key signs with the SDK's agent-key scheme, byte for byte: a
+    /// fresh signer's first nonce is the timestamp, so this reproduces the
+    /// SDK's first known-answer vector (`src/auth/agent.rs`, generated by the
+    /// exchange frontend's signer). A wire-format drift fails here.
+    #[test]
+    fn agent_signer_matches_the_sdk_vector() {
+        use nexus_exchange::auth::{Credential, SigningContext};
+        let signer = agent_signer(
+            " 0x0101010101010101010101010101010101010101010101010101010101010101\n".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            signer.address(),
+            "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        );
+        let ctx = SigningContext::new("GET", "/account/summary", "", b"", 1_776_033_900_000);
+        let headers = signer.auth_headers(&ctx).unwrap();
+        let get = |name| &headers.iter().find(|(k, _)| *k == name).unwrap().1;
+        assert_eq!(get("x-agent"), "0x1a642f0e3c3af545e7acbd38b07251b3990914f1");
+        assert_eq!(get("x-nonce"), "1776033900000");
+        assert_eq!(
+            get("x-signature"),
+            "0xd94b40dff9c3d0e0a649178b6eb3159d9a3522a1ccc66390b42a7a444b8e52c8\
+             5f2d2a9d66e8a48ac5040d8e96f526d352b3b7a686634280b9192eb6c12a61b61b"
+        );
+    }
+
+    /// A bad agent key is refused without quoting it.
+    #[test]
+    fn agent_signer_error_does_not_echo_the_key() {
+        let err = format!("{:#}", agent_signer("0xdeadbeefnothex".into()).unwrap_err());
+        assert!(!err.contains("deadbeef"), "{err}");
     }
 
     /// A malformed private key is rejected before any network call.
