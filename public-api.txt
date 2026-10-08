@@ -1,8 +1,11 @@
+nexus (every command)  --agent-private-key <AGENT_PRIVATE_KEY> [env: NEXUS_AGENT_PRIVATE_KEY]
 nexus (every command)  --api-key <API_KEY> [env: NEXUS_API_KEY]
 nexus (every command)  --api-secret <API_SECRET> [env: NEXUS_API_SECRET]
 nexus (every command)  --base-url <BASE_URL> [env: NEXUS_BASE_URL]
 nexus (every command)  --network <NETWORK> [env: NEXUS_NETWORK]
 nexus (every command)  --output <OUTPUT> [env: NEXUS_OUTPUT] [default: human] [possible values: human, json]
+nexus (every command)  --paper [env: NEXUS_PAPER]
+nexus (every command)  --read-only [env: NEXUS_READ_ONLY]
 nexus (every command)  --session-token <SESSION_TOKEN> [env: NEXUS_SESSION_TOKEN]
 nexus (every command)  -h, --help
 nexus
@@ -80,7 +83,7 @@ nexus agents register  --label <LABEL>
 nexus agents register  --nonce <NONCE>
 nexus agents register  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
 nexus agents register  --yes
-nexus agents register  usage: [OPTIONS] --agent <AGENT>
+nexus agents register  usage: [OPTIONS]
 nexus agents revoke
 nexus agents revoke  --yes
 nexus agents revoke  <ADDRESS>
