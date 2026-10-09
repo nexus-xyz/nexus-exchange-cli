@@ -43,6 +43,13 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
 - `python3 scripts/test_check_spec_drift.py` and
   `python3 scripts/test_sdk_parity.py` pass (no network). CI runs both on every PR,
   ahead of the checks they cover.
+- If you added, removed or changed a command, an argument or a flag, regenerate
+  `public-api.txt` with `scripts/release_gate/public_api.sh --write` and commit it
+  in the same PR. `prepublish-surface` fails on any difference, so a removal shows
+  up in the diff a reviewer reads (ENG-18798). A `-` line there is breaking.
+  Until the first release that carries `public-api.txt`, the verdict grades only
+  the spec pin, so a `-` line needs a `!` title. After that, the verdict also
+  fails a patch bump when `public-api.txt` lost lines since the published tag.
 - If you touched `endpoints.txt`, `METHOD_OP`, either allowlist, the
   `nexus-exchange` dependency, or a file that calls the SDK:
   ```sh
