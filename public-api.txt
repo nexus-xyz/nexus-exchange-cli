@@ -85,6 +85,9 @@ nexus agents register  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
 nexus agents register  --yes
 nexus agents register  usage: [OPTIONS]
 nexus agents revoke
+nexus agents revoke  --chain-id <CHAIN_ID>
+nexus agents revoke  --nonce <NONCE>
+nexus agents revoke  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
 nexus agents revoke  --yes
 nexus agents revoke  <ADDRESS>
 nexus agents revoke  usage: [OPTIONS] <ADDRESS>
@@ -188,7 +191,6 @@ nexus order amend
 nexus order amend  --market <MARKET>
 nexus order amend  --price <PRICE>
 nexus order amend  --quantity <QUANTITY>
-nexus order amend  --tif <TIF> [possible values: gtc, ioc, fok, post-only]
 nexus order amend  --yes
 nexus order amend  <ORDER_ID>
 nexus order amend  usage: [OPTIONS] --market <MARKET> <ORDER_ID>
