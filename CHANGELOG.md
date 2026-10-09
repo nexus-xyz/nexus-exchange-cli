@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.0...v0.6.1) (2026-10-09)
+
+
+### Dependencies
+
+* nexus-exchange 0.13.1, fixing nexus funding-rates on testnet (ENG-20916) ([#104](https://github.com/nexus-xyz/nexus-exchange-cli/issues/104)) ([63afc46](https://github.com/nexus-xyz/nexus-exchange-cli/commit/63afc4608847781690ee964ba680e41557a22a0b))
+
 ## [0.6.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.2...v0.6.0) (2026-10-09)
 
 
