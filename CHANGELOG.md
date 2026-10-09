@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.2...v0.6.0) (2026-10-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **agents:** `nexus agents revoke <ADDRESS>` now needs the owning wallet's private key (--private-key, NEXUS_PRIVATE_KEY, or the prompt) instead of an API key or session token, and accepts --nonce and --chain-id. `nexus order amend` no longer accepts --tif; drop the flag, the order keeps its original time in force.
+
+### Features
+
+* **agents:** revoke agents with the wallet signature (ENG-20579) ([#102](https://github.com/nexus-xyz/nexus-exchange-cli/issues/102)) ([b3d8d28](https://github.com/nexus-xyz/nexus-exchange-cli/commit/b3d8d288e289b04d983866a660bd18a023026ebd))
+
 ## [0.5.2](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.1...v0.5.2) (2026-10-07)
 
 
