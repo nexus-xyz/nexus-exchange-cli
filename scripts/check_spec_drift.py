@@ -207,7 +207,6 @@ METHOD_OP = {
     "remove_margin": ("POST", "/account/margin"),
     "create_api_key": ("POST", "/keys"),
     "delete_api_key": ("DELETE", "/keys/{key_id}"),
-    "revoke_agent": ("DELETE", "/agents/{address}"),
     # The SDK issues signed_patch_with_query (nexus-exchange 0.12.0
     # src/rest.rs::edit_order, `amend_order` before it). It was mapped to PUT
     # here, which hid a covered operation behind CODE_ONLY_OPS — see ENG-7962 and
@@ -219,6 +218,9 @@ METHOD_OP = {
     # made them invisible to every invariant here (ENG-12786, invariant 9).
     "login": ("POST", "/auth/login"),
     "register_agent": ("POST", "/agents/register"),
+    # Wallet-signed too (ENG-20579): the server takes only the owner's EIP-712
+    # RevokeAgentKey signature on a revoke.
+    "revoke_agent": ("DELETE", "/agents/{address}"),
     # bridge (Phase A: deposits) — /api/v1 only; the gateway never proxied it,
     # so no row here has a bare-path variant.
     "fetch_bridge_assets": ("GET", "/api/v1/bridge/assets"),

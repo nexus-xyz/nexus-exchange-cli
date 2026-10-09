@@ -668,7 +668,6 @@ async fn handle_order(
             market,
             price,
             quantity,
-            tif,
             yes,
         } => {
             require_authenticated(authenticated, "order amend")?;
@@ -678,9 +677,6 @@ async fn handle_order(
             }
             if let Some(q) = quantity.as_deref() {
                 amend = amend.quantity(parse_amount("quantity", q)?);
-            }
-            if let Some(t) = tif {
-                amend = amend.time_in_force(t.into());
             }
             if !confirm(&format!("Amend order {order_id}"), yes)? {
                 eprintln!("aborted.");
@@ -1153,14 +1149,41 @@ async fn handle_agents(
                 || output::agent_registered_json(&result.agent_address, result.expires_at),
             );
         }
-        AgentsCommand::Revoke { address, yes } => {
-            require_authenticated(authenticated, "agents revoke")?;
-            if !confirm(&format!("Revoke agent {address}"), yes)? {
+        AgentsCommand::Revoke {
+            address,
+            private_key,
+            nonce,
+            chain_id,
+            yes,
+        } => {
+            // Wallet-signed (EIP-712 `RevokeAgentKey`) and nothing else: the
+            // server ignores HMAC, session and agent credentials on a revoke, and
+            // the SDK attaches none, so there is no `require_authenticated` gate.
+            // Chain id defaults as on `register`; the nonce defaults to now, taken
+            // after any key prompt because the server only accepts it for 5 min.
+            let chain_id = match chain_id {
+                Some(chain_id) => chain_id,
+                None => target.signing_chain_id()?,
+            };
+            let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
+                .context("invalid EVM private key")?;
+            let nonce = match nonce {
+                Some(nonce) => nonce,
+                None => unix_millis()?,
+            };
+            let revocation = signer
+                .revoke_agent(&address, nonce, chain_id, target.network())
+                .context("failed to sign agent revocation")?;
+
+            if !confirm(
+                &format!("Revoke agent {address} (nonce {nonce}, chain {chain_id})"),
+                yes,
+            )? {
                 eprintln!("aborted.");
                 return Ok(());
             }
             let value = client
-                .revoke_agent(&address)
+                .revoke_agent(&revocation)
                 .await
                 .with_context(|| format!("failed to revoke agent {address}"))?;
             emit(
@@ -1550,8 +1573,8 @@ fn agent_signer(key: String) -> Result<AgentSigner> {
 /// (the spec accepts `[now+1d, now+90d]`).
 const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
-/// Current Unix time in milliseconds, used to default the agent-registration
-/// nonce and expiry.
+/// Current Unix time in milliseconds, used to default the agent register and
+/// revoke nonces and the registration expiry.
 fn unix_millis() -> Result<u64> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
