@@ -63,7 +63,7 @@ path = "src/main.rs"
 # market data, the authenticated account, trading, and WebSocket streaming —
 # goes through `Client`, which owns request signing, the HTTP/WS transport, and
 # the wire types. The CLI carries no transport of its own.
-nexus-exchange = "0.12.0"
+nexus-exchange = "0.13.0"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -88,13 +88,6 @@ futures-util = "0.3"
 tokio-tungstenite = "0.30"
 tokio = { version = "1", features = ["net"] }
 
-# TEMPORARY (ENG-20579): build against the unreleased wallet-signed agent revoke
-# (nexus-xyz/nexus-exchange-rs#178). That rev still reports version 0.12.0 and
-# pins the same spec and endpoints.txt as the published 0.12.0, so the pin and
-# parity checks stay meaningful. Drop this table and bump the dependency above
-# to the published 0.13.x once that PR merges and ships.
-[patch.crates-io]
-nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", rev = "64dc46a0c1d82c52645024edb51bdb79b490f27b" }
 
 # Release-build profile used by `dist`. Inherits the standard release profile and
 # enables thin LTO for smaller, faster shipped binaries without the long compile
