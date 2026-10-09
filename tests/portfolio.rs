@@ -221,6 +221,36 @@ async fn account_fees_labels_the_maker_rebate() {
     assert_eq!(v["volume_30d"], json!("123456.78"));
 }
 
+/// From spec 0.9.123 a rate can be a tenth of a bps (ENG-21111). The body is
+/// raw JSON text, so `2.8` reaches the binary exactly as the API serves it.
+#[tokio::test]
+async fn account_fees_renders_fractional_rates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account/fees"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"maker_fee_bps": -0.4, "taker_fee_bps": 2.8, "tier": "base",
+                "schedule": "standard", "markets": [], "volume_30d": "1",
+                "volume_30d_estimated": false, "discounts": []}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    let out = stdout_of(nexus(&server.uri(), &["account", "fees"])).await;
+    assert!(out.contains("-0.4 bps (rebate paid to you)"), "{out}");
+    assert!(out.contains("2.8 bps"), "{out}");
+
+    let out = stdout_of(nexus(
+        &server.uri(),
+        &["--output", "json", "account", "fees"],
+    ))
+    .await;
+    let v: Value = serde_json::from_str(&out).expect("stdout is valid JSON");
+    assert_eq!(v["maker_fee_bps"], json!(-0.4));
+    assert_eq!(v["taker_fee_bps"], json!(2.8));
+}
+
 #[tokio::test]
 async fn portfolio_history_forwards_window_and_limit() {
     let server = MockServer::start().await;

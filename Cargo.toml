@@ -89,6 +89,15 @@ tokio-tungstenite = "0.30"
 tokio = { version = "1", features = ["net"] }
 
 
+# TEMPORARY (ENG-21111): build against the unreleased fractional fee rates
+# (nexus-xyz/nexus-exchange-rs#182), where AccountFees' rates are Decimal. That
+# rev still reports version 0.13.1 and pins the same spec and endpoints.txt as
+# the published 0.13.1, so the pin and parity checks stay meaningful. Drop this
+# table and bump the dependency above to the published 0.14.x once that PR
+# merges and ships.
+[patch.crates-io]
+nexus-exchange = { git = "https://github.com/nexus-xyz/nexus-exchange-rs", rev = "da60b66fb2bd69ecc8236bd4d3a9011457e28710" }
+
 # Release-build profile used by `dist`. Inherits the standard release profile and
 # enables thin LTO for smaller, faster shipped binaries without the long compile
 # times of full LTO.
