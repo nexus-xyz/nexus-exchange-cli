@@ -4,12 +4,13 @@
 # with its own key".
 #
 # Credentials by step:
-#   * `auth login` / `agents register` — wallet-signed (EIP-191 / EIP-712).
-#     They read the raw private key from --private-key, NEXUS_PRIVATE_KEY, or a
-#     hidden interactive prompt; the key signs locally and is never persisted.
-#   * `keys …` — needs the session token stored by `auth login` (or an existing
+#   * `auth login` / `agents register` / `agents revoke`: wallet-signed
+#     (EIP-191 / EIP-712). They read the raw private key from --private-key,
+#     NEXUS_PRIVATE_KEY, or a hidden interactive prompt; the key signs locally
+#     and is never persisted.
+#   * `keys …`: needs the session token stored by `auth login` (or an existing
 #     HMAC pair from `nexus setup` / NEXUS_API_KEY + NEXUS_API_SECRET).
-#   * `agents list` / `agents revoke` — same authenticated session.
+#   * `agents list`: same authenticated session.
 # Mutating commands prompt for confirmation unless --yes is passed.
 set -euo pipefail
 
@@ -35,6 +36,8 @@ nexus keys delete <KEY_ID> --yes   # DELETE /keys/{id}
 # nonce, exchange chain id.
 nexus agents register --agent 0x<AGENT_ADDR> --label "trading-bot-1" --yes   # POST /agents/register
 
-# List the wallet's registered agents, then revoke one by address.
+# List the wallet's registered agents, then revoke one by address. The revoke
+# is signed by the owning wallet (EIP-712 `RevokeAgentKey`, current-ms nonce),
+# the only credential the server accepts for it.
 nexus agents list                       # GET /agents
 nexus agents revoke 0x<ADDRESS> --yes   # DELETE /agents/{address}

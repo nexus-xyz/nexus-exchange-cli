@@ -1,6 +1,6 @@
 [package]
 name = "nexus-exchange-cli"
-version = "0.5.1"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Command-line interface for the Nexus Exchange API"
@@ -63,7 +63,7 @@ path = "src/main.rs"
 # market data, the authenticated account, trading, and WebSocket streaming —
 # goes through `Client`, which owns request signing, the HTTP/WS transport, and
 # the wire types. The CLI carries no transport of its own.
-nexus-exchange = "0.12.0"
+nexus-exchange = "0.13.1"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -87,6 +87,7 @@ wiremock = "0.6"
 futures-util = "0.3"
 tokio-tungstenite = "0.30"
 tokio = { version = "1", features = ["net"] }
+
 
 # Release-build profile used by `dist`. Inherits the standard release profile and
 # enables thin LTO for smaller, faster shipped binaries without the long compile

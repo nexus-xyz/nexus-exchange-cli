@@ -415,13 +415,13 @@ nexus account adl-history 0x<ADDRESS>   # ADL settlements touching an account
 nexus auth login                    # EIP-191 sign-in; prompts for the key,
                                     # stores the session token (mode 0600)
 nexus agents register --agent 0x<AGENT_ADDR>   # EIP-712; prompts for the key
+nexus agents revoke <AGENT_ADDRESS>            # EIP-712; prompts for the key
 
 # API keys and agents
 nexus keys list
 nexus keys create                   # secret is shown ONCE — store it now
 nexus keys delete <KEY_ID>
 nexus agents list
-nexus agents revoke <AGENT_ADDRESS>
 # Collateral transfers and sub-accounts are NOT available. `nexus transfers` and
 # `nexus sub-accounts` were withdrawn in ENG-12369 (closing ENG-8123): both route
 # groups 404 against the live venue where documented routes return 401, and no
@@ -821,7 +821,7 @@ hidden interactive prompt. It is used only to produce the signature and is
 
 | Flag | Env |
 |---|---|
-| `--private-key <KEY>` (on `auth login` / `agents register`) | `NEXUS_PRIVATE_KEY` |
+| `--private-key <KEY>` (on `auth login` / `agents register` / `agents revoke`) | `NEXUS_PRIVATE_KEY` |
 | `--session-token <TOKEN>` | `NEXUS_SESSION_TOKEN` |
 
 ```sh
@@ -837,6 +837,13 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 `agents register` defaults the expiry to 30 days out, the nonce to the current
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
 override any with `--expires-at` / `--nonce` / `--chain-id`.
+
+`agents revoke <AGENT_ADDRESS>` is signed by the same wallet (EIP-712
+`RevokeAgentKey`), which is the only credential the server accepts for a revoke:
+no API key, session token or agent key is needed, and none is sent. Its nonce
+defaults to the current Unix-ms timestamp and must be fresh (within 5 minutes)
+and greater than the last one the wallet used to revoke or rename; `--nonce` and
+`--chain-id` override them as on `register`.
 
 #### Agent keys (recommended for bots and AI agents)
 
@@ -947,7 +954,7 @@ pins and sends the same tag as `X-Nexus-Api-Version` on every request.
 
 <!-- api-version-sync:start -->
 
-Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.12.0`**.
+Currently targets Exchange API spec **`v0.8.1`** — the version pinned and sent as `X-Nexus-Api-Version` by `nexus-exchange` **`0.13.1`**.
 
 <!-- api-version-sync:end -->
 

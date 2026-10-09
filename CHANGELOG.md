@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.6.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.0...v0.6.1) (2026-10-09)
+
+
+### Dependencies
+
+* nexus-exchange 0.13.1, fixing nexus funding-rates on testnet (ENG-20916) ([#104](https://github.com/nexus-xyz/nexus-exchange-cli/issues/104)) ([63afc46](https://github.com/nexus-xyz/nexus-exchange-cli/commit/63afc4608847781690ee964ba680e41557a22a0b))
+
+## [0.6.0](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.2...v0.6.0) (2026-10-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **agents:** `nexus agents revoke <ADDRESS>` now needs the owning wallet's private key (--private-key, NEXUS_PRIVATE_KEY, or the prompt) instead of an API key or session token, and accepts --nonce and --chain-id. `nexus order amend` no longer accepts --tif; drop the flag, the order keeps its original time in force.
+
+### Features
+
+* **agents:** revoke agents with the wallet signature (ENG-20579) ([#102](https://github.com/nexus-xyz/nexus-exchange-cli/issues/102)) ([b3d8d28](https://github.com/nexus-xyz/nexus-exchange-cli/commit/b3d8d288e289b04d983866a660bd18a023026ebd))
+
+## [0.5.2](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.1...v0.5.2) (2026-10-07)
+
+
+### Features
+
+* **cli:** --read-only and --paper agent safety modes (ENG-20366) ([#100](https://github.com/nexus-xyz/nexus-exchange-cli/issues/100)) ([c21c63d](https://github.com/nexus-xyz/nexus-exchange-cli/commit/c21c63def6260374802ce2f63faba38fb34d9b1b))
+* **cli:** sign requests with an agent key (ENG-20358) ([#99](https://github.com/nexus-xyz/nexus-exchange-cli/issues/99)) ([a089618](https://github.com/nexus-xyz/nexus-exchange-cli/commit/a08961801ee83a46e208fe4d76885332357f8900))
+
+
+### Bug Fixes
+
+* **config:** keep a section's private_key through a CLI write (ENG-19785) ([#95](https://github.com/nexus-xyz/nexus-exchange-cli/issues/95)) ([9340520](https://github.com/nexus-xyz/nexus-exchange-cli/commit/93405200ea640d460445bc4cec00e9b6eca7e4c2))
+* **setup:** store an API key only with its own secret (ENG-20053) ([#97](https://github.com/nexus-xyz/nexus-exchange-cli/issues/97)) ([89df322](https://github.com/nexus-xyz/nexus-exchange-cli/commit/89df32248989c7ef8fca1d559c56253efc0fe10a))
+
+
+### Dependencies
+
+* nexus-exchange 0.12.0 (spec v0.8.1), skipping 0.11.1 (ENG-20087) ([#98](https://github.com/nexus-xyz/nexus-exchange-cli/issues/98)) ([a03a296](https://github.com/nexus-xyz/nexus-exchange-cli/commit/a03a29673679cb177393dc12522dc11dd2881dca))
+
 ## [0.5.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.5.0...v0.5.1) (2026-10-01)
 
 

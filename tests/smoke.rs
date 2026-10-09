@@ -345,3 +345,77 @@ async fn read_only_refuses_writes_before_any_request() {
     }
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+/// `agents revoke` (ENG-20579) is authorized by the owning wallet's EIP-712
+/// `RevokeAgentKey` signature alone, the only credential the server takes on a
+/// revoke. With no credentials configured at all it still goes out, as one
+/// DELETE carrying exactly the four `x-wallet-*` headers the SDK signs and none
+/// of the HMAC or agent-key ones.
+#[tokio::test]
+async fn agents_revoke_sends_only_the_wallet_headers() {
+    // Hardhat account #0, the same published key the unit tests pin against.
+    const KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    const AGENT: &str = "0xabababababababababababababababababababab";
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/agents/{AGENT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+    let mut cmd = nexus(
+        &server.uri(),
+        &[
+            "agents",
+            "revoke",
+            AGENT,
+            "--nonce",
+            "1790000000000",
+            "--chain-id",
+            "20056",
+            "--yes",
+        ],
+    );
+    cmd.env("NEXUS_PRIVATE_KEY", KEY)
+        .env_remove("NEXUS_AGENT_PRIVATE_KEY")
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("nexus-cli-smoke-empty"),
+        );
+    stdout_of(cmd).await;
+
+    // `--base-url` keeps the declared network, testnet, which salts the domain.
+    let expected = nexus_exchange::EthSigner::from_hex(KEY)
+        .unwrap()
+        .revoke_agent(
+            AGENT,
+            1_790_000_000_000,
+            20_056,
+            &nexus_exchange::Network::Testnet,
+        )
+        .unwrap();
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let header = |name: &str| {
+        requests[0]
+            .headers
+            .get(name)
+            .map(|v| v.to_str().expect("header value is valid UTF-8").to_owned())
+    };
+    assert_eq!(
+        header("x-wallet-account").as_deref(),
+        Some("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+    );
+    assert_eq!(header("x-wallet-nonce").as_deref(), Some("1790000000000"));
+    assert_eq!(header("x-wallet-chain-id").as_deref(), Some("20056"));
+    assert_eq!(header("x-wallet-signature"), Some(expected.signature));
+    for name in [
+        "x-api-key",
+        "x-agent",
+        "x-signature",
+        "x-timestamp",
+        "x-nonce",
+        "authorization",
+    ] {
+        assert!(header(name).is_none(), "{name} sent on revoke");
+    }
+}

@@ -447,7 +447,7 @@ impl From<TifArg> for TimeInForce {
 /// `#[cfg(test)]`: it is a claim about the mapping below, not a value the binary
 /// has any use for at runtime.
 #[cfg(test)]
-const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.12.0";
+const NETWORK_AXIS_VERIFIED_AGAINST: &str = "0.13.1";
 
 impl NetworkArg {
     /// The SDK network for a built-in variant, or `None` for a custom label,
@@ -874,7 +874,7 @@ impl Target {
             let label = self.network.label();
             bail!(
                 "custom network {label:?} declares no \"chain_id\", so there is no EIP-712 \
-                 domain to sign this registration under. Read it from that deployment's \
+                 domain to sign this agent authorization under. Read it from that deployment's \
                  `GET /metadata` and set \"chain_id\" on its \"custom_networks\" entry, or pass \
                  `--chain-id`. It is not defaulted to {DEFAULT_CHAIN_ID} (the exchange's own \
                  chain) because a signature made under the wrong domain may be valid on a \
@@ -1743,9 +1743,9 @@ pub enum OrderCommand {
         /// New order quantity (base units).
         #[arg(long)]
         quantity: Option<String>,
-        /// New time in force.
-        #[arg(long, value_enum)]
-        tif: Option<TifArg>,
+        // No `--tif`: the venue builds the replacement from the original order
+        // with only price and size overridden, so a time in force never took
+        // effect, and nexus-exchange dropped the setter (ENG-20051).
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
@@ -2044,10 +2044,28 @@ pub enum AgentsCommand {
         #[arg(long)]
         yes: bool,
     },
-    /// Revoke a registered agent by address.
+    /// Revoke a registered agent by address, authorized by an EIP-712
+    /// `RevokeAgentKey` signature from the owning wallet. That signature is the
+    /// only credential the server accepts for a revoke, so no API key, session
+    /// token or agent key is needed (none is sent). The wallet's raw private key
+    /// signs locally and is never written to disk or echoed.
     Revoke {
-        /// Agent address (0x-prefixed).
+        /// Agent address to revoke (`0x`-prefixed, 20 bytes).
         address: String,
+        /// Owning wallet's raw EVM private key (`0x`-prefix optional). Prefer the
+        /// env var or the hidden prompt over the flag, which is visible in your
+        /// shell history and process list.
+        #[arg(long, env = "NEXUS_PRIVATE_KEY", hide_env_values = true)]
+        private_key: Option<String>,
+        /// Single-use nonce, Unix milliseconds; defaults to now. The server
+        /// accepts it only within `[now-5min, now+60s]`, and only when it is
+        /// greater than the last nonce this wallet used to rename or revoke.
+        #[arg(long)]
+        nonce: Option<u64>,
+        /// EIP-712 domain chain id, sent as `x-wallet-chain-id`. Defaults the
+        /// same way as on `agents register`.
+        #[arg(long)]
+        chain_id: Option<u64>,
         /// Skip the confirmation prompt (required when not run interactively).
         #[arg(long)]
         yes: bool,
@@ -3527,7 +3545,12 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Agents {
-                action: AgentsCommand::Revoke { .. }
+                // Nonce and chain id default at call time, not parse time.
+                action: AgentsCommand::Revoke {
+                    nonce: None,
+                    chain_id: None,
+                    ..
+                }
             }
         ));
     }
