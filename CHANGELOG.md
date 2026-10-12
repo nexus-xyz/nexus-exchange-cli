@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.1...v0.6.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **credentials:** take a shared O_EXCL lock file alongside the flock (ENG-20052) ([#107](https://github.com/nexus-xyz/nexus-exchange-cli/issues/107)) ([3fbc8f2](https://github.com/nexus-xyz/nexus-exchange-cli/commit/3fbc8f2fea15c9d66902c6b1d7f4d0160f8e85fe))
+
 ## [0.6.1](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.0...v0.6.1) (2026-10-09)
 
 
