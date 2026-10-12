@@ -767,6 +767,24 @@ testnet key is not promoted to mainnet. The file is rewritten into the layout
 above the next time anything writes to it; you can also just re-run
 `nexus setup`.
 
+#### Concurrent writers
+
+Every write re-reads the file and renames a new copy over it while holding two
+locks, always in this order:
+
+1. `flock` on `.config.json.lock` (`LockFileEx` on Windows), which serializes
+   `nexus` processes.
+2. `.config.json.xlock`, created exclusively (`O_CREAT|O_EXCL`), which the
+   [MCP server](https://github.com/nexus-xyz/nexus-exchange-mcp) takes too,
+   since Node has no `flock`. It holds `pid=<pid> created_ms=<unix ms>` and is
+   deleted when the write ends. A writer that finds it retries with backoff for
+   up to 15 s, and deletes it once its mtime is over 10 s old (a crashed
+   writer). If a write fails with "is held", and no `nexus` or MCP process is
+   running, delete the file.
+
+CLI versions before this one take only the `flock`, so they do not exclude the
+MCP server.
+
 #### Wallet sign-in (session token)
 
 As an alternative to an HMAC key pair, you can authenticate with an EVM wallet.
