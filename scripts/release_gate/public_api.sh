@@ -43,7 +43,7 @@ python3 scripts/release_gate/test_cli_surface.py
 # The package's name and version, and where cargo puts the build, CARGO_TARGET_DIR included, so a
 # binary left in ./target by an older build is never the one listed. One `cargo metadata`, one
 # value per line.
-metadata="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; m=json.load(sys.stdin); p=m["packages"][0]; print(p["name"]); print(p["version"]); print(m["target_directory"])')"
+metadata="$(cargo metadata --no-deps --format-version 1 | python3 -I -c 'import json,sys; m=json.load(sys.stdin); p=m["packages"][0]; print(p["name"]); print(p["version"]); print(m["target_directory"])')"
 { read -r name; read -r version; read -r target_dir; } <<< "$metadata"
 
 work="$(mktemp -d)"

@@ -33,7 +33,7 @@
 #   scripts/release_gate/stub_server.py     answers 200 `[]` on every path           1  failed (no market)
 #   scripts/release_gate/stub_server.py 503 answers 503 on every path, an outage     2  unreachable
 #
-# Any of them coming out different, or not finishing within 60 s, fails the job as
+# Any of them coming out different, or not finishing within 180 s, fails the job as
 # `prepublish-smoke (outcomes)`: a smoke that cannot tell those apart would report an outage as a
 # failure or a broken release as an outage. A pass (exit 0) needs a testnet with markets, so only
 # the real read below shows it, on a release PR or a change to this gate. The probes run the binary
@@ -52,7 +52,7 @@ root="$(git rev-parse --show-toplevel)"
 cd "$root"
 # Where cargo puts the build, CARGO_TARGET_DIR included, so a binary left in ./target by an older
 # build is never the one tested.
-target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 work="$(mktemp -d)"
 stub_pid=""
@@ -83,13 +83,14 @@ summary() {
 # One `nexus market summary` against $1, or against testnet when $1 is empty, classified: sets
 # `code` (0 passed, 1 failed, 2 unreachable) and `line`, and prints nothing. The caller reports.
 #
-# $2, if set, is a hard limit in seconds (the probes'); `status` is then 124 if the read hit it.
-# The real read has none: the SDK's own 30 s timeout and its retries bound it.
+# $2, if set, is a hard limit in seconds (the probes'), enforced by $timeout_tool; `status` is
+# then 124 if the read hit it. The real read has none: the SDK's own 30 s timeout and its retries
+# bound it.
 read_markets() {
   local args=(--network testnet) target="testnet" error
   local run=(env -i PATH="/usr/bin:/bin" HOME="$work/home" "$work/bin/nexus")
   if [ -n "${2:-}" ]; then
-    run=(timeout "$2" "${run[@]}")
+    run=("$timeout_tool" "$2" "${run[@]}")
   fi
   # The testnet host is not a flag here: it is built into the SDK crate the binary names, so an
   # unreachable testnet can also be a stale crate pin.
@@ -147,12 +148,26 @@ EOF
   fi
 }
 
+# The probes' limit. Long enough for the SDK's retries with backoff on a transient error (a
+# client-side timeout alone took about 2 minutes), short enough that a hung probe ends the job.
+probe_limit=180
+# `timeout` is GNU coreutils; macOS has none by default, and Homebrew's coreutils names it
+# `gtimeout`. Without either the probes still run, only without their limit.
+if command -v timeout > /dev/null; then
+  timeout_tool="timeout"
+elif command -v gtimeout > /dev/null; then
+  timeout_tool="gtimeout"
+else
+  timeout_tool=""
+  echo "note: neither timeout nor gtimeout is installed, so the outcome probes run without their ${probe_limit} s limit"
+fi
+
 # The outcome probes (header). $1 names the case, $2 is the base URL, $3 the code it must give.
 probe() {
   local first
-  read_markets "$2" 60
-  if [ "$status" -eq 124 ]; then
-    echo "::error title=prepublish-smoke (outcomes)::The ${1} case did not finish within 60 s, so the smoke cannot be trusted to tell its outcomes apart."
+  read_markets "$2" "${timeout_tool:+$probe_limit}"
+  if [ -n "$timeout_tool" ] && [ "$status" -eq 124 ]; then
+    echo "::error title=prepublish-smoke (outcomes)::The ${1} case did not finish within ${probe_limit} s, so the smoke cannot be trusted to tell its outcomes apart."
     exit 1
   fi
   # The first line of what it printed: the cause of its error, or the first line of its JSON.
@@ -166,6 +181,8 @@ probe() {
 
 # The stub on a free port, answering $1 (empty: 200 `[]`) to everything. Sets stub_pid and port.
 start_stub() {
+  # Created first, so the read below never meets a missing file, however slowly the stub starts.
+  : > "$work/stub.port"
   python3 -I scripts/release_gate/stub_server.py ${1:+"$1"} > "$work/stub.port" &
   stub_pid=$!
   for _ in $(seq 100); do
