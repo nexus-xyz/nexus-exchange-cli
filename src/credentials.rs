@@ -327,8 +327,10 @@ fn legacy_credential_owner(cfg: &FileConfig) -> NetworkArg {
 /// part of the file goes through here, so two `nexus` processes saving different
 /// fields both survive instead of the last whole-file write dropping the other.
 ///
-/// The lock is advisory (`flock` on Unix, `LockFileEx` on Windows) and only
-/// binds `nexus` itself; it is released when the handle drops.
+/// Two locks, always taken in this order: the `flock` (`LockFileEx` on Windows)
+/// on `.config.json.lock`, which binds `nexus` processes, then the
+/// [`XLock`] on `.config.json.xlock`, which also binds the MCP server (Node has
+/// no `flock`). Both are released when they drop.
 pub fn update(change: impl FnOnce(&mut FileConfig)) -> Result<PathBuf> {
     let path = config_path()?;
     let dir = path.parent().expect("config path always has a parent");
@@ -339,6 +341,7 @@ pub fn update(change: impl FnOnce(&mut FileConfig)) -> Result<PathBuf> {
         .with_context(|| format!("failed to open {}", lock_path.display()))?;
     lock.lock()
         .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let _xlock = XLock::acquire(dir)?;
 
     let mut cfg = load()?.unwrap_or_default();
     change(&mut cfg);
@@ -464,6 +467,77 @@ fn open_private(path: &std::path::Path) -> io::Result<std::fs::File> {
         opts.mode(0o600);
     }
     opts.open(path)
+}
+
+/// The lock file shared with nexus-exchange-mcp (ENG-20052). Same protocol on
+/// both sides: create `.config.json.xlock` exclusively (`O_CREAT|O_EXCL`),
+/// write `pid=<pid> created_ms=<unix ms>` into it, hold it across the whole
+/// read-modify-write-rename, and delete it when done. A writer that finds it
+/// retries with backoff, and deletes it once its mtime is [`XLOCK_STALE`] old.
+struct XLock(PathBuf);
+
+/// ponytail: a lock older than 10 s is taken as left by a crashed writer and
+/// broken. A real write takes milliseconds, so the only cost is a write stalled
+/// past 10 s losing its lock. Two waiters breaking the same stale lock at once
+/// can both win; that needs a crash first, and a lock with an owner token to fix.
+const XLOCK_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Longer than [`XLOCK_STALE`], so a waiter always outlasts a dead lock.
+const XLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl XLock {
+    fn acquire(dir: &std::path::Path) -> Result<Self> {
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        let path = dir.join(".config.json.xlock");
+        let deadline = Instant::now() + XLOCK_WAIT;
+        let mut backoff = Duration::from_millis(5);
+        loop {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
+                Ok(mut f) => {
+                    let ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis());
+                    // Informational only: staleness is judged by mtime, so a
+                    // crash before this write still leaves a breakable lock.
+                    let _ = write!(f, "pid={} created_ms={ms}", std::process::id());
+                    return Ok(Self(path));
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("failed to create {}", path.display()))
+                }
+            }
+            let stale = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > XLOCK_STALE));
+            if stale {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if Instant::now() >= deadline {
+                let holder = std::fs::read_to_string(&path).unwrap_or_default();
+                anyhow::bail!(
+                    "{} is held ({holder}) by another nexus or MCP process; \
+                     delete it if neither is running",
+                    path.display()
+                );
+            }
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for XLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Write `bytes` to `path`, ensuring the file is owner-read/write only (`0600`).
@@ -1251,6 +1325,53 @@ mod tests {
             );
             assert!(cfg.acknowledged(&ns), "{ns}'s acknowledgement was lost");
         }
+    }
+
+    /// A held `.config.json.xlock` (an MCP server mid-write) blocks a writer
+    /// until it is released, and the writer removes its own lock (ENG-20052).
+    #[test]
+    fn a_held_xlock_blocks_a_writer_until_released() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("xlock-held");
+        let dir = config_path().unwrap().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let xlock = dir.join(".config.json.xlock");
+        std::fs::write(&xlock, "pid=1 created_ms=0").unwrap();
+
+        let writer = std::thread::spawn(|| save_session_token("testnet", "t").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(load().unwrap().is_none(), "wrote while the xlock was held");
+        std::fs::remove_file(&xlock).unwrap();
+        writer.join().unwrap();
+
+        let cfg = load().unwrap().expect("config should be present");
+        assert_eq!(
+            cfg.credentials_for("testnet")
+                .and_then(|c| c.session_token.as_deref()),
+            Some("t")
+        );
+        assert!(!xlock.exists(), "the writer left its xlock behind");
+    }
+
+    /// An xlock older than `XLOCK_STALE` was left by a crashed writer, so it is
+    /// broken rather than waited out.
+    #[test]
+    fn a_stale_xlock_is_broken() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _tmp = TempConfigHome::new("xlock-stale");
+        let dir = config_path().unwrap().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let xlock = dir.join(".config.json.xlock");
+        std::fs::File::create(&xlock)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - XLOCK_STALE * 2)
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        save_session_token("testnet", "t").unwrap();
+        assert!(start.elapsed() < XLOCK_STALE, "waited out a stale lock");
+        assert!(load().unwrap().is_some());
+        assert!(!xlock.exists());
     }
 
     /// `setup` holds its copy across interactive prompts. A token `auth login`
