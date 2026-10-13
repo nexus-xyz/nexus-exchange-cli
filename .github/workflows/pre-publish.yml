@@ -51,11 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Commands and flags of the release binary vs public-api.txt
         run: scripts/release_gate/public_api.sh
 
@@ -63,22 +63,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Release PR, or a change to this gate?
         id: mode
         env:
           HEAD_REF: ${{ github.head_ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # HEAD is the PR's merge commit (actions/checkout's default on pull_request), and its first
+          # parent is the base it was merged onto, so this lists the PR's own changes. Diffing from the
+          # event's base.sha also listed whatever landed on the base since, which flipped unrelated PRs
+          # into the testnet read.
+          if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
+            echo "::error title=prepublish-smoke::HEAD is not a merge commit, so the PR's own changes can't be listed"
+            exit 1
+          fi
           # Into a file, not a pipe: under pipefail a failed `git diff`, or one cut short by
           # `grep -q` (SIGPIPE), would read as "not a gate change" and skip the read quietly.
-          git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+          git diff --name-only 'HEAD^1' HEAD > "$RUNNER_TEMP/changed.txt"
           if [[ "$HEAD_REF" == release-please--* ]]; then
             echo "mode=release" >> "$GITHUB_OUTPUT"
           elif grep -qE '^(\.github/workflows/pre-publish\.yml|scripts/release_gate/)' "$RUNNER_TEMP/changed.txt"; then
@@ -100,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The release tags: the spec pin of the published version is read at `v<version>`.
           fetch-depth: 0
@@ -118,6 +125,10 @@ jobs:
       # longer matches the one recorded in release_verdict.py. A change to the monorepo's copy is
       # not seen from here: VENDORED.md says how to refresh.
       - name: Self-test the gate
+        env:
+          # The end-to-end tests fail instead of skipping if oasdiff is missing, so this step can't
+          # go green without running the classifier.
+          RELEASE_GATE_REQUIRE_OASDIFF: "1"
         run: python3 scripts/release_gate/test_release_verdict.py
       - name: Version proposed vs the spec change since the last publish
         env:
