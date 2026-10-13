@@ -17,6 +17,9 @@ name: Pre-publish
 # skipped reports nothing, and the PR waits on it forever. What changes on a release PR (head branch
 # `release-please--*`), or on a PR that edits this gate:
 #   * smoke makes the testnet read. Elsewhere it builds and installs the binary only, and says so.
+#     In both, before any read, smoke.sh points the binary just built at a dead port and at an
+#     empty stub (scripts/release_gate/stub_server.py) and fails unless they come out unreachable
+#     (2) and failed (1): the three outcomes are exercised on every PR, not only described.
 #   * verdict is enforced on a release PR. Elsewhere it reports what the next release will need.
 # The surface check is enforced on every PR, because the PR that changes the CLI is where the
 # snapshot has to move.
