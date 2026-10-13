@@ -1,0 +1,264 @@
+nexus (every command)  --agent-private-key <AGENT_PRIVATE_KEY> [env: NEXUS_AGENT_PRIVATE_KEY]
+nexus (every command)  --api-key <API_KEY> [env: NEXUS_API_KEY]
+nexus (every command)  --api-secret <API_SECRET> [env: NEXUS_API_SECRET]
+nexus (every command)  --base-url <BASE_URL> [env: NEXUS_BASE_URL]
+nexus (every command)  --network <NETWORK> [env: NEXUS_NETWORK]
+nexus (every command)  --output <OUTPUT> [env: NEXUS_OUTPUT] [default: human] [possible values: human, json]
+nexus (every command)  --paper [env: NEXUS_PAPER]
+nexus (every command)  --read-only [env: NEXUS_READ_ONLY]
+nexus (every command)  --session-token <SESSION_TOKEN> [env: NEXUS_SESSION_TOKEN]
+nexus (every command)  -h, --help
+nexus
+nexus  -V, --version
+nexus  usage: [OPTIONS] <COMMAND>
+nexus account
+nexus account  usage: [OPTIONS] <COMMAND>
+nexus account adl-history
+nexus account adl-history  --limit <LIMIT>
+nexus account adl-history  <ADDRESS>
+nexus account adl-history  usage: [OPTIONS] <ADDRESS>
+nexus account cancel-on-disconnect
+nexus account cancel-on-disconnect  usage: [OPTIONS] [COMMAND]
+nexus account cancel-on-disconnect set
+nexus account cancel-on-disconnect set  --yes
+nexus account cancel-on-disconnect set  <ENABLED> [possible values: true, false]
+nexus account cancel-on-disconnect set  usage: [OPTIONS] <ENABLED>
+nexus account credit
+nexus account credit  --amount <AMOUNT>
+nexus account credit  usage: [OPTIONS]
+nexus account deposit
+nexus account deposit  --yes
+nexus account deposit  <AMOUNT>
+nexus account deposit  usage: [OPTIONS] <AMOUNT>
+nexus account deposits
+nexus account deposits  --limit <LIMIT>
+nexus account deposits  usage: <COMMAND>
+nexus account deposits  usage: [OPTIONS]
+nexus account deposits create
+nexus account deposits create  --asset <ASSET>
+nexus account deposits create  --yes
+nexus account deposits create  <AMOUNT>
+nexus account deposits create  usage: [OPTIONS] <AMOUNT>
+nexus account equity-history
+nexus account equity-history  --limit <LIMIT>
+nexus account equity-history  usage: [OPTIONS]
+nexus account faucet
+nexus account faucet  usage: [OPTIONS]
+nexus account fees
+nexus account fees  usage: [OPTIONS]
+nexus account funding
+nexus account funding  --limit <LIMIT>
+nexus account funding  usage: [OPTIONS]
+nexus account margin
+nexus account margin  usage: [OPTIONS] <COMMAND>
+nexus account margin add
+nexus account margin add  --yes
+nexus account margin add  <AMOUNT>
+nexus account margin add  <MARKET_ID>
+nexus account margin add  usage: [OPTIONS] <MARKET_ID> <AMOUNT>
+nexus account margin remove
+nexus account margin remove  --yes
+nexus account margin remove  <AMOUNT>
+nexus account margin remove  <MARKET_ID>
+nexus account margin remove  usage: [OPTIONS] <MARKET_ID> <AMOUNT>
+nexus account portfolio-history
+nexus account portfolio-history  --limit <LIMIT>
+nexus account portfolio-history  --window <WINDOW> [possible values: day, week, month, all]
+nexus account portfolio-history  usage: [OPTIONS]
+nexus account rate-limit
+nexus account rate-limit  usage: [OPTIONS]
+nexus account state
+nexus account state  usage: [OPTIONS]
+nexus account summary
+nexus account summary  usage: [OPTIONS]
+nexus agents
+nexus agents  usage: [OPTIONS] <COMMAND>
+nexus agents list
+nexus agents list  usage: [OPTIONS]
+nexus agents register
+nexus agents register  --agent <AGENT>
+nexus agents register  --chain-id <CHAIN_ID>
+nexus agents register  --expires-at <EXPIRES_AT>
+nexus agents register  --label <LABEL>
+nexus agents register  --nonce <NONCE>
+nexus agents register  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
+nexus agents register  --yes
+nexus agents register  usage: [OPTIONS]
+nexus agents revoke
+nexus agents revoke  --chain-id <CHAIN_ID>
+nexus agents revoke  --nonce <NONCE>
+nexus agents revoke  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
+nexus agents revoke  --yes
+nexus agents revoke  <ADDRESS>
+nexus agents revoke  usage: [OPTIONS] <ADDRESS>
+nexus auth
+nexus auth  usage: [OPTIONS] <COMMAND>
+nexus auth login
+nexus auth login  --private-key <PRIVATE_KEY> [env: NEXUS_PRIVATE_KEY]
+nexus auth login  usage: [OPTIONS]
+nexus balance
+nexus balance  usage: [OPTIONS]
+nexus bridge
+nexus bridge  usage: [OPTIONS] <COMMAND>
+nexus bridge assets
+nexus bridge assets  usage: [OPTIONS]
+nexus bridge deposits
+nexus bridge deposits  --id <ID>
+nexus bridge deposits  usage: [OPTIONS]
+nexus candles
+nexus candles  --limit <LIMIT> [default: 200]
+nexus candles  --timeframe <TIMEFRAME> [default: 1m]
+nexus candles  <MARKET_ID>
+nexus candles  usage: [OPTIONS] <MARKET_ID>
+nexus closed-positions
+nexus closed-positions  --limit <LIMIT> [default: 100]
+nexus closed-positions  usage: [OPTIONS]
+nexus completions
+nexus completions  <SHELL> [possible values: bash, elvish, fish, powershell, zsh]
+nexus completions  usage: [OPTIONS] <SHELL>
+nexus examples
+nexus examples  usage: [OPTIONS] <COMMAND>
+nexus examples get
+nexus examples get  --dir <DIR>
+nexus examples get  --lang <LANG>
+nexus examples get  --ref <GIT_REF> [default: main]
+nexus examples get  <ID>
+nexus examples get  usage: [OPTIONS] <ID>
+nexus examples list
+nexus examples list  --lang <LANG>
+nexus examples list  --offline
+nexus examples list  --ref <GIT_REF> [default: main]
+nexus examples list  --track <TRACK>
+nexus examples list  usage: [OPTIONS]
+nexus examples show
+nexus examples show  --lang <LANG>
+nexus examples show  --offline
+nexus examples show  --ref <GIT_REF> [default: main]
+nexus examples show  <ID>
+nexus examples show  usage: [OPTIONS] <ID>
+nexus fills
+nexus fills  --limit <LIMIT> [default: 100]
+nexus fills  usage: [OPTIONS]
+nexus funding-rates
+nexus funding-rates  --limit <LIMIT> [default: 100]
+nexus funding-rates  <MARKET_ID>
+nexus funding-rates  usage: [OPTIONS] <MARKET_ID>
+nexus health
+nexus health  usage: [OPTIONS]
+nexus keys
+nexus keys  usage: [OPTIONS] <COMMAND>
+nexus keys create
+nexus keys create  --yes
+nexus keys create  usage: [OPTIONS]
+nexus keys delete
+nexus keys delete  --yes
+nexus keys delete  <KEY_ID>
+nexus keys delete  usage: [OPTIONS] <KEY_ID>
+nexus keys list
+nexus keys list  usage: [OPTIONS]
+nexus mark-price
+nexus mark-price  <MARKET_ID>
+nexus mark-price  usage: [OPTIONS] <MARKET_ID>
+nexus market
+nexus market  usage: [OPTIONS] <COMMAND>
+nexus market adl-events
+nexus market adl-events  --limit <LIMIT>
+nexus market adl-events  <MARKET_ID>
+nexus market adl-events  usage: [OPTIONS] <MARKET_ID>
+nexus market funding-samples
+nexus market funding-samples  --limit <LIMIT>
+nexus market funding-samples  <MARKET_ID>
+nexus market funding-samples  usage: [OPTIONS] <MARKET_ID>
+nexus market mark-price
+nexus market mark-price  <MARKET_ID>
+nexus market mark-price  usage: [OPTIONS] <MARKET_ID>
+nexus market risk-params
+nexus market risk-params  <MARKET_ID>
+nexus market risk-params  usage: [OPTIONS] <MARKET_ID>
+nexus market status
+nexus market status  <MARKET_ID>
+nexus market status  usage: [OPTIONS] <MARKET_ID>
+nexus market summary
+nexus market summary  usage: [OPTIONS]
+nexus market-status
+nexus market-status  <MARKET_ID>
+nexus market-status  usage: [OPTIONS] <MARKET_ID>
+nexus markets
+nexus markets  usage: [OPTIONS]
+nexus order
+nexus order  usage: [OPTIONS] <COMMAND>
+nexus order amend
+nexus order amend  --market <MARKET>
+nexus order amend  --price <PRICE>
+nexus order amend  --quantity <QUANTITY>
+nexus order amend  --yes
+nexus order amend  <ORDER_ID>
+nexus order amend  usage: [OPTIONS] --market <MARKET> <ORDER_ID>
+nexus order batch
+nexus order batch  --yes
+nexus order batch  <FILE>
+nexus order batch  usage: [OPTIONS] <FILE>
+nexus order cancel
+nexus order cancel  --all
+nexus order cancel  --market <MARKET>
+nexus order cancel  --yes
+nexus order cancel  [ORDER_ID]
+nexus order cancel  usage: [OPTIONS] [ORDER_ID]
+nexus order get
+nexus order get  --market <MARKET>
+nexus order get  <ORDER_ID>
+nexus order get  usage: [OPTIONS] --market <MARKET> <ORDER_ID>
+nexus order history
+nexus order history  --limit <LIMIT>
+nexus order history  usage: [OPTIONS]
+nexus order place
+nexus order place  --market <MARKET>
+nexus order place  --price <PRICE>
+nexus order place  --quantity <QUANTITY>
+nexus order place  --reduce-only
+nexus order place  --side <SIDE> [possible values: buy, sell]
+nexus order place  --tif <TIF> [default: gtc] [possible values: gtc, ioc, fok, post-only]
+nexus order place  --type <ORDER_TYPE> [possible values: limit, market]
+nexus order place  --yes
+nexus order place  usage: [OPTIONS] --market <MARKET> --side <SIDE> --type <ORDER_TYPE> --quantity <QUANTITY>
+nexus order preview
+nexus order preview  --market <MARKET>
+nexus order preview  --price <PRICE>
+nexus order preview  --quantity <QUANTITY>
+nexus order preview  --reduce-only
+nexus order preview  --side <SIDE> [possible values: buy, sell]
+nexus order preview  --tif <TIF> [default: gtc] [possible values: gtc, ioc, fok, post-only]
+nexus order preview  --type <ORDER_TYPE> [possible values: limit, market]
+nexus order preview  usage: [OPTIONS] --market <MARKET> --side <SIDE> --type <ORDER_TYPE> --quantity <QUANTITY>
+nexus orderbook
+nexus orderbook  <MARKET_ID>
+nexus orderbook  usage: [OPTIONS] <MARKET_ID>
+nexus orders
+nexus orders  usage: [OPTIONS]
+nexus positions
+nexus positions  usage: [OPTIONS]
+nexus setup
+nexus setup  usage: [OPTIONS]
+nexus stats
+nexus stats  usage: [OPTIONS]
+nexus stats-history
+nexus stats-history  usage: [OPTIONS]
+nexus summaries
+nexus summaries  usage: [OPTIONS]
+nexus ticker
+nexus ticker  <MARKET_ID>
+nexus ticker  usage: [OPTIONS] <MARKET_ID>
+nexus tickers
+nexus tickers  usage: [OPTIONS]
+nexus trades
+nexus trades  --limit <LIMIT> [default: 100]
+nexus trades  <MARKET_ID>
+nexus trades  usage: [OPTIONS] <MARKET_ID>
+nexus withdrawals
+nexus withdrawals  --limit <LIMIT> [default: 100]
+nexus withdrawals  usage: [OPTIONS]
+nexus ws
+nexus ws  --market <MARKET>
+nexus ws  --since <SINCE>
+nexus ws  <CHANNELS>...
+nexus ws  usage: [OPTIONS] <CHANNELS>...
