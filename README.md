@@ -171,8 +171,10 @@ own, with no **Approve and run workflows** click to wait for.
 - `prepublish-smoke`: the release binary, installed clean, lists markets on the
   public testnet (`nexus market summary`). *Testnet unreachable* fails under its
   own name. It is not a pass, so re-run the job once testnet answers. Before the
-  read, on every PR, the same binary is pointed at a dead port and at an empty
-  stub, and the job fails unless those come out *unreachable* and *failed*.
+  read, on every PR, the same binary is pointed at a dead port, an empty stub
+  and a stub answering 503, and the job fails unless those come out
+  *unreachable*, *failed* and *unreachable*. A pass is shown only by the real
+  read.
 - `prepublish-verdict`: the proposed version fits the spec change since the last
   published GitHub Release, graded by the monorepo's classifier
   (`scripts/release_gate/VENDORED.md`). Below 1.0 a breaking change needs a minor

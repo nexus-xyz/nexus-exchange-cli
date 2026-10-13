@@ -25,16 +25,20 @@
 # server's own message, which may say anything. `NEXUS_SMOKE_BASE_URL` points the read elsewhere,
 # through the binary's own `--base-url`.
 #
-# THE OUTCOMES ARE EXERCISED, NOT ONLY DESCRIBED. In both modes, after the build and before any
-# testnet read, the binary just built makes the same read twice through `--base-url`, and the
-# classification below has to give:
+# EXITS 2 AND 1 ARE EXERCISED ON EVERY PR; EXIT 0 ONLY BY THE REAL READ. In both modes, after the
+# build and before any testnet read, the binary just built makes the same read three times through
+# `--base-url`, and the classification below has to give:
 #
-#   http://127.0.0.1:1                 nothing listens there                   2  unreachable
-#   scripts/release_gate/stub_server.py answers 200 `[]` on every path         1  failed (no market)
+#   http://127.0.0.1:1                      nothing listens there                    2  unreachable
+#   scripts/release_gate/stub_server.py     answers 200 `[]` on every path           1  failed (no market)
+#   scripts/release_gate/stub_server.py 503 answers 503 on every path, an outage     2  unreachable
 #
-# Either one coming out different fails the job as `prepublish-smoke (outcomes)`: a smoke that
-# cannot tell those apart would report an outage as a pass or a broken release as an outage. The
-# probes run the binary directly, not this script, so they print none of the annotations below.
+# Any of them coming out different, or not finishing within 60 s, fails the job as
+# `prepublish-smoke (outcomes)`: a smoke that cannot tell those apart would report an outage as a
+# failure or a broken release as an outage. A pass (exit 0) needs a testnet with markets, so only
+# the real read below shows it, on a release PR or a change to this gate. The probes run the binary
+# directly, not this script, with its stdout and stderr captured, so they print no annotation of
+# their own: one plain line each, with the case, the exit code and the first line of the output.
 set -euo pipefail
 
 mode="read"
@@ -78,8 +82,15 @@ summary() {
 
 # One `nexus market summary` against $1, or against testnet when $1 is empty, classified: sets
 # `code` (0 passed, 1 failed, 2 unreachable) and `line`, and prints nothing. The caller reports.
+#
+# $2, if set, is a hard limit in seconds (the probes'); `status` is then 124 if the read hit it.
+# The real read has none: the SDK's own 30 s timeout and its retries bound it.
 read_markets() {
-  local args=(--network testnet) target="testnet" status error cause
+  local args=(--network testnet) target="testnet" error
+  local run=(env -i PATH="/usr/bin:/bin" HOME="$work/home" "$work/bin/nexus")
+  if [ -n "${2:-}" ]; then
+    run=(timeout "$2" "${run[@]}")
+  fi
   # The testnet host is not a flag here: it is built into the SDK crate the binary names, so an
   # unreachable testnet can also be a stale crate pin.
   local host_note="; its testnet host is the one built into the nexus-exchange crate in ${installed}"
@@ -90,10 +101,11 @@ read_markets() {
   fi
 
   set +e
-  nexus "${args[@]}" --output json market summary > "$work/out.json" 2> "$work/err.txt"
+  "${run[@]}" "${args[@]}" --output json market summary > "$work/out.json" 2> "$work/err.txt"
   status=$?
   set -e
 
+  cause=""
   if [ "$status" -eq 0 ]; then
     set +e
     line="$(python3 - "$work/out.json" "$target" <<'EOF'
@@ -137,35 +149,55 @@ EOF
 
 # The outcome probes (header). $1 names the case, $2 is the base URL, $3 the code it must give.
 probe() {
-  read_markets "$2"
+  local first
+  read_markets "$2" 60
+  if [ "$status" -eq 124 ]; then
+    echo "::error title=prepublish-smoke (outcomes)::The ${1} case did not finish within 60 s, so the smoke cannot be trusted to tell its outcomes apart."
+    exit 1
+  fi
+  # The first line of what it printed: the cause of its error, or the first line of its JSON.
+  first="$(printf '%s' "${cause:-$(head -n 1 "$work/out.json")}" | sed 's/^ *//')"
+  echo "outcome probe: ${1}: exit ${code}; ${first}"
   if [ "$code" -ne "$3" ]; then
     echo "::error title=prepublish-smoke (outcomes)::The ${1} case gave exit ${code}, not ${3}, so the smoke cannot be trusted to tell its outcomes apart: ${line}"
     exit 1
   fi
-  echo "outcome probe: ${1}: exit ${code}, as it must be"
+}
+
+# The stub on a free port, answering $1 (empty: 200 `[]`) to everything. Sets stub_pid and port.
+start_stub() {
+  python3 -I scripts/release_gate/stub_server.py ${1:+"$1"} > "$work/stub.port" &
+  stub_pid=$!
+  for _ in $(seq 100); do
+    [ -s "$work/stub.port" ] && break
+    sleep 0.1
+  done
+  port="$(head -n 1 "$work/stub.port")"
+  if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    echo "::error title=prepublish-smoke (outcomes)::scripts/release_gate/stub_server.py ${1:-} did not print its port within 10 s."
+    exit 1
+  fi
+}
+
+stop_stub() {
+  kill "$stub_pid" 2> /dev/null || true
+  wait "$stub_pid" 2> /dev/null || true
+  stub_pid=""
 }
 
 probe "unreachable (nothing listening on 127.0.0.1:1)" "http://127.0.0.1:1" 2
 
-python3 -I scripts/release_gate/stub_server.py > "$work/stub.port" &
-stub_pid=$!
-for _ in $(seq 100); do
-  [ -s "$work/stub.port" ] && break
-  sleep 0.1
-done
-port="$(head -n 1 "$work/stub.port")"
-if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-  echo "::error title=prepublish-smoke (outcomes)::scripts/release_gate/stub_server.py did not print its port within 10s."
-  exit 1
-fi
+start_stub
 probe "failed (a stub that answers [] with no market)" "http://127.0.0.1:${port}" 1
-kill "$stub_pid" 2> /dev/null || true
-wait "$stub_pid" 2> /dev/null || true
-stub_pid=""
+stop_stub
+
+start_stub 503
+probe "unreachable (a stub that answers 503, an outage)" "http://127.0.0.1:${port}" 2
+stop_stub
 
 if [ "$mode" = "build" ]; then
-  echo "::notice title=prepublish-smoke (read not attempted)::Not a release PR: the release binary built and ran from a clean install, and gave the unreachable and failed outcomes where it had to. No testnet read was made. The read runs on the release PR."
-  summary "build only" "Not a release PR: \`${installed}\` built and ran from a clean install, and gave *unreachable* against a dead port and *failed* against an empty stub, as it had to. No testnet read was attempted, so this is not a smoke pass."
+  echo "::notice title=prepublish-smoke (read not attempted)::Not a release PR: the release binary built and ran from a clean install, and gave the unreachable and failed outcomes where it had to (a dead port and a 503 stub unreachable, an empty stub failed). No testnet read was made, so a pass was not shown. The read runs on the release PR."
+  summary "build only" "Not a release PR: \`${installed}\` built and ran from a clean install, and gave *unreachable* against a dead port and a 503 stub and *failed* against an empty stub, as it had to. No testnet read was attempted, so this is not a smoke pass."
   exit 0
 fi
 
