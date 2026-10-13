@@ -100,7 +100,10 @@ def parse_help(text, where):
             continue
         indent = len(line) - len(line.lstrip(" "))
         if current is None or indent == 0:
-            raise HelpFormatError(f"{where}: a line outside any section: {line!r}")
+            raise HelpFormatError(
+                f"{where}: a line outside any section: {line!r}"
+                " (a clap `after_help` epilog prints one)"
+            )
         if indent > ENTRY_INDENT and sections[current]:
             spec, desc = sections[current][-1]
             sections[current][-1] = (spec, f"{desc} {line.strip()}")
@@ -146,11 +149,13 @@ def walk(binary, home, path=(), command_values=(), out=None):
 def fold_common(entries):
     """List once the flags and arguments every command has, under `nexus (every command)`.
 
-    The fold works in both directions, so read a diff of it with care. A flag that BECOMES global
-    turns N per-command lines into one `(every command)` line: N `-` lines and one `+`, although
-    no command lost anything. release_verdict.py reads those N lines as removals and asks for the
-    breaking (minor, below 1.0) bump; that is a false positive a person has to recognise, not a
-    reason to skip the bump check.
+    The fold works in both directions, so read a diff of it with care. It catches ANY item that
+    every command has, not only a `global = true` flag: a flag that BECOMES common, global or added
+    by hand to the last commands without it, turns N per-command lines into one `(every command)`
+    line, N `-` lines and one `+`, although no command lost anything. Adding `--yes` to every
+    command, for one, would fold the 13 `--yes` lines there are today into one. release_verdict.py
+    reads those N lines as removals and asks for the breaking (minor, below 1.0) bump; that is a
+    false positive a person has to recognise, not a reason to skip the bump check.
     """
     items = {}
     for (path, rank, item), _ in entries:
