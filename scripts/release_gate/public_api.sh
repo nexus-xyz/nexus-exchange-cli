@@ -28,11 +28,15 @@ esac
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
-name="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["name"])')"
-version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-# Where cargo puts the build, CARGO_TARGET_DIR included, so a binary left in ./target by an older
-# build is never the one listed.
-target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+# The generator's own tests first, on synthetic help text: a broken parser fails here as a broken
+# parser, before it can fail, or pass, on the listing below.
+python3 scripts/release_gate/test_cli_surface.py
+
+# The package's name and version, and where cargo puts the build, CARGO_TARGET_DIR included, so a
+# binary left in ./target by an older build is never the one listed. One `cargo metadata`, one
+# value per line.
+metadata="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; m=json.load(sys.stdin); p=m["packages"][0]; print(p["name"]); print(p["version"]); print(m["target_directory"])')"
+{ read -r name; read -r version; read -r target_dir; } <<< "$metadata"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -56,8 +60,10 @@ if diff -u --label "$SNAPSHOT (committed)" --label "$SNAPSHOT (built ${built})" 
   exit 0
 fi
 
-removed="$(grep -c '^-[^-]' "$work/diff.txt" || true)"
-added="$(grep -c '^+[^+]' "$work/diff.txt" || true)"
+# Below diff's two header lines (`--- ` and `+++ `), every line starting `-` or `+` is an item, one
+# that itself starts with `-` or `+` included.
+removed="$(tail -n +3 "$work/diff.txt" | grep -c '^-' || true)"
+added="$(tail -n +3 "$work/diff.txt" | grep -c '^+' || true)"
 cat "$work/diff.txt"
 echo "::error title=prepublish-surface::The built binary's commands and flags differ from $SNAPSHOT: ${removed} item(s) gone or changed, ${added} new. If that is deliberate, run scripts/release_gate/public_api.sh --write and commit $SNAPSHOT in this PR, so the change is in the diff a reviewer reads. A removal or change is breaking."
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

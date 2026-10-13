@@ -40,9 +40,13 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
 
 - `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` all pass — CI
   enforces these.
-- `python3 scripts/test_check_spec_drift.py` and
-  `python3 scripts/test_sdk_parity.py` pass (no network). CI runs both on every PR,
-  ahead of the checks they cover.
+- `python3 scripts/test_check_spec_drift.py`,
+  `python3 scripts/test_sdk_parity.py`,
+  `python3 scripts/release_gate/test_release_verdict.py` and
+  `python3 scripts/release_gate/test_cli_surface.py` pass (no network). CI runs
+  all four on every PR, ahead of the checks they cover. The verdict tests' end-to-end
+  cases skip without oasdiff 1.30.0 on PATH (or `$OASDIFF`); CI installs it and
+  fails them instead.
 - If you added, removed or changed a command, an argument or a flag, regenerate
   `public-api.txt` with `scripts/release_gate/public_api.sh --write` and commit it
   in the same PR. `prepublish-surface` fails on any difference, so a removal shows
