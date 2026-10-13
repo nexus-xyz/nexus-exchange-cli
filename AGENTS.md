@@ -45,8 +45,9 @@ The command-line client for the Nexus Exchange API, built on `nexus-exchange-rs`
   `python3 scripts/release_gate/test_release_verdict.py` and
   `python3 scripts/release_gate/test_cli_surface.py` pass (no network). CI runs
   all four on every PR, ahead of the checks they cover. The verdict tests' end-to-end
-  cases skip without oasdiff 1.30.0 on PATH (or `$OASDIFF`); CI installs it and
-  fails them instead.
+  cases skip when no oasdiff is found on PATH (or in `$OASDIFF`); another version
+  than 1.30.0 runs them and fails the version test. CI installs 1.30.0 and sets
+  `RELEASE_GATE_REQUIRE_OASDIFF=1`, so a missing one fails there instead of skipping.
 - If you added, removed or changed a command, an argument or a flag, regenerate
   `public-api.txt` with `scripts/release_gate/public_api.sh --write` and commit it
   in the same PR. `prepublish-surface` fails on any difference, so a removal shows
