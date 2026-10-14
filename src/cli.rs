@@ -2021,8 +2021,9 @@ pub enum AgentsCommand {
         /// `[now+1d, now+90d]`; defaults to 30 days from now when omitted.
         #[arg(long)]
         expires_at: Option<u64>,
-        /// Monotonic nonce; defaults to the current Unix-ms timestamp (a safe
-        /// starting value, per the spec).
+        /// The signing time, Unix milliseconds; defaults to now. The server
+        /// accepts it only within `[now-5min, now+60s]`, and only when it is
+        /// greater than the last nonce served for this agent key.
         #[arg(long)]
         nonce: Option<u64>,
         /// EIP-712 domain chain id (the exchange's chain id). Part of the signed

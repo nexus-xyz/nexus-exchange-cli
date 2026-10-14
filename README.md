@@ -858,7 +858,9 @@ nexus agents register --agent 0x<agent-address> --label my-bot
 
 `agents register` defaults the expiry to 30 days out, the nonce to the current
 Unix-ms timestamp, and the EIP-712 `chain-id` to the exchange chain (`393`);
-override any with `--expires-at` / `--nonce` / `--chain-id`.
+override any with `--expires-at` / `--nonce` / `--chain-id`. The nonce is the
+signing time: the server refuses one older than 5 minutes or more than 60 s
+ahead of its clock, so an override should be a fresh Unix-ms value too.
 
 `agents revoke <AGENT_ADDRESS>` is signed by the same wallet (EIP-712
 `RevokeAgentKey`), which is the only credential the server accepts for a revoke:

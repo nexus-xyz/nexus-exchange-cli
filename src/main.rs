@@ -1107,9 +1107,6 @@ async fn handle_agents(
             // signature is the authorization, so no API key / session token is
             // required. Defaults: expiry = now + 30d, nonce = now (Unix ms),
             // both inside the spec's accepted ranges.
-            let now_ms = unix_millis()?;
-            let expires_at = expires_at.unwrap_or(now_ms + THIRTY_DAYS_MS);
-            let nonce = nonce.unwrap_or(now_ms);
             // The signed domain follows the target the registration is *for*,
             // not a constant: a custom network on another chain would otherwise
             // be handed a signature that is valid somewhere else. A stage that
@@ -1125,6 +1122,11 @@ async fn handle_agents(
 
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;
+            // The clock is read after any key prompt, as on `revoke`: the
+            // server refuses a register nonce older than 5 minutes.
+            let now_ms = unix_millis()?;
+            let expires_at = expires_at.unwrap_or(now_ms + THIRTY_DAYS_MS);
+            let nonce = nonce.unwrap_or(now_ms);
             let registration: AgentRegistration = signer
                 .register_agent(&agent, expires_at, nonce, chain_id, target.network(), label)
                 .context("failed to sign agent registration")?;
