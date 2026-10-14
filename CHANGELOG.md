@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.2...v0.6.3) (2026-10-14)
+
+
+### Bug Fixes
+
+* **agents:** read the register nonce clock after the key prompt (ENG-21898) ([#109](https://github.com/nexus-xyz/nexus-exchange-cli/issues/109)) ([042deb3](https://github.com/nexus-xyz/nexus-exchange-cli/commit/042deb3c053781df2530528b1133edef4216ba2b))
+
 ## [0.6.2](https://github.com/nexus-xyz/nexus-exchange-cli/compare/v0.6.1...v0.6.2) (2026-10-12)
 
 
