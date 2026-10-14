@@ -631,15 +631,19 @@ pub fn account_state_json(s: &AccountState) -> String {
 
 /// Render the account's effective fee schedule (`GET /api/v1/account/fees`).
 ///
-/// The maker fee is signed — a negative value is a rebate paid to the maker — so
-/// it is labelled rather than left to be misread as a charge. The rate is scoped
-/// to the reported `schedule`, not a venue-wide guarantee, which the footnote
-/// says out loud.
+/// Rates are basis points to 0.1 bps (`2.8`, `-0.4`). The maker fee is signed —
+/// a negative value is a rebate paid to the maker, a positive one a fee the
+/// maker pays — so both are labelled rather than left to be misread. The rate is
+/// scoped to the reported `schedule`, not a venue-wide guarantee, which the
+/// footnote says out loud.
 pub fn account_fees(f: &AccountFees) -> String {
-    let maker = if f.maker_fee_bps < 0 {
-        format!("{} bps (rebate paid to you)", f.maker_fee_bps)
+    let maker_bps = f.maker_fee_bps.normalize();
+    let maker = if maker_bps < Decimal::ZERO {
+        format!("{maker_bps} bps (rebate paid to you)")
+    } else if maker_bps > Decimal::ZERO {
+        format!("{maker_bps} bps (fee you pay)")
     } else {
-        format!("{} bps", f.maker_fee_bps)
+        format!("{maker_bps} bps")
     };
     let volume = if f.volume_30d_estimated {
         format!("{} (estimated — may undercount)", f.volume_30d)
@@ -659,7 +663,7 @@ pub fn account_fees(f: &AccountFees) -> String {
     };
     let rows = [
         ("maker fee", maker),
-        ("taker fee", format!("{} bps", f.taker_fee_bps)),
+        ("taker fee", format!("{} bps", f.taker_fee_bps.normalize())),
         ("tier", safe(&f.tier)),
         ("schedule", safe(&f.schedule)),
         ("volume 30d", volume),
@@ -681,14 +685,26 @@ pub fn account_fees_json(f: &AccountFees) -> String {
     pretty(&json!({
         // Basis points stay JSON numbers, and maker stays signed: a negative
         // value is a rebate, so it must not be rendered unsigned.
-        "maker_fee_bps": f.maker_fee_bps,
-        "taker_fee_bps": f.taker_fee_bps,
+        "maker_fee_bps": bps_value(f.maker_fee_bps),
+        "taker_fee_bps": bps_value(f.taker_fee_bps),
         "tier": f.tier,
         "schedule": f.schedule,
         "volume_30d": f.volume_30d.to_string(),
         "volume_30d_estimated": f.volume_30d_estimated,
         "discounts": f.discounts.iter().map(|d| Value::Object(d.fields.clone())).collect::<Vec<_>>(),
     }))
+}
+
+/// A basis-point rate as a JSON number with the digits the SDK decoded: `5`
+/// stays the integer `5` and `2.8` stays `2.8`, as the API serves them.
+/// `json!` on a [`Decimal`] would render a string instead.
+fn bps_value(bps: Decimal) -> Value {
+    let text = bps.normalize().to_string();
+    match text.parse::<serde_json::Number>() {
+        Ok(n) => Value::Number(n),
+        // Unreachable for a Decimal's own text; a string beats a wrong number.
+        Err(_) => Value::String(text),
+    }
 }
 
 /// Render the portfolio time series (`GET /api/v1/account/portfolio-history`).
@@ -2929,11 +2945,16 @@ mod tests {
     }
 
     fn fees_fixture(maker_fee_bps: i32) -> AccountFees {
-        serde_json::from_value(json!({
-            "maker_fee_bps": maker_fee_bps, "taker_fee_bps": 5, "tier": "base",
-            "schedule": "standard", "volume_30d": "123456.78",
-            "volume_30d_estimated": false, "discounts": []
-        }))
+        fees_fixture_raw(&maker_fee_bps.to_string(), "5")
+    }
+
+    /// The rates as raw JSON number text, so a fixture can carry `2.8` exactly.
+    fn fees_fixture_raw(maker_fee_bps: &str, taker_fee_bps: &str) -> AccountFees {
+        serde_json::from_str(&format!(
+            r#"{{"maker_fee_bps": {maker_fee_bps}, "taker_fee_bps": {taker_fee_bps},
+                "tier": "base", "schedule": "standard", "volume_30d": "123456.78",
+                "volume_30d_estimated": false, "discounts": []}}"#
+        ))
         .unwrap()
     }
 
@@ -2946,8 +2967,13 @@ mod tests {
         // The rate is scoped to a schedule, not a venue-wide guarantee.
         assert!(human.contains("`standard` schedule"), "{human}");
 
-        // A positive fee is not mislabelled.
-        assert!(!account_fees(&fees_fixture(3)).contains("rebate"));
+        // A positive maker rate is a fee, not a rebate.
+        let human = account_fees(&fees_fixture(3));
+        assert!(human.contains("3 bps (fee you pay)"), "{human}");
+        assert!(!human.contains("rebate"), "{human}");
+        // Zero is neither.
+        let human = account_fees(&fees_fixture(0));
+        assert!(human.contains("maker fee       0 bps\n"), "{human}");
 
         let v: Value = serde_json::from_str(&account_fees_json(&fees_fixture(-2))).unwrap();
         // Bps stay signed JSON numbers; volume stays an exact decimal string.
@@ -2956,6 +2982,27 @@ mod tests {
         assert_eq!(v["volume_30d"], json!("123456.78"));
         assert_eq!(v["volume_30d_estimated"], json!(false));
         assert_eq!(v["discounts"], json!([]));
+    }
+
+    #[test]
+    fn account_fees_renders_a_fractional_rate_exactly() {
+        // From spec 0.9.123 a rate can be a tenth of a bps (ENG-21111).
+        let fees = fees_fixture_raw("-0.4", "2.8");
+        let human = account_fees(&fees);
+        assert!(human.contains("-0.4 bps (rebate paid to you)"), "{human}");
+        assert!(human.contains("2.8 bps"), "{human}");
+
+        let human = account_fees(&fees_fixture_raw("0.4", "2.8"));
+        assert!(human.contains("0.4 bps (fee you pay)"), "{human}");
+
+        // JSON keeps the served numbers: no string, no float noise, and a whole
+        // rate stays an integer.
+        let out = account_fees_json(&fees);
+        assert!(out.contains(r#""maker_fee_bps": -0.4"#), "{out}");
+        assert!(out.contains(r#""taker_fee_bps": 2.8"#), "{out}");
+        let out = account_fees_json(&fees_fixture_raw("-2", "5"));
+        assert!(out.contains(r#""maker_fee_bps": -2,"#), "{out}");
+        assert!(out.contains(r#""taker_fee_bps": 5,"#), "{out}");
     }
 
     #[test]
