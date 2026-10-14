@@ -2022,8 +2022,9 @@ pub enum AgentsCommand {
         #[arg(long)]
         expires_at: Option<u64>,
         /// The signing time, Unix milliseconds; defaults to now. The server
-        /// accepts it only within `[now-5min, now+60s]`, and only when it is
-        /// greater than the last nonce served for this agent key.
+        /// accepts it only when it is greater than the last nonce served for
+        /// this agent key, and once freshness is enforced (ENG-21517), only
+        /// within `[now-5min, now+60s]`.
         #[arg(long)]
         nonce: Option<u64>,
         /// EIP-712 domain chain id (the exchange's chain id). Part of the signed

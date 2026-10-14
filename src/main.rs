@@ -1122,8 +1122,9 @@ async fn handle_agents(
 
             let signer = EthSigner::from_hex(resolve_private_key(private_key)?)
                 .context("invalid EVM private key")?;
-            // The clock is read after any key prompt, as on `revoke`: the
-            // server refuses a register nonce older than 5 minutes.
+            // The clock is read after any key prompt, as on `revoke`: once
+            // freshness is enforced (ENG-21517), the server refuses a register
+            // nonce older than 5 minutes.
             let now_ms = unix_millis()?;
             let expires_at = expires_at.unwrap_or(now_ms + THIRTY_DAYS_MS);
             let nonce = nonce.unwrap_or(now_ms);
