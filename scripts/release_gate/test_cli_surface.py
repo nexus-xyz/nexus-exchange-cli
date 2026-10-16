@@ -140,6 +140,34 @@ class Walk(unittest.TestCase):
             listing(tree)
 
 
+class Aliases(unittest.TestCase):
+    # `visible_alias = "sum"` on `market summary`: clap appends `[aliases: sum]` to its line in the
+    # parent's `Commands:` section. A plain `alias` prints nothing, so the listing cannot see it.
+    ALIASED = {**TREE, ("market",): MARKET.replace(
+        "  summary  Per-market summaries\n", "  summary  Per-market summaries [aliases: sum]\n")}
+
+    def test_an_alias_is_listed_on_its_command_line(self):
+        lines = listing(self.ALIASED)
+        self.assertIn("nexus market summary [aliases: sum]", lines)
+        self.assertNotIn("nexus market summary", lines)
+
+    def test_an_alias_is_not_walked_as_a_command_of_its_own(self):
+        walked = []
+
+        def run_help(binary, path, home):
+            walked.append(tuple(path))
+            return self.ALIASED[tuple(path)]
+
+        with mock.patch.object(S, "run_help", run_help):
+            S.walk("nexus", "/nonexistent")
+        self.assertEqual(sorted(walked), sorted(TREE))
+        # Nothing else moves: the alias changes the one line and adds none.
+        self.assertEqual(
+            [line for line in listing(self.ALIASED) if line != "nexus market summary [aliases: sum]"],
+            [line for line in listing(TREE) if line != "nexus market summary"],
+        )
+
+
 class FoldCommon(unittest.TestCase):
     def test_a_flag_on_every_command_is_listed_once(self):
         lines = listing(TREE)
