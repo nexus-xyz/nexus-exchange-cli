@@ -43,10 +43,11 @@ jobs:
       # not a personal account (ENG-4354). Like a PAT, and unlike the built-in
       # GITHUB_TOKEN, an App-installation token CAN trigger the downstream
       # tag-listening release.yml.
-      - uses: actions/create-github-app-token@v3
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          # The App's numeric ID works as client-id: the action sends either one as the JWT issuer.
+          client-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
       # Split into two invocations, with the tag creation between them. A single
