@@ -1,5 +1,9 @@
 # nexus-exchange-cli
 
+> [!WARNING]
+> **This repository is archived and no longer maintained.** The Nexus Exchange API it was built for is being
+> shut down, and no further releases will be published.
+
 `nexus` — a command-line interface for the [Nexus Exchange](https://exchange.nexus.xyz)
 API, built on the official [`nexus-exchange`](https://github.com/nexus-xyz/nexus-exchange-rs)
 Rust SDK.
