@@ -26,12 +26,15 @@
 # through the binary's own `--base-url`.
 #
 # EXITS 2 AND 1 ARE EXERCISED ON EVERY PR; EXIT 0 ONLY BY THE REAL READ. In both modes, after the
-# build and before any testnet read, the binary just built makes the same read three times through
+# build and before any testnet read, the binary just built makes the same read four times through
 # `--base-url`, and the classification below has to give:
 #
-#   http://127.0.0.1:1                      nothing listens there                    2  unreachable
-#   scripts/release_gate/stub_server.py     answers 200 `[]` on every path           1  failed (no market)
-#   scripts/release_gate/stub_server.py 503 answers 503 on every path, an outage     2  unreachable
+#   http://127.0.0.1:1                           nothing listens there                    2  unreachable
+#   scripts/release_gate/stub_server.py          answers 200 `[]` on every path           1  failed (no market)
+#   scripts/release_gate/stub_server.py 503      answers 503 on every path, an outage     2  unreachable
+#   scripts/release_gate/stub_server.py 404 FILE answers 404 with a `{ code, message }`   1  failed (a 404)
+#                                                body whose message has a line reading
+#                                                "network error"
 #
 # Any of them coming out different, or not finishing within 180 s, fails the job as
 # `prepublish-smoke (outcomes)`: a smoke that cannot tell those apart would report an outage as a
@@ -179,19 +182,22 @@ probe() {
   fi
 }
 
-# The stub on a free port, answering $1 (empty: 200 `[]`) to everything. Sets stub_pid and port.
+# The stub on a free port, answering $1 (empty: 200 `[]`) to everything, with the bytes of file $2
+# as the body if it is given. Sets stub_pid and port.
 start_stub() {
   # Created first, so the read below never meets a missing file, however slowly the stub starts.
   : > "$work/stub.port"
-  python3 -I scripts/release_gate/stub_server.py ${1:+"$1"} > "$work/stub.port" &
+  python3 -I scripts/release_gate/stub_server.py ${1:+"$1"} ${2:+"$2"} > "$work/stub.port" &
   stub_pid=$!
+  # Wait for the first line to end (a newline in the file), or for the stub to die: a non-empty
+  # file can still hold half the port (ENG-21487).
   for _ in $(seq 100); do
-    [ -s "$work/stub.port" ] && break
+    if [ "$(wc -l < "$work/stub.port")" -ge 1 ] || ! kill -0 "$stub_pid" 2>/dev/null; then break; fi
     sleep 0.1
   done
   port="$(head -n 1 "$work/stub.port")"
   if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-    echo "::error title=prepublish-smoke (outcomes)::scripts/release_gate/stub_server.py ${1:-} did not print its port within 10 s."
+    echo "::error title=prepublish-smoke (outcomes)::scripts/release_gate/stub_server.py ${1:-} ${2:-} did not print its port within 10 s."
     exit 1
   fi
 }
@@ -212,9 +218,17 @@ start_stub 503
 probe "unreachable (a stub that answers 503, an outage)" "http://127.0.0.1:${port}" 2
 stop_stub
 
+# The API's `{ code, message }` error envelope, which the SDK decodes into the error it prints. The
+# message's second line reads "network error", as the SDK's own transport error does: only the
+# first line of the cause is classified, so this is a 404 and must fail, not read as unreachable.
+printf '%s' '{"code": "NOT_FOUND", "message": "no such route\nnetwork error: connection refused"}' > "$work/404.json"
+start_stub 404 "$work/404.json"
+probe "failed (a stub that answers 404 with \"network error\" in its message)" "http://127.0.0.1:${port}" 1
+stop_stub
+
 if [ "$mode" = "build" ]; then
-  echo "::notice title=prepublish-smoke (read not attempted)::Not a release PR: the release binary built and ran from a clean install, and gave the unreachable and failed outcomes where it had to (a dead port and a 503 stub unreachable, an empty stub failed). No testnet read was made, so a pass was not shown. The read runs on the release PR."
-  summary "build only" "Not a release PR: \`${installed}\` built and ran from a clean install, and gave *unreachable* against a dead port and a 503 stub and *failed* against an empty stub, as it had to. No testnet read was attempted, so this is not a smoke pass."
+  echo "::notice title=prepublish-smoke (read not attempted)::Not a release PR: the release binary built and ran from a clean install, and gave the unreachable and failed outcomes where it had to (a dead port and a 503 stub unreachable, an empty stub and a 404 stub failed). No testnet read was made, so a pass was not shown. The read runs on the release PR."
+  summary "build only" "Not a release PR: \`${installed}\` built and ran from a clean install, and gave *unreachable* against a dead port and a 503 stub and *failed* against an empty stub and a 404 stub, as it had to. No testnet read was attempted, so this is not a smoke pass."
   exit 0
 fi
 

@@ -18,8 +18,9 @@ name: Pre-publish
 # `release-please--*`), or on a PR that edits this gate:
 #   * smoke makes the testnet read. Elsewhere it builds and installs the binary only, and says so.
 #     In both, before any read, smoke.sh points the binary just built at a dead port, an empty
-#     stub and a stub answering 503 (scripts/release_gate/stub_server.py), and fails unless they
-#     come out unreachable (2), failed (1) and unreachable (2). So exits 2 and 1 are exercised on
+#     stub, a stub answering 503 and one answering 404 with "network error" in its message
+#     (scripts/release_gate/stub_server.py), and fails unless they come out unreachable (2),
+#     failed (1), unreachable (2) and failed (1). So exits 2 and 1 are exercised on
 #     every PR; exit 0, a pass, only by the real read, on a release PR or a change to this gate.
 #   * verdict is enforced on a release PR. Elsewhere it reports what the next release will need.
 # The surface check is enforced on every PR, because the PR that changes the CLI is where the
@@ -89,8 +90,10 @@ jobs:
           # parent is the base it was merged onto, so this lists the PR's own changes. Diffing from the
           # event's base.sha also listed whatever landed on the base since, which flipped unrelated PRs
           # into the testnet read.
+          # Failing here is deliberate (ENG-21487): a PR with conflicts can't merge anyway, and
+          # guessing its changes from base.sha is what this step replaced.
           if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
-            echo "::error title=prepublish-smoke::HEAD is not a merge commit, or the checkout is shallow (this job needs fetch-depth: 0), so the PR's own changes can't be listed"
+            echo "::error title=prepublish-smoke::HEAD is not a merge commit, so the PR's own changes can't be listed. Either the PR has merge conflicts with its base (GitHub makes no merge commit for it: resolve them and the checks run again), or the checkout is shallow (this job needs fetch-depth: 0)"
             exit 1
           fi
           # Into a file, not a pipe: under pipefail a failed `git diff`, or one cut short by
