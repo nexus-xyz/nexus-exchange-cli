@@ -85,10 +85,11 @@ jobs:
       # GITHUB_TOKEN leaves its CI / spec-drift runs at `action_required` until a
       # human approves them; one opened with an App-installation token runs them
       # (ENG-17793).
-      - uses: actions/create-github-app-token@v3
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          # The App's numeric ID works as client-id: the action sends either one as the JWT issuer.
+          client-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
       - uses: actions/checkout@v4
